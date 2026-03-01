@@ -1,15 +1,26 @@
-SYSTEM_EXTRACAO = """Analise a mensagem e extraia dados profissionais do usuario.
+SYSTEM_EXTRACAO = """Analise a conversa e extraia TODOS os dados profissionais do usuario.
+O usuario pode estar pedindo para salvar infos de um curriculo ou analise anterior na conversa.
+Leia o historico completo da conversa para encontrar os dados.
 
-Retorne APENAS JSON valido:
+Retorne APENAS JSON valido com todos os campos encontrados (deixe vazio se nao houver):
 {
-  "habilidades": [{"nome": "Python", "nivel": 4, "anos_exp": 3}],
+  "nome": "",
+  "email": "",
+  "telefone": "",
+  "linkedin": "",
+  "github": "",
+  "localizacao": "",
   "cargo_atual": "",
   "nivel_senioridade": "",
   "pretensao_salarial": "",
   "modalidade_preferida": "",
-  "localizacao": "",
-  "cargos_desejados": ["Desenvolvedor Backend"],
-  "setores_interesse": ["tech", "fintech"]
+  "cargos_desejados": [],
+  "setores_interesse": [],
+  "idiomas": [],
+  "habilidades": [{"nome": "Python", "nivel": 4, "anos_exp": 3}],
+  "experiencias": [{"cargo": "", "empresa": "", "inicio": "", "fim": "atual", "descricao": ""}],
+  "formacao": [{"curso": "", "instituicao": "", "nivel": "graduacao", "ano": "2027"}],
+  "idiomas": [{"idioma": "Inglês", "nivel": "fluente"}]
 }
 
 nivel de habilidade: 1=basico, 2=basico-medio, 3=intermediario, 4=avancado, 5=especialista
@@ -43,11 +54,13 @@ Seja breve e confirme a acao realizada.
 """
 
 
-def build_extracao_messages(mensagem: str) -> list[dict]:
-    return [
-        {"role": "system", "content": SYSTEM_EXTRACAO},
-        {"role": "user", "content": mensagem},
-    ]
+def build_extracao_messages(mensagem: str, history: list[dict] | None = None) -> list[dict]:
+    messages = [{"role": "system", "content": SYSTEM_EXTRACAO}]
+    # Inclui últimas 6 mensagens do histórico para capturar contexto de CV anterior
+    for msg in (history or [])[-6:]:
+        messages.append(msg)
+    messages.append({"role": "user", "content": mensagem})
+    return messages
 
 
 def build_perfil_messages(perfil: dict, mensagem: str) -> list[dict]:

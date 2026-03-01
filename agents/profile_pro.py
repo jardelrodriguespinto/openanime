@@ -13,11 +13,15 @@ logger = logging.getLogger(__name__)
 
 _KEYWORDS_MOSTRAR = [
     "mostra", "ver", "mostrar", "exibir", "qual", "meu perfil",
-    "minhas habilidades", "minha experiencia", "curriculo",
+    "minhas habilidades", "minha experiencia",
 ]
 _KEYWORDS_EDITAR = [
     "atualiza", "muda", "altera", "adiciona", "remove", "coloca",
     "minha pretensao", "quero trabalhar", "sou senior", "sou junior",
+    # Referências a contexto anterior (CV enviado, análise anterior)
+    "guarde", "salva", "salve", "preencha", "preenche", "este sou eu",
+    "sou eu", "minhas infos", "meus dados", "pega o que mandei",
+    "pega o curriculo", "usa o curriculo", "com base no que mandei",
 ]
 
 
@@ -47,8 +51,9 @@ def profile_pro_node(state: dict) -> dict:
     if mostrar and not editar:
         return _mostrar_perfil(user_id, state.get("raw_input", ""))
 
-    # Tenta extrair dados da mensagem
-    messages = pp_prompt.build_extracao_messages(state.get("raw_input", ""))
+    # Tenta extrair dados da mensagem + histórico (captura CVs analisados anteriormente)
+    history = state.get("messages", [])
+    messages = pp_prompt.build_extracao_messages(state.get("raw_input", ""), history)
     try:
         raw = openrouter.orchestrate(messages)
         dados = _parse_json_safe(raw)
@@ -56,7 +61,12 @@ def profile_pro_node(state: dict) -> dict:
         logger.debug("profile_pro: erro extracao: %s", e)
         dados = {}
 
-    if dados and (dados.get("habilidades") or dados.get("pretensao_salarial") or dados.get("modalidade_preferida")):
+    _campos_relevantes = (
+        dados.get("habilidades") or dados.get("pretensao_salarial") or
+        dados.get("modalidade_preferida") or dados.get("nome") or
+        dados.get("experiencias") or dados.get("formacao") or dados.get("cargo_atual")
+    )
+    if dados and _campos_relevantes:
         _aplicar_atualizacoes(user_id, dados)
         return _mostrar_perfil(user_id, "me mostra o perfil atualizado", confirmacao=True)
 
@@ -89,30 +99,9 @@ def _aplicar_atualizacoes(user_id: str, dados: dict) -> None:
     """Aplica atualizacoes extraidas da mensagem no Neo4j."""
     try:
         neo4j = get_neo4j()
-
-        for habilidade in dados.get("habilidades", []):
-            if habilidade.get("nome"):
-                neo4j.upsert_habilidade(
-                    user_id,
-                    habilidade["nome"],
-                    habilidade.get("nivel", 3),
-                    habilidade.get("anos_exp", 0),
-                )
-
-        prefs = {}
-        if dados.get("pretensao_salarial"):
-            prefs["pretensao_salarial"] = dados["pretensao_salarial"]
-        if dados.get("modalidade_preferida"):
-            prefs["modalidade_preferida"] = dados["modalidade_preferida"]
-        if dados.get("nivel_senioridade"):
-            prefs["nivel_senioridade"] = dados["nivel_senioridade"]
-        if dados.get("localizacao"):
-            prefs["localizacao"] = dados["localizacao"]
-        if dados.get("cargo_atual"):
-            prefs["cargo_atual"] = dados["cargo_atual"]
-
-        if prefs:
-            neo4j.salvar_preferencias_emprego(user_id, prefs)
+        # salvar_perfil_profissional já lida com campos básicos, habilidades,
+        # experiencias, formacao e idiomas de uma vez
+        neo4j.salvar_perfil_profissional(user_id, dados)
 
         for cargo in dados.get("cargos_desejados", []):
             if cargo:
