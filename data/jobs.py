@@ -447,6 +447,315 @@ def _buscar_linkedin(query: str, localizacao: str = "", limite: int = JOBS_LIMIT
     return vagas
 
 
+# ─── Fonte 6: WeWorkRemotely RSS ─────────────────────────────────────────────
+
+def _buscar_weworkremotely(query: str, limite: int = JOBS_LIMITE_POR_FONTE) -> list[Vaga]:
+    """Busca vagas remotas via WeWorkRemotely RSS (EN)."""
+    vagas: list[Vaga] = []
+    feeds = [
+        "https://weworkremotely.com/categories/remote-programming-jobs.rss",
+        "https://weworkremotely.com/categories/remote-full-stack-programming-jobs.rss",
+        "https://weworkremotely.com/remote-jobs.rss",
+    ]
+    query_en = query.lower()
+    for pt, en in _PT_EN.items():
+        query_en = query_en.replace(pt, en)
+    query_terms = [t for t in query_en.split() if len(t) > 2]
+
+    try:
+        for feed_url in feeds:
+            feed = feedparser.parse(feed_url)
+            for entry in feed.entries:
+                titulo = entry.get("title", "").strip()
+                texto = f"{titulo} {entry.get('summary', '')}".lower()
+                if query_terms and not any(t in texto for t in query_terms):
+                    continue
+                empresa = ""
+                if ":" in titulo:
+                    partes = titulo.split(":", 1)
+                    empresa, titulo = partes[0].strip(), partes[1].strip()
+                link = entry.get("link", "")
+                vagas.append(Vaga(
+                    id=f"wwr_{hash(link or titulo) % 1000000}",
+                    titulo=titulo, empresa=empresa,
+                    localizacao="Remoto", modalidade="remoto",
+                    salario="A combinar",
+                    descricao=entry.get("summary", "")[:500],
+                    requisitos=_extrair_requisitos(entry.get("summary", "")),
+                    url=link, fonte="WeWorkRemotely",
+                    data_publicacao=entry.get("published", ""),
+                ))
+                if len(vagas) >= limite:
+                    break
+            if len(vagas) >= limite:
+                break
+        if vagas:
+            logger.info("weworkremotely: %d vagas para '%s'", len(vagas), query)
+    except Exception as e:
+        logger.debug("weworkremotely: erro: %s", e)
+    return vagas
+
+
+# ─── Fonte 7: WorkingNomads API (JSON publica) ────────────────────────────────
+
+def _buscar_workingnomads(query: str, limite: int = JOBS_LIMITE_POR_FONTE) -> list[Vaga]:
+    """Busca vagas remotas via WorkingNomads API publica."""
+    vagas: list[Vaga] = []
+    try:
+        query_en = query.lower()
+        for pt, en in _PT_EN.items():
+            query_en = query_en.replace(pt, en)
+        slug = query_en.split()[0] if query_en else "developer"
+        url = f"https://www.workingnomads.com/api/exposed_jobs/?category={quote_plus(slug)}&limit={limite}"
+        with httpx.Client(timeout=15, headers=_HEADERS, follow_redirects=True) as client:
+            resp = client.get(url)
+            if resp.status_code != 200:
+                # fallback: busca geral
+                resp = client.get(f"https://www.workingnomads.com/api/exposed_jobs/?limit={limite}")
+            if resp.status_code != 200:
+                return []
+            data = resp.json()
+            jobs = data if isinstance(data, list) else data.get("results", [])
+            query_terms = [t for t in query_en.split() if len(t) > 2]
+            for item in jobs[:limite * 2]:
+                titulo = (item.get("title") or "").strip()
+                empresa = (item.get("company_name") or "").strip()
+                descricao = (item.get("description") or "").strip()
+                texto = f"{titulo} {descricao}".lower()
+                if query_terms and not any(t in texto for t in query_terms):
+                    continue
+                link = item.get("url") or item.get("apply_url") or ""
+                vagas.append(Vaga(
+                    id=f"workingnomads_{hash(link or titulo) % 1000000}",
+                    titulo=titulo, empresa=empresa,
+                    localizacao="Remoto", modalidade="remoto",
+                    salario="A combinar",
+                    descricao=descricao[:500],
+                    requisitos=_extrair_requisitos(descricao),
+                    url=link, fonte="WorkingNomads",
+                    data_publicacao=item.get("pub_date", ""),
+                ))
+                if len(vagas) >= limite:
+                    break
+        if vagas:
+            logger.info("workingnomads: %d vagas para '%s'", len(vagas), query)
+    except Exception as e:
+        logger.debug("workingnomads: erro: %s", e)
+    return vagas
+
+
+# ─── Fonte 8: Programathor (tech Brasil) ─────────────────────────────────────
+
+def _buscar_programathor(query: str, limite: int = JOBS_LIMITE_POR_FONTE) -> list[Vaga]:
+    """Busca vagas via Programathor (tech jobs Brasil, scraping)."""
+    vagas: list[Vaga] = []
+    try:
+        url = f"https://programathor.com.br/jobs?search={quote_plus(query)}"
+        with httpx.Client(timeout=15, headers=_HEADERS, follow_redirects=True) as client:
+            resp = client.get(url)
+            if resp.status_code != 200:
+                return []
+            soup = BeautifulSoup(resp.text, "html.parser")
+            cards = soup.find_all(class_=re.compile(r"job-opportunity|job-card|cell-list-developer"))
+            for card in cards[:limite]:
+                titulo_el = card.find(["h2", "h3", "h4"])
+                empresa_el = card.find(class_=re.compile(r"company|empresa"))
+                local_el = card.find(class_=re.compile(r"location|city|cidade"))
+                link_el = card.find("a", href=True)
+                titulo = titulo_el.get_text(strip=True) if titulo_el else ""
+                empresa = empresa_el.get_text(strip=True) if empresa_el else ""
+                local = local_el.get_text(strip=True) if local_el else "Brasil"
+                href = link_el.get("href", "") if link_el else ""
+                link = f"https://programathor.com.br{href}" if href.startswith("/") else href
+                if not titulo:
+                    continue
+                vagas.append(Vaga(
+                    id=f"programathor_{hash(link or titulo) % 1000000}",
+                    titulo=titulo, empresa=empresa,
+                    localizacao=local,
+                    modalidade=_normalizar_modalidade(local),
+                    salario="A combinar", descricao="",
+                    url=link, fonte="Programathor",
+                ))
+        if vagas:
+            logger.info("programathor: %d vagas para '%s'", len(vagas), query)
+    except Exception as e:
+        logger.debug("programathor: erro: %s", e)
+    return vagas
+
+
+# ─── Fonte 9: Revelo (Brasil, tech) ──────────────────────────────────────────
+
+def _buscar_revelo(query: str, limite: int = JOBS_LIMITE_POR_FONTE) -> list[Vaga]:
+    """Busca vagas via Revelo (scraping pagina publica)."""
+    vagas: list[Vaga] = []
+    try:
+        url = f"https://www.revelo.com.br/vagas?q={quote_plus(query)}&remote=true"
+        with httpx.Client(timeout=15, headers=_HEADERS, follow_redirects=True) as client:
+            resp = client.get(url)
+            if resp.status_code != 200:
+                return []
+            soup = BeautifulSoup(resp.text, "html.parser")
+            cards = soup.find_all(class_=re.compile(r"job-card|opportunity|position"))
+            for card in cards[:limite]:
+                titulo_el = card.find(["h2", "h3"])
+                empresa_el = card.find(class_=re.compile(r"company"))
+                link_el = card.find("a", href=True)
+                titulo = titulo_el.get_text(strip=True) if titulo_el else ""
+                empresa = empresa_el.get_text(strip=True) if empresa_el else ""
+                href = link_el.get("href", "") if link_el else ""
+                link = f"https://www.revelo.com.br{href}" if href.startswith("/") else href
+                if not titulo:
+                    continue
+                vagas.append(Vaga(
+                    id=f"revelo_{hash(link or titulo) % 1000000}",
+                    titulo=titulo, empresa=empresa,
+                    localizacao="Brasil", modalidade="remoto",
+                    salario="A combinar", descricao="",
+                    url=link, fonte="Revelo",
+                ))
+        if vagas:
+            logger.info("revelo: %d vagas para '%s'", len(vagas), query)
+    except Exception as e:
+        logger.debug("revelo: erro: %s", e)
+    return vagas
+
+
+# ─── Fonte 10: Google Dorks (DuckDuckGo como proxy gratuito) ─────────────────
+
+_DORK_SITES = [
+    "revelo.com.br", "trampos.co", "programathor.com.br", "remotar.com.br",
+    "weworkremotely.com", "remoteok.com", "gupy.io",
+]
+
+
+def _buscar_google_dork(query: str, localizacao: str = "", limite: int = JOBS_LIMITE_POR_FONTE) -> list[Vaga]:
+    """
+    Usa DuckDuckGo Lite como motor de busca com Google Dork para encontrar
+    vagas em multiplos sites ao mesmo tempo.
+    site:gupy.io OR site:trampos.co <query> <localizacao> vaga emprego
+    """
+    vagas: list[Vaga] = []
+    try:
+        sites_dork = " OR ".join(f"site:{s}" for s in _DORK_SITES)
+        loc_str = f" {localizacao}" if localizacao and localizacao.lower() != "remoto" else ""
+        dork = f"({sites_dork}) {query}{loc_str} vaga emprego"
+
+        with httpx.Client(timeout=20, headers=_HEADERS, follow_redirects=True) as client:
+            resp = client.get(
+                "https://lite.duckduckgo.com/lite/",
+                params={"q": dork},
+            )
+            if resp.status_code != 200:
+                return []
+
+            soup = BeautifulSoup(resp.text, "html.parser")
+            links = soup.find_all("a", class_=re.compile(r"result-link|link"), href=True)
+            if not links:
+                links = soup.select("a.result-link") or soup.select("a[href*='http']")
+
+            vistas_dork: set[str] = set()
+            for link_el in links[:limite * 2]:
+                href = link_el.get("href", "")
+                if not href or href.startswith("/") or "duckduckgo" in href:
+                    continue
+                # Filtra apenas dos sites alvo
+                if not any(s in href for s in _DORK_SITES):
+                    continue
+                titulo = link_el.get_text(strip=True) or href
+                if href in vistas_dork:
+                    continue
+                vistas_dork.add(href)
+                # Detecta fonte pelo dominio
+                fonte = next((s.split(".")[0].capitalize() for s in _DORK_SITES if s in href), "Dork")
+                vagas.append(Vaga(
+                    id=f"dork_{hash(href) % 1000000}",
+                    titulo=titulo, empresa="",
+                    localizacao=localizacao or "Brasil",
+                    modalidade=_normalizar_modalidade(localizacao),
+                    salario="A combinar", descricao="",
+                    url=href, fonte=fonte,
+                ))
+                if len(vagas) >= limite:
+                    break
+
+        if vagas:
+            logger.info("dork: %d vagas para '%s'", len(vagas), query)
+    except Exception as e:
+        logger.debug("dork: erro: %s", e)
+    return vagas
+
+
+# ─── Fonte 11: Inhire (tech Brasil) ──────────────────────────────────────────
+
+def _buscar_inhire(query: str, limite: int = JOBS_LIMITE_POR_FONTE) -> list[Vaga]:
+    """Busca vagas via Inhire (plataforma tech Brasil, scraping)."""
+    vagas: list[Vaga] = []
+    try:
+        url = f"https://inhire.com.br/vagas?q={quote_plus(query)}"
+        with httpx.Client(timeout=15, headers=_HEADERS, follow_redirects=True) as client:
+            resp = client.get(url)
+            if resp.status_code != 200:
+                return []
+            soup = BeautifulSoup(resp.text, "html.parser")
+            cards = soup.find_all(class_=re.compile(r"job|vaga|opportunity|card"))
+            for card in cards[:limite]:
+                titulo_el = card.find(["h2", "h3", "h4"])
+                empresa_el = card.find(class_=re.compile(r"company|empresa"))
+                local_el = card.find(class_=re.compile(r"location|local"))
+                link_el = card.find("a", href=True)
+                titulo = titulo_el.get_text(strip=True) if titulo_el else ""
+                empresa = empresa_el.get_text(strip=True) if empresa_el else ""
+                local = local_el.get_text(strip=True) if local_el else "Brasil"
+                href = link_el.get("href", "") if link_el else ""
+                link = f"https://inhire.com.br{href}" if href.startswith("/") else href
+                if not titulo:
+                    continue
+                vagas.append(Vaga(
+                    id=f"inhire_{hash(link or titulo) % 1000000}",
+                    titulo=titulo, empresa=empresa,
+                    localizacao=local,
+                    modalidade=_normalizar_modalidade(local),
+                    salario="A combinar", descricao="",
+                    url=link, fonte="Inhire",
+                ))
+        if vagas:
+            logger.info("inhire: %d vagas para '%s'", len(vagas), query)
+    except Exception as e:
+        logger.debug("inhire: erro: %s", e)
+    return vagas
+
+
+# ─── Filtro de data ───────────────────────────────────────────────────────────
+
+import datetime as _dt
+from email.utils import parsedate_to_datetime as _parsedate
+
+
+def _dentro_prazo(data_str: str, max_dias: int = 15) -> bool:
+    """Retorna True se a vaga foi publicada nos ultimos max_dias dias."""
+    if not data_str:
+        return True  # sem data: assume valida (nao descarta por falta de info)
+    try:
+        # Tenta RFC 2822 (RSS)
+        try:
+            pub = _parsedate(data_str).replace(tzinfo=None)
+        except Exception:
+            # Tenta ISO 8601 / varios formatos
+            for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d", "%d/%m/%Y"):
+                try:
+                    pub = _dt.datetime.strptime(data_str[:19], fmt)
+                    break
+                except Exception:
+                    continue
+            else:
+                return True  # formato desconhecido: nao descarta
+        delta = _dt.datetime.utcnow() - pub
+        return delta.days <= max_dias
+    except Exception:
+        return True
+
+
 # ─── Agregador principal ──────────────────────────────────────────────────────
 
 def buscar_vagas(
@@ -474,19 +783,28 @@ def buscar_vagas(
     vistas: set[str] = set()
     limite_por = max(JOBS_LIMITE_POR_FONTE, limite // max(len(queries_unicas), 1))
 
-    # Monta tarefas: (funcao, args)
+    # Monta tarefas por fonte e query
     tarefas = []
     for q in queries_unicas:
         tarefas.append((_buscar_indeed, (q, localizacao, limite_por)))
         tarefas.append((_buscar_gupy, (q, localizacao, limite_por)))
+        tarefas.append((_buscar_trampos, (q, limite_por)))
+        tarefas.append((_buscar_programathor, (q, limite_por)))
+        tarefas.append((_buscar_revelo, (q, limite_por)))
+        tarefas.append((_buscar_inhire, (q, limite_por)))
         if not localizacao or modalidade == "remoto":
             tarefas.append((_buscar_remoteok, (q, limite_por)))
-        tarefas.append((_buscar_trampos, (q, limite_por)))
+            tarefas.append((_buscar_weworkremotely, (q, limite_por)))
+            tarefas.append((_buscar_workingnomads, (q, limite_por)))
 
-    # Execucao paralela
-    with ThreadPoolExecutor(max_workers=min(len(tarefas), 8)) as executor:
+    # Google Dork (uma chamada por query principal — evita flood)
+    for q in queries_unicas[:2]:
+        tarefas.append((_buscar_google_dork, (q, localizacao, limite_por)))
+
+    # Execucao paralela (max 12 workers)
+    with ThreadPoolExecutor(max_workers=min(len(tarefas), 12)) as executor:
         futures = {executor.submit(fn, *args): fn.__name__ for fn, args in tarefas}
-        for future in as_completed(futures, timeout=25):
+        for future in as_completed(futures, timeout=30):
             try:
                 resultado = future.result()
                 todas.extend(resultado)
@@ -502,6 +820,9 @@ def buscar_vagas(
             except Exception:
                 pass
 
+    # Filtra vagas com mais de 15 dias (mantém as sem data)
+    todas = [v for v in todas if _dentro_prazo(v.data_publicacao, max_dias=15)]
+
     # Deduplica por titulo+empresa
     unicas: list[Vaga] = []
     for vaga in todas:
@@ -516,7 +837,7 @@ def buscar_vagas(
         unicas = filtradas if filtradas else unicas
 
     logger.info(
-        "jobs: queries=%d total=%d unicas=%d",
-        len(queries_unicas), len(todas), len(unicas),
+        "jobs: queries=%d total_bruto=%d pos_filtro_data=%d unicas=%d",
+        len(queries_unicas), len(todas), len([v for v in todas if v.titulo]), len(unicas),
     )
     return unicas[:limite]

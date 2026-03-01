@@ -38,15 +38,24 @@ def _detectar_query(mensagem: str, perfil: dict) -> tuple[str, str, str]:
         modalidade = perfil["modalidade_preferida"]
 
     # Remove stopwords para extrair query principal
-    stopwords = {"vagas", "de", "para", "busca", "encontra", "tem", "hoje",
-                 "remoto", "hibrido", "presencial", "vaga", "emprego", "trabalho"}
+    stopwords = {
+        "vagas", "de", "para", "busca", "encontra", "tem", "hoje", "mim",
+        "remoto", "hibrido", "presencial", "vaga", "emprego", "trabalho",
+        "quero", "preciso", "procuro", "me", "meu", "minha", "meus",
+        "minhas", "uma", "um", "mais", "por", "com", "sem", "novo", "nova",
+        "oportunidades", "oportunidade", "recomenda", "me", "ver",
+    }
     tokens = [t for t in re.split(r"\s+", msg) if t not in stopwords and len(t) > 2]
     query = " ".join(tokens[:5]).strip()
 
-    if not query and perfil.get("cargos_desejados"):
-        query = perfil["cargos_desejados"][0]
-    elif not query and perfil.get("habilidades"):
-        query = " ".join(h.get("nome", "") for h in perfil["habilidades"][:2])
+    # Fallback: usa cargo desejado ou skills do perfil quando query vazia ou generica
+    if not query or query in {"desenvolvedor", "dev", "programador"}:
+        if perfil.get("cargos_desejados"):
+            query = perfil["cargos_desejados"][0]
+        elif perfil.get("habilidades"):
+            skills = [h.get("nome", "") for h in perfil["habilidades"][:2] if h.get("nome")]
+            nivel = perfil.get("nivel_senioridade", "")
+            query = " ".join(filter(None, [nivel] + skills))
 
     localizacao = perfil.get("localizacao", "")
     if modalidade == "remoto":
