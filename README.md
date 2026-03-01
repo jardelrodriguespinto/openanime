@@ -19,9 +19,9 @@ Cada mensagem passa por um orquestrador LangGraph que roteia para o agente certo
 | `noticias` | notícias gerais — tech, IA, mercado, games, ciência, programação |
 | `documento` | analisar PDFs recebidos, responder perguntas sobre documentos, gerar PDFs |
 | `perfil_pro` | gerenciar perfil profissional: habilidades, experiência, pretensão salarial |
-| `vaga` | buscar vagas de emprego (Indeed, Gupy, RemoteOK, LinkedIn) — tudo gratuito |
-| `curriculo_ats` | gerar currículo ATS otimizado para vaga específica |
-| `candidatura` | candidatura automática via Playwright (LinkedIn Easy Apply, Gupy) |
+| `vaga` | buscar vagas em 12+ fontes (Indeed, Gupy, Glassdoor, LinkedIn, RemoteOK...) |
+| `curriculo_ats` | gerar currículo ATS em PDF otimizado com LLM especialista |
+| `candidatura` | candidatura automática via Playwright (LinkedIn Easy Apply, Gupy, Greenhouse, Lever) |
 
 Um extrator roda em background após cada mensagem, detecta obras mencionadas
 e atualiza automaticamente o perfil no Neo4j.
@@ -41,35 +41,64 @@ e atualiza automaticamente o perfil no Neo4j.
 - Alerta de episódios às 20h para séries em progresso (via TVMaze)
 - Alerta cultural semanal às sextas 12h
 
-**Notícias (Fase 1)**
+**Notícias**
 - Notícias gerais por categoria: tech, IA, mercado, games, ciência, brasil, programação, startup
 - Fontes RSS públicas + DuckDuckGo Lite — sem API paga
 - Interesses persistidos por usuário no Neo4j
 
-**Documentos PDF (Fase 2)**
+**Documentos PDF**
 - Recebe PDFs pelo Telegram e analisa o conteúdo
 - Responde perguntas sobre documentos já enviados
 - Detecta currículos e extrai perfil profissional automaticamente
 - Gera PDFs (relatórios, resumos) via Jinja2 + weasyprint
 - Armazena documentos no Weaviate para busca semântica
 
-**Perfil Profissional (Fase 3)**
+**Perfil Profissional**
 - Registra habilidades, experiências, formação e pretensão salarial
 - Exibe score de completude do perfil
 - Detecta dados profissionais em linguagem natural
 
-**Vagas e Currículo ATS (Fase 4)**
-- Busca vagas em múltiplas fontes gratuitas: Indeed RSS, Gupy API, RemoteOK, LinkedIn
-- Score de compatibilidade candidato × vaga
-- Gera currículo ATS personalizado para vaga específica
-- Template ATS-compliant: coluna única, fonte padrão, texto selecionável, sem tabelas de layout
+**Vagas e Currículo ATS**
+- Busca vagas em 12+ fontes simultâneas e gratuitas em paralelo:
+  Indeed, Gupy (38 empresas BR), Glassdoor, LinkedIn, RemoteOK, WorkingNomads,
+  Trampos, Revelo, Programathor, Remotar, Inhire, Vagas.com.br, Catho, InfoJobs e dorks DDG
+- Filtro inteligente por senioridade (detecta da mensagem, não do perfil)
+- Score de compatibilidade candidato × vaga com breakdown de skills
+- Currículo ATS gerado com LLM especialista (método CAR, verbos de ação, impacto quantificado)
+- Template PDF ATS-compliant: coluna única, fonte padrão, texto selecionável, sem tabelas
 
-**Candidatura Automática (Fase 5)**
-- LinkedIn Easy Apply via Playwright
-- Gupy via Playwright
+**Candidatura Automática**
+- Lê a página da vaga antes de confirmar — extrai requisitos, salário e modalidade
+- Mostra score de compatibilidade e skills que batem/faltam antes de aplicar
+- Gera currículo ATS **personalizado para a vaga** na hora de enviar
+- LinkedIn Easy Apply: multi-step, upload de currículo, LLM responde perguntas customizadas
+- Gupy: login, multi-step, upload de currículo, LLM responde perguntas abertas
+- Greenhouse e Lever: suporte genérico (nome, email, CV upload, submit)
+- **Persistência de sessão**: cookies salvos após o primeiro login — não precisa logar de novo
+- Playwright com stealth anti-detecção: user-agent rotacionado, sem sinais de automação
 - Limite diário configurável (padrão 10 candidaturas)
-- Detecção de perguntas customizadas com sugestão de resposta via LLM
-- Confirmação obrigatória antes de qualquer envio
+- Confirmação obrigatória com score antes de qualquer envio
+
+## Fontes de Vagas
+
+| Fonte | Tipo | Notas |
+|---|---|---|
+| Indeed RSS | BR + Internacional | Scraping HTML + RSS fallback |
+| Gupy API | 38 empresas BR | Nubank, iFood, Stone, VTEX, Hotmart... |
+| Gupy Portal | Busca geral | Portal público gupy.io |
+| Glassdoor | BR + Internacional | DDG dork dedicado |
+| LinkedIn | BR + Internacional | Scraping páginas públicas |
+| RemoteOK | Internacional remoto | API JSON pública |
+| WorkingNomads | Internacional remoto | API JSON pública |
+| Trampos | BR tech | Scraping |
+| Revelo | BR tech | Scraping |
+| Programathor | BR tech | Scraping |
+| Remotar | BR remoto | Scraping |
+| Inhire | BR tech | Scraping |
+| Vagas.com.br | BR geral | Scraping |
+| Catho | BR geral | DDG dork |
+| InfoJobs | BR geral | DDG dork |
+| DDG Dorks | Qualquer | 8 combinações paralelas de sites × queries |
 
 ## Fontes de Dados
 
@@ -82,25 +111,22 @@ e atualiza automaticamente o perfil no Neo4j.
 | MusicBrainz | Música | Artistas, álbuns, lançamentos recentes |
 | Open Library | Livros | Catálogo, autores, lançamentos |
 | Reddit | Todos | Discussões, opiniões da comunidade |
-| RSS (ANN/MAL/tech/games/etc.) | Notícias | Notícias por categoria, anime news |
-| Indeed RSS | Vagas | Vagas de emprego gratuitas |
-| Gupy API | Vagas | Vagas empresas brasileiras |
-| RemoteOK API | Vagas | Vagas remotas internacionais |
+| RSS (ANN/MAL/tech/games/etc.) | Notícias | Notícias por categoria |
 | Wikipedia | Todos | Contexto e resumos |
 | YouTube | Todos | Vídeos com legenda (recap, review) |
-| DuckDuckGo Lite | Todos | Busca web, turnês, sites para ler/assistir, notícias |
+| DuckDuckGo Lite | Todos | Busca web sem API |
 
 ## Stack
 
 - Python 3.12
 - `python-telegram-bot` + JobQueue (agendamento)
-- LangGraph (orquestrador multi-agente)
+- LangGraph (orquestrador multi-agente, 12 intenções)
 - OpenRouter (todos os LLMs em uma API)
 - Neo4j (grafo de perfil e relações)
 - Weaviate (busca semântica, embeddings via OpenRouter)
-- Redis (histórico de conversa + estado de candidatura pendente, TTL 7d)
-- Playwright (automação de candidaturas)
-- weasyprint + Jinja2 (geração de PDFs)
+- Redis (histórico de conversa + estado pendente, TTL 7d)
+- Playwright (automação de candidaturas com stealth)
+- weasyprint + pydyf==0.10.0 + Jinja2 (geração de PDFs)
 - pdfplumber (extração de texto de PDFs)
 - Docker Compose
 
@@ -109,12 +135,12 @@ e atualiza automaticamente o perfil no Neo4j.
 ```text
 bot/         → handlers Telegram, notificador (3 jobs), formatter, redis_history
 agents/      → orchestrator (LangGraph), conversa, recomendacao, analise, busca, perfil,
-               maratona, extrator, news, documents, profile_pro, jobs, apply
+               maratona, extrator, news, documents, profile_pro, jobs, apply, responder
 graph/       → neo4j_client, weaviate_client, graphrag
-data/        → jikan, tmdb, reddit, news, scheduler e demais fontes
+data/        → jikan, tmdb, reddit, news, scheduler e demais fontes, jobs (12+ fontes)
 ai/          → openrouter, assemblyai, config (modelos via .env)
-automation/  → browser (Playwright), linkedin_apply, gupy_apply, form_filler
-utils/       → pdf_writer, ats_optimizer, templates/
+automation/  → browser (Playwright stealth + sessões), linkedin_apply, gupy_apply, form_filler
+utils/       → pdf_writer, ats_optimizer (LLM especialista), templates/
 prompts/     → prompt de cada agente
 logs/        → logs rotativos
 ```
@@ -152,15 +178,17 @@ MODEL_SEARCH=meta-llama/llama-3-70b-instruct         # busca e síntese
 MODEL_PROFILE=meta-llama/llama-3-8b-instruct         # perfil, leve
 ```
 
-Variáveis opcionais (fases 4 e 5):
+Variáveis opcionais:
 
 ```env
 # Candidatura automática
 LINKEDIN_EMAIL=seu@email.com
 LINKEDIN_PASSWORD=sua_senha
+GUPY_EMAIL=seu@email.com      # usa LINKEDIN_EMAIL se vazio
+GUPY_PASSWORD=sua_senha
 APPLY_DAILY_LIMIT=10
 PLAYWRIGHT_HEADLESS=true
-PLAYWRIGHT_TIMEOUT_MS=30000
+PLAYWRIGHT_TIMEOUT_MS=45000
 
 # PDFs
 PDF_MAX_SIZE_MB=20
@@ -187,7 +215,7 @@ docker exec anime-bot python -m data.scheduler --init
 docker logs -f anime-bot
 ```
 
-Serviços esperados após o `up`:
+Serviços após o `up`:
 
 - `anime-neo4j` — ports `7474` (browser) e `7687`
 - `anime-weaviate` — port `8080`
@@ -208,7 +236,7 @@ Comandos disponíveis:
 | `/novidades` | Digest de novidades manual |
 | `/noticias [categoria]` | Notícias por área (tech, ia, games...) |
 | `/vagas [query]` | Buscar vagas de emprego |
-| `/curriculo_ats` | Gerar currículo ATS personalizado |
+| `/curriculo_ats` | Gerar currículo ATS em PDF |
 | `/perfil_pro` | Ver/editar perfil profissional |
 | `/candidaturas` | Pipeline de candidaturas |
 | `/limpar` | Limpa histórico de conversa |
@@ -226,35 +254,41 @@ qual a ordem para assistir fate?
 # Notícias
 noticias de tech hoje
 tem novidade de IA?
-o que aconteceu no mercado?
 
 # PDF
 [enviar arquivo .pdf pelo Telegram]
 o que esse contrato diz sobre multa?
-gera um PDF do resumo
 
 # Perfil profissional
-sou desenvolvedor senior com 5 anos de Python
-minha pretensao e 12k, quero remoto
+sou desenvolvedor pleno com 4 anos de Python
+minha pretensão é 12k, quero remoto
 
 # Vagas e currículo
-busca vagas de dev python remoto
-personaliza meu curriculo para a vaga da Nubank
-gera meu curriculo ats
+busca vagas de dev python pleno remoto
+me dá meu currículo em PDF
+gera meu currículo ATS para vaga de backend
 
 # Candidatura
-me candidata nessa vaga       → bot pede confirmação
-sim                           → executa candidatura
+me candidata nessa vaga           → bot lê a vaga, mostra score e pede confirmação
+sim                               → gera CV personalizado e aplica via Playwright
+minhas candidaturas               → mostra pipeline
 ```
 
 ## Fluxo de Candidatura
 
-1. Usuário diz "me candidata nessa vaga" (ou clica em uma vaga buscada)
-2. Bot mostra resumo: vaga, currículo que será usado, plataforma detectada
-3. Bot aguarda confirmação: responda **"sim"** para confirmar ou **"não"** para cancelar
-4. Se confirmado: Playwright abre a página, preenche formulário e submete
-5. Se houver perguntas customizadas: bot sugere respostas baseadas no perfil
-6. Resultado é registrado no Neo4j (status: candidatado / tentativa_falhou)
+1. Usuário diz "me candidata nessa vaga"
+2. Bot **lê a página da vaga** (httpx) — extrai descrição, requisitos, salário, modalidade
+3. Calcula **score de compatibilidade** com o perfil do usuário
+4. Mostra confirmação: `🟢 75% compatibilidade`, skills que batem, skills que faltam, plataforma
+5. Usuário confirma com **"sim"**
+6. Bot gera **currículo ATS personalizado** para essa vaga específica
+7. Playwright abre Chrome headless, faz login (ou usa sessão salva), navega multi-step
+8. Preenche formulário, faz upload do currículo, responde perguntas com LLM
+9. Submete e confirma no Telegram: "Candidatura enviada!"
+10. Registra no Neo4j (status: candidatado / tentativa_falhou)
+
+**Sessão persistente**: após o primeiro login, os cookies são salvos em `/app/data/sessions/`.
+Candidaturas seguintes pulam o login automaticamente até a sessão expirar.
 
 ## Jobs Automáticos
 
@@ -285,24 +319,28 @@ PREMIUM   — claude-sonnet-4-6, gpt-4o, gemini-pro-1.5
 **TMDB não encontra filmes/séries**
 - Valide `TMDB_API_KEY` no `.env`
 
-**Erro de áudio**
-- Valide `ASSEMBLY_IA_KEY`
-
 **Neo4j não conecta**
 - Confirme `NEO4J_PASSWORD` igual ao definido no `docker-compose.yml`
 
 **Candidatura automática não funciona**
 - Confirme `LINKEDIN_EMAIL` e `LINKEDIN_PASSWORD` no `.env`
-- Verifique `PLAYWRIGHT_HEADLESS=false` para debugar visualmente
-- LinkedIn e Gupy podem exigir verificação de 2FA — faça login manual uma vez
+- `PLAYWRIGHT_HEADLESS=false` para ver o browser em ação e debugar
+- LinkedIn com 2FA: faça login manual uma vez, o bot salva a sessão automaticamente
+- Sessão expirou: o bot detecta, remove o arquivo e refaz login sozinho
+- Logs: `docker logs anime-bot | grep -i "linkedin\|gupy\|sessao"`
+
+**Currículo PDF não é enviado**
+- Verifique se o perfil profissional está preenchido (`/perfil_pro`)
+- `docker logs anime-bot | grep -i "curriculo\|pdf\|ats"`
 
 **PDF não processa**
 - Verifique tamanho (máx `PDF_MAX_SIZE_MB`, padrão 20MB)
-- weasyprint requer libs do sistema instaladas — confirme o `docker build` concluiu sem erros
+- weasyprint requer `pydyf==0.10.0` — versões mais novas são incompatíveis
 
 ## Segurança
 
 - Nunca commite chaves reais em `.env`
 - O `.gitignore` já exclui `.env` — use `.env.example` para documentar
 - Se uma chave foi exposta, revogue e gere uma nova imediatamente
-- Credenciais de LinkedIn ficam apenas no `.env` (nunca no código)
+- Credenciais de LinkedIn/Gupy ficam apenas no `.env` (nunca no código)
+- Cookies de sessão ficam em `/app/data/sessions/` dentro do container (não versionados)
