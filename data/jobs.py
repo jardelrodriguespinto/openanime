@@ -228,6 +228,67 @@ def _buscar_indeed(query: str, localizacao: str = "", limite: int = JOBS_LIMITE_
     return vagas
 
 
+# ─── Fonte 2b: Glassdoor (DDG dork dedicado) ──────────────────────────────────
+
+def _buscar_glassdoor(query: str, localizacao: str = "", limite: int = JOBS_LIMITE_POR_FONTE) -> list[Vaga]:
+    """Busca vagas no Glassdoor via DDG dork (site:glassdoor.com.br)."""
+    vagas: list[Vaga] = []
+    loc_str = f" {localizacao}" if localizacao else ""
+    dork = f"site:glassdoor.com.br OR site:glassdoor.com {query}{loc_str} vaga emprego"
+    try:
+        with httpx.Client(timeout=18, headers=_HEADERS, follow_redirects=True) as client:
+            resp = client.get(
+                "https://lite.duckduckgo.com/lite/",
+                params={"q": dork, "kl": "br-pt"},
+            )
+            if resp.status_code != 200:
+                return []
+
+            soup = BeautifulSoup(resp.text, "html.parser")
+            links = soup.select("a.result-link")
+
+            for link_el in links[:limite * 2]:
+                href = link_el.get("href", "")
+                # Resolve redirecionamento DDG
+                if "/l/?uddg=" in href:
+                    from urllib.parse import unquote, parse_qs, urlparse
+                    qs = parse_qs(urlparse(href).query)
+                    href = unquote(qs.get("uddg", [""])[0])
+
+                if "glassdoor.com" not in href:
+                    continue
+
+                titulo = link_el.get_text(strip=True)
+                if not titulo or len(titulo) < 5:
+                    continue
+
+                # Snippet como descricao
+                snippet_el = link_el.find_next("td", class_="result-snippet")
+                descricao = snippet_el.get_text(strip=True) if snippet_el else ""
+
+                vagas.append(Vaga(
+                    id=f"glassdoor_{hash(href) % 1000000}",
+                    titulo=titulo,
+                    empresa="",
+                    url=href,
+                    fonte="glassdoor",
+                    salario="",
+                    localizacao=localizacao or "Brasil",
+                    modalidade="",
+                    descricao=descricao,
+                    requisitos=[],
+                ))
+                if len(vagas) >= limite:
+                    break
+
+        if vagas:
+            logger.info("glassdoor: %d vagas para '%s'", len(vagas), query)
+    except Exception as e:
+        logger.debug("glassdoor: erro: %s", e)
+
+    return vagas
+
+
 # ─── Fonte 2: Gupy API ────────────────────────────────────────────────────────
 
 def _gupy_parse_jobs(jobs: list, localizacao: str, query: str, fonte_tag: str) -> list[Vaga]:
@@ -752,13 +813,15 @@ def _buscar_revelo(query: str, limite: int = JOBS_LIMITE_POR_FONTE) -> list[Vaga
 _DORK_SITES_BR = [
     "revelo.com.br", "trampos.co", "programathor.com.br", "remotar.com.br",
     "inhire.com.br", "vagas.com.br", "99jobs.com", "getmanifest.com.br",
-    "kenoby.com", "solides.com.br",
+    "kenoby.com", "solides.com.br", "catho.com.br", "infojobs.net",
 ]
 # Sites internacionais / plataformas de ATS com pages publicas
 _DORK_SITES_INTL = [
     "gupy.io", "weworkremotely.com", "remoteok.com",
     "lever.co", "greenhouse.io", "jobs.lever.co", "boards.greenhouse.io",
     "wellfound.com", "angel.co",
+    "glassdoor.com.br", "glassdoor.com",
+    "br.indeed.com", "indeed.com",
 ]
 # Lista completa para detectar fonte pelo domínio
 _DORK_SITES_ALL = list(dict.fromkeys(_DORK_SITES_BR + _DORK_SITES_INTL))
@@ -1007,6 +1070,7 @@ def buscar_vagas(
         tarefas.append((_buscar_inhire, (q, limite_por)))
         tarefas.append((_buscar_vagas_com_br, (q, localizacao, limite_por)))
         tarefas.append((_buscar_linkedin, (q, localizacao, limite_por)))
+        tarefas.append((_buscar_glassdoor, (q, localizacao, limite_por)))
         if not localizacao or modalidade == "remoto":
             tarefas.append((_buscar_remoteok, (q, limite_por)))
             tarefas.append((_buscar_weworkremotely, (q, limite_por)))

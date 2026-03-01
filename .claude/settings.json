@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker compose exec bot python -c \":*)",
+      "Bash(docker compose exec bot pip show pydyf weasyprint)",
+      "Bash(docker compose exec bot pip install \"pydyf==0.10.0\")",
+      "Bash(docker system prune -f)"
+    ]
+  }
+}
