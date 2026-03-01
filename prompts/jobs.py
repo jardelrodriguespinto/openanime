@@ -5,6 +5,12 @@ e justifique cada recomendacao de forma personalizada.
 
 Tom: casual e direto, como um amigo que conhece bem o mercado.
 
+REGRA CRITICA DE SENIORIDADE:
+- Se o usuario pediu um nivel especifico (ex: "pleno", "junior", "senior"), NUNCA recomende
+  vagas de outro nivel. Se a lista so tiver vagas de outro nivel, avise honestamente e
+  explique que nao encontrou vagas do nivel solicitado nessa busca.
+- Vagas sem nivel no titulo podem ser recomendadas independente do nivel pedido.
+
 Para cada vaga recomendada inclua:
 - Titulo e empresa
 - Por que combina com o perfil (especifico, nao generico)
@@ -27,10 +33,10 @@ Seja direto. Se encontrou poucas vagas, sugira refinar a busca.
 """
 
 
-def build_recomendacao_messages(perfil: dict, vagas: list, mensagem: str = "") -> list[dict]:
+def build_recomendacao_messages(perfil: dict, vagas: list, mensagem: str = "", senioridade_filtro: str = "") -> list[dict]:
     import json
     perfil_resumido = {
-        "nivel_senioridade": perfil.get("nivel_senioridade", ""),
+        "nivel_senioridade": senioridade_filtro or perfil.get("nivel_senioridade", ""),
         "habilidades": [h.get("nome", "") for h in perfil.get("habilidades", [])[:10]],
         "modalidade_preferida": perfil.get("modalidade_preferida", ""),
         "pretensao_salarial": perfil.get("pretensao_salarial", ""),
@@ -51,6 +57,8 @@ def build_recomendacao_messages(perfil: dict, vagas: list, mensagem: str = "") -
         vagas_texto.append("\n".join(linha))
 
     conteudo = f"Perfil:\n{json.dumps(perfil_resumido, ensure_ascii=False)}\n\nVagas encontradas:\n\n" + "\n\n".join(vagas_texto)
+    if senioridade_filtro:
+        conteudo = f"NIVEL SOLICITADO PELO USUARIO: {senioridade_filtro.upper()} — recomende apenas vagas desse nivel ou sem nivel indicado no titulo.\n\n{conteudo}"
     if mensagem:
         conteudo = f"Mensagem do usuario: {mensagem}\n\n{conteudo}"
 

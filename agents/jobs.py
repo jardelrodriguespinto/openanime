@@ -2,7 +2,6 @@
 Agente de vagas — busca, recomendacao personalizada e geracao de curriculo ATS.
 """
 
-import asyncio
 import logging
 import re
 
@@ -23,8 +22,31 @@ _KEYWORDS_CANDIDATURAS = [
 ]
 
 
-def _detectar_query(mensagem: str, perfil: dict) -> tuple[str, str, str]:
-    """Retorna (query, localizacao, modalidade) extraidos da mensagem ou perfil."""
+_SENIOR_MAP = {
+    "senior": ["senior", "sênior", "sr.", "sr ", " sr", "lead", "staff", "principal"],
+    "pleno": ["pleno", "pl.", "pl ", " pl", "mid", "mid-level", "middle", "ii "],
+    "junior": ["junior", "júnior", "jr.", "jr ", " jr", "estagio", "estágio", "entry", "trainee"],
+}
+
+# Palavras que indicam senioridade na mensagem do usuário
+_SENIOR_KEYWORDS_MSG = {
+    "senior": ["senior", "sênior", "sr", "lead"],
+    "pleno": ["pleno", "mid", "mid-level", "middle", "pl"],
+    "junior": ["junior", "júnior", "jr", "estagio", "estágio", "entry"],
+}
+
+
+def _detectar_senioridade_msg(msg: str) -> str:
+    """Detecta senioridade explicitamente mencionada na mensagem (prioridade sobre perfil)."""
+    for nivel, keywords in _SENIOR_KEYWORDS_MSG.items():
+        for kw in keywords:
+            if re.search(r"\b" + re.escape(kw) + r"\b", msg, re.IGNORECASE):
+                return nivel
+    return ""
+
+
+def _detectar_query(mensagem: str, perfil: dict) -> tuple[str, str, str, str]:
+    """Retorna (query, localizacao, modalidade, senioridade) extraidos da mensagem ou perfil."""
     msg = mensagem.lower()
 
     modalidade = ""
@@ -37,13 +59,23 @@ def _detectar_query(mensagem: str, perfil: dict) -> tuple[str, str, str]:
     elif perfil.get("modalidade_preferida"):
         modalidade = perfil["modalidade_preferida"]
 
-    # Remove stopwords para extrair query principal
+    # Senioridade: mensagem tem prioridade sobre perfil
+    senioridade = _detectar_senioridade_msg(msg) or (perfil.get("nivel_senioridade") or "").lower()
+
+    # Remove stopwords + termos de senioridade para extrair query de cargo/skill
     stopwords = {
         "vagas", "de", "para", "busca", "encontra", "tem", "hoje", "mim",
         "remoto", "hibrido", "presencial", "vaga", "emprego", "trabalho",
         "quero", "preciso", "procuro", "me", "meu", "minha", "meus",
         "minhas", "uma", "um", "mais", "por", "com", "sem", "novo", "nova",
-        "oportunidades", "oportunidade", "recomenda", "me", "ver",
+        "oportunidades", "oportunidade", "recomenda", "ver",
+        # ruído conversacional
+        "mano", "cara", "mana", "nao", "não", "sim", "sou", "nós", "nos",
+        "pois", "que", "isso", "aqui", "ali", "pra", "pro", "pros", "pras",
+        "nao", "ja", "já", "só", "so", "bem", "vai", "vou", "queria",
+        # senioridade (não devem ir na query de busca)
+        "senior", "sênior", "pleno", "junior", "júnior", "mid", "lead",
+        "estagio", "estágio", "entry", "trainee",
     }
     tokens = [t for t in re.split(r"\s+", msg) if t not in stopwords and len(t) > 2]
     query = " ".join(tokens[:5]).strip()
@@ -54,14 +86,44 @@ def _detectar_query(mensagem: str, perfil: dict) -> tuple[str, str, str]:
             query = perfil["cargos_desejados"][0]
         elif perfil.get("habilidades"):
             skills = [h.get("nome", "") for h in perfil["habilidades"][:2] if h.get("nome")]
-            nivel = perfil.get("nivel_senioridade", "")
-            query = " ".join(filter(None, [nivel] + skills))
+            query = " ".join(filter(None, skills))
 
     localizacao = perfil.get("localizacao", "")
     if modalidade == "remoto":
         localizacao = ""
 
-    return query or "desenvolvedor", localizacao, modalidade
+    return query or "desenvolvedor", localizacao, modalidade, senioridade
+
+
+def _filtrar_por_senioridade(vagas: list, senioridade: str) -> list:
+    """
+    Filtra vagas pela senioridade solicitada.
+    Mantém vagas sem indicação de nível (título genérico) e as do nível certo.
+    Nunca retorna lista vazia — usa todas se o filtro zerasse.
+    """
+    if not senioridade:
+        return vagas
+
+    sinonimos_nivel = _SENIOR_MAP.get(senioridade, [])
+    outros_niveis = [
+        kws for nivel, kws in _SENIOR_MAP.items() if nivel != senioridade
+    ]
+    outros_flat = [kw for kws in outros_niveis for kw in kws]
+
+    def _nivel_compativel(titulo: str) -> bool:
+        t = titulo.lower()
+        # Tem termo do nível certo → aceita
+        if any(kw in t for kw in sinonimos_nivel):
+            return True
+        # Tem termo de outro nível → rejeita
+        if any(kw in t for kw in outros_flat):
+            return False
+        # Sem indicação de nível → aceita (cargo genérico)
+        return True
+
+    filtradas = [v for v in vagas if _nivel_compativel(v.titulo)]
+    # Se filtro muito restritivo zerou resultados, retorna tudo
+    return filtradas if filtradas else vagas
 
 
 def calcular_score_match(perfil: dict, vaga: Vaga) -> float:
@@ -132,15 +194,17 @@ def _modo_busca(state: dict) -> dict:
     except Exception:
         perfil = {}
 
-    query, localizacao, modalidade = _detectar_query(mensagem, perfil)
+    query, localizacao, modalidade, senioridade = _detectar_query(mensagem, perfil)
 
     # Gera variantes PT/EN + skills do perfil para ampliar a busca
     top_skills = [h.get("nome", "") for h in perfil.get("habilidades", [])[:3] if h.get("nome")]
-    variantes = gerar_variantes(query, top_skills)
+    # Inclui senioridade na query principal para resultados mais relevantes
+    query_com_nivel = f"{senioridade} {query}".strip() if senioridade else query
+    variantes = gerar_variantes(query_com_nivel, top_skills)
     query_principal = variantes[0]
     queries_extras = variantes[1:] if len(variantes) > 1 else []
 
-    logger.info("jobs: query='%s' variantes=%s", query_principal, queries_extras)
+    logger.info("jobs: query='%s' senioridade='%s' variantes=%s", query_principal, senioridade, queries_extras)
 
     vagas = buscar_vagas(
         query_principal,
@@ -148,6 +212,12 @@ def _modo_busca(state: dict) -> dict:
         modalidade=modalidade,
         queries_extras=queries_extras,
     )
+
+    # Filtra por senioridade se explicitamente solicitada
+    if senioridade:
+        antes = len(vagas)
+        vagas = _filtrar_por_senioridade(vagas, senioridade)
+        logger.info("jobs: filtro senioridade='%s' antes=%d depois=%d", senioridade, antes, len(vagas))
 
     # Calcula score de match para cada vaga
     for vaga in vagas:
@@ -161,7 +231,7 @@ def _modo_busca(state: dict) -> dict:
 
     # Usa recomendacao personalizada se tiver perfil, busca simples se nao tiver
     if perfil.get("habilidades"):
-        messages = jobs_prompt.build_recomendacao_messages(perfil, vagas, mensagem)
+        messages = jobs_prompt.build_recomendacao_messages(perfil, vagas, mensagem, senioridade_filtro=senioridade)
     else:
         messages = jobs_prompt.build_busca_messages(vagas, query)
 
