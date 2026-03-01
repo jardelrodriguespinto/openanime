@@ -1,4 +1,4 @@
-SYSTEM = """Voce e um agente de busca especializado em anime, manga, manhwa e webtoon.
+SYSTEM = """Voce e um agente de busca especializado em anime, manga, manhwa, webtoon, filmes, series, doramas, musica e livros.
 Voce recebe resultados de buscas em multiplas fontes e sintetiza as informacoes.
 
 Regras:
@@ -35,6 +35,8 @@ def build_messages(
     wikipedia_results: list[dict] | None = None,
     tvmaze_results: list[dict] | None = None,
     youtube_results: list[dict] | None = None,
+    musica_results: list[dict] | None = None,
+    livro_results: list[dict] | None = None,
     source_status: dict | None = None,
     is_sites_query: bool = False,
 ) -> list[dict]:
@@ -46,6 +48,8 @@ def build_messages(
         wikipedia=wikipedia_results or [],
         tvmaze=tvmaze_results or [],
         youtube=youtube_results or [],
+        musica=musica_results or [],
+        livro=livro_results or [],
         source_status=source_status or {},
     )
 
@@ -70,6 +74,8 @@ def _format_results(
     wikipedia: list[dict],
     tvmaze: list[dict],
     youtube: list[dict],
+    musica: list[dict],
+    livro: list[dict],
     source_status: dict,
 ) -> str:
     lines = []
@@ -151,5 +157,21 @@ def _format_results(
             subreddit = r.get("subreddit", "")
             body = (r.get("selftext") or "")[:150]
             lines.append(f"r/{subreddit} (+{score}) - {title}: {body}")
+
+    if musica:
+        lines.append("\n=== MusicBrainz (Artistas/Albums) ===")
+        for m in musica[:5]:
+            titulo = m.get("titulo", "")
+            subtipo = m.get("subtipo", "")
+            generos = ", ".join((m.get("generos") or [])[:3])
+            lines.append(f"{titulo} ({subtipo}) | generos: {generos}")
+
+    if livro:
+        lines.append("\n=== Open Library (Livros) ===")
+        for l in livro[:5]:
+            titulo = l.get("titulo", "")
+            autor = l.get("autor", "")
+            ano = l.get("ano", "?")
+            lines.append(f"{titulo} | {autor} | {ano}")
 
     return "\n".join(lines)

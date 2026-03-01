@@ -39,6 +39,18 @@ _KEYWORDS_SCHEDULE = re.compile(
     re.IGNORECASE,
 )
 
+_KEYWORDS_MUSICA = re.compile(
+    r"\b(musica|musicas|artista|banda|album|single|turnê|turne|show|concerto|"
+    r"lancamento musical|novo album|nova musica|spotify|kpop|rock|pop|jazz|rap|funk)\b",
+    re.IGNORECASE,
+)
+
+_KEYWORDS_LIVRO = re.compile(
+    r"\b(livro|livros|autor|autora|romance|novel|ebook|literatura|escritor|"
+    r"novo livro|lancamento literario|goodreads|amazon livro|biblioteca)\b",
+    re.IGNORECASE,
+)
+
 _DDG_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -165,6 +177,33 @@ def _collector_youtube(query: str) -> list[dict]:
     return youtube_search.search_summary_videos(query=query, limit=5)
 
 
+def _collector_musica_livro(query: str) -> dict:
+    """Coleta lancamentos de musica e livros via MusicBrainz e Open Library."""
+    if not _KEYWORDS_MUSICA.search(query) and not _KEYWORDS_LIVRO.search(query):
+        return {"musica": [], "livro": []}
+
+    musica_results = []
+    livro_results = []
+
+    if _KEYWORDS_MUSICA.search(query):
+        try:
+            from data.musicbrainz import musicbrainz
+            resultados = musicbrainz.buscar_artista(query[:80])
+            musica_results = resultados[:5]
+        except Exception as e:
+            logger.debug("collector_musica_livro: musicbrainz erro: %s", e)
+
+    if _KEYWORDS_LIVRO.search(query):
+        try:
+            from data.openlibrary import openlibrary
+            resultados = openlibrary.buscar_livro(query[:80])
+            livro_results = resultados[:5]
+        except Exception as e:
+            logger.debug("collector_musica_livro: openlibrary erro: %s", e)
+
+    return {"musica": musica_results, "livro": livro_results}
+
+
 def search_node(state: State) -> dict:
     """Agente de busca com 4 subagentes paralelos + orquestracao final por LLM."""
     user_message = state["raw_input"]
@@ -176,12 +215,13 @@ def search_node(state: State) -> dict:
         "reddit": _collector_reddit,
         "news": _collector_news,
         "youtube": _collector_youtube,
+        "cultural": _collector_musica_livro,
     }
 
     results = {k: [] for k in collectors}
     status = {k: "ok" for k in collectors}
 
-    with ThreadPoolExecutor(max_workers=4) as executor:
+    with ThreadPoolExecutor(max_workers=5) as executor:
         future_map = {
             executor.submit(fn, user_message): name
             for name, fn in collectors.items()
@@ -202,9 +242,12 @@ def search_node(state: State) -> dict:
     wikipedia_results = (news.get("wikipedia") or []) if isinstance(news, dict) else []
     tvmaze_results = (news.get("tvmaze") or []) if isinstance(news, dict) else []
     youtube_results = results["youtube"] or []
+    cultural = results["cultural"] if isinstance(results["cultural"], dict) else {}
+    musica_results = (cultural.get("musica") or []) if isinstance(cultural, dict) else []
+    livro_results = (cultural.get("livro") or []) if isinstance(cultural, dict) else []
 
     logger.info(
-        "Busca paralela: user=%s web=%d reddit=%d rss=%d anilist=%d wiki=%d tvmaze=%d youtube=%d",
+        "Busca paralela: user=%s web=%d reddit=%d rss=%d anilist=%d wiki=%d tvmaze=%d youtube=%d musica=%d livro=%d",
         user_id,
         len(web_results),
         len(reddit_results),
@@ -213,6 +256,8 @@ def search_node(state: State) -> dict:
         len(wikipedia_results),
         len(tvmaze_results),
         len(youtube_results),
+        len(musica_results),
+        len(livro_results),
     )
 
     messages = search_prompt.build_messages(
@@ -225,6 +270,8 @@ def search_node(state: State) -> dict:
         wikipedia_results=wikipedia_results,
         tvmaze_results=tvmaze_results,
         youtube_results=youtube_results,
+        musica_results=musica_results,
+        livro_results=livro_results,
         source_status=status,
         is_sites_query=_KEYWORDS_SITES.search(user_message) is not None,
     )

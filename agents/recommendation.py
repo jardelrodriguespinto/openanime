@@ -7,7 +7,13 @@ from graph.neo4j_client import get_neo4j
 from graph.weaviate_client import get_weaviate
 from data.jikan import jikan
 from data.reddit import reddit
+from data.tmdb import tmdb
 import prompts.recommendation as rec_prompt
+
+_KEYWORDS_MIDIA = re.compile(
+    r"\b(filme|filmes|cinema|movie|serie|series|dorama|k-?drama|netflix|amazon|hbo|disney)\b",
+    re.IGNORECASE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +85,15 @@ def recommendation_node(state: State) -> dict:
         logger.info("Recomendacao: %d resultados Jikan", len(jikan_results))
     except Exception as e:
         logger.warning("Recomendacao: erro Jikan: %s", e)
+
+    # Busca TMDB quando usuario menciona filmes/series/doramas
+    if _KEYWORDS_MIDIA.search(user_message):
+        try:
+            tmdb_results = tmdb.buscar_midia(user_message[:80])
+            jikan_results = jikan_results + tmdb_results
+            logger.info("Recomendacao: %d resultados TMDB adicionados", len(tmdb_results))
+        except Exception as e:
+            logger.warning("Recomendacao: erro TMDB: %s", e)
 
     reddit_results = []
     try:

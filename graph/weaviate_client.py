@@ -105,6 +105,10 @@ class WeaviateClient:
             self.client.data_object.create(data, ANIME_CLASS)
             logger.debug("Weaviate: anime inserido titulo=%s", data["titulo"])
 
+    def upsert_midia(self, payload: dict):
+        """Insere ou atualiza qualquer midia (filme, serie, dorama) no Weaviate."""
+        self.upsert_anime(payload)
+
     def busca_semantica(
         self,
         query: str,

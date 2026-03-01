@@ -126,7 +126,11 @@ def main():
 
 def _registrar_jobs(app):
     """Registra jobs agendados via JobQueue do python-telegram-bot."""
-    from bot.notificador import enviar_diario, verificar_novos_episodios
+    from bot.notificador import (
+        enviar_diario,
+        verificar_lancamentos_culturais,
+        verificar_novos_episodios,
+    )
 
     tz_br = pytz.timezone("America/Sao_Paulo")
 
@@ -143,6 +147,15 @@ def _registrar_jobs(app):
         name="alerta_episodios",
     )
     logger.info("Job agendado: alerta_episodios as 20:00 America/Sao_Paulo")
+
+    # Sexta-feira = weekday 4 (0=segunda ... 4=sexta)
+    app.job_queue.run_daily(
+        verificar_lancamentos_culturais,
+        time=datetime.time(hour=12, minute=0, tzinfo=tz_br),
+        days=(4,),
+        name="lancamentos_culturais",
+    )
+    logger.info("Job agendado: lancamentos_culturais as 12:00 sextas America/Sao_Paulo")
 
 
 if __name__ == "__main__":

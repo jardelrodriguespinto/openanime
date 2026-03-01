@@ -407,3 +407,107 @@ async def verificar_novos_episodios(context: CallbackContext) -> None:
             logger.warning("Notificador episodios: erro user=%s: %s", user_id, e)
 
     logger.info("Notificador episodios: concluido - enviados=%d", enviados)
+
+
+async def verificar_lancamentos_culturais(context: CallbackContext) -> None:
+    """
+    Job semanal (sexta 12h) - notifica usuarios sobre novos lancamentos de artistas
+    e autores favoritos: albums, turnês e novos livros.
+    """
+    logger.info("Notificador cultural: iniciando verificacao de lancamentos")
+
+    try:
+        neo4j = get_neo4j()
+        usuarios = neo4j.get_usuarios_com_preferencias_culturais()
+        logger.info("Notificador cultural: %d usuarios com preferencias culturais", len(usuarios))
+    except Exception as e:
+        logger.error("Notificador cultural: erro ao buscar usuarios: %s", e)
+        return
+
+    if not usuarios:
+        return
+
+    try:
+        from data.musicbrainz import musicbrainz
+        from data.openlibrary import openlibrary
+    except ImportError as e:
+        logger.error("Notificador cultural: imports falharam: %s", e)
+        return
+
+    mb_cache: dict[str, list[dict]] = {}
+    ol_cache: dict[str, list[dict]] = {}
+    enviados = 0
+
+    for usuario in usuarios:
+        user_id = usuario.get("telegram_id")
+        artistas = usuario.get("artistas_favoritos", [])
+        autores = usuario.get("autores_favoritos", [])
+
+        if not user_id:
+            continue
+
+        linhas = []
+
+        # Verifica lancamentos de artistas favoritos
+        for artista in artistas[:5]:
+            if artista not in mb_cache:
+                try:
+                    mb_cache[artista] = musicbrainz.get_lancamentos_recentes_artista(artista, dias=30)
+                except Exception as e:
+                    logger.debug("Notificador cultural: MusicBrainz erro para '%s': %s", artista, e)
+                    mb_cache[artista] = []
+
+            lancamentos = mb_cache[artista]
+            for lc in lancamentos[:2]:
+                titulo = lc.get("titulo", "?")
+                data = lc.get("data", "")
+                tipo = lc.get("subtipo", "album")
+                linhas.append(f"🎵 <b>{artista}</b> - {titulo} ({tipo}){' · ' + data if data else ''}")
+
+        # Busca tambem por DDG para turnês e shows ao vivo
+        for artista in artistas[:3]:
+            try:
+                query = f"{artista} turne show 2026"
+                resultados = _buscar_novidades_ddg(query, max_results=2)
+                for r in resultados:
+                    title = r.get("title", "")
+                    href = r.get("href", "")
+                    if any(k in title.lower() for k in ["tour", "turne", "show", "concert", "live"]):
+                        linhas.append(f"🎤 <b>{artista}</b>: <a href='{href}'>{title[:80]}</a>")
+                        break
+            except Exception as e:
+                logger.debug("Notificador cultural: DDG turne erro: %s", e)
+
+        # Verifica novos livros de autores favoritos
+        for autor in autores[:5]:
+            if autor not in ol_cache:
+                try:
+                    ol_cache[autor] = openlibrary.get_livros_recentes_autor(autor)
+                except Exception as e:
+                    logger.debug("Notificador cultural: OpenLibrary erro para '%s': %s", autor, e)
+                    ol_cache[autor] = []
+
+            livros = ol_cache[autor]
+            for livro in livros[:1]:
+                titulo = livro.get("titulo", "?")
+                ano = livro.get("ano", "")
+                linhas.append(f"📚 <b>{autor}</b> - {titulo}{' (' + str(ano) + ')' if ano else ''}")
+
+        if not linhas:
+            continue
+
+        try:
+            header = "<b>Novidades dos seus artistas e autores favoritos esta semana:</b>\n"
+            texto = header + "\n".join(linhas[:10])
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=texto,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+            enviados += 1
+            logger.info("Notificador cultural: lancamentos enviados para user=%s", user_id)
+        except Exception as e:
+            logger.warning("Notificador cultural: erro ao enviar para user=%s: %s", user_id, e)
+
+    logger.info("Notificador cultural: concluido - enviados=%d", enviados)

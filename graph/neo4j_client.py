@@ -38,6 +38,7 @@ class Neo4jClient:
             "CREATE CONSTRAINT IF NOT EXISTS FOR (fo:Formato) REQUIRE fo.nome IS UNIQUE",
             "CREATE INDEX IF NOT EXISTS FOR (a:Anime) ON (a.titulo)",
             "CREATE INDEX IF NOT EXISTS FOR (a:Anime) ON (a.titulo_key)",
+            "CREATE INDEX IF NOT EXISTS FOR (a:Anime) ON (a.tipo)",
         ]
         with self.driver.session() as session:
             for cypher in statements:
@@ -1242,6 +1243,10 @@ class Neo4jClient:
                     ponte=route.get("ponte_animemanga", []),
                 )
 
+    def upsert_midia(self, payload: dict):
+        """Insere ou atualiza qualquer midia (filme, serie, dorama, anime) no Neo4j."""
+        self.upsert_anime(payload)
+
     def get_stats_pessoais(self, telegram_id: str) -> dict:
         """Retorna estatisticas agregadas do usuario para o comando /stats."""
         cypher = """
@@ -1255,10 +1260,21 @@ class Neo4jClient:
             count(DISTINCT pa) AS total_progresso,
             avg(CASE WHEN r.nota IS NOT NULL THEN toFloat(r.nota) ELSE null END) AS media_notas
         """
+        by_tipo_cypher = """
+        MATCH (u:Usuario {telegram_id: $telegram_id})-[:ASSISTIU]->(a:Anime)
+        WHERE a.tipo IS NOT NULL
+        RETURN a.tipo AS tipo, count(*) AS qtd
+        ORDER BY qtd DESC
+        """
         with self.driver.session() as session:
             rec = session.run(cypher, telegram_id=telegram_id).single()
             if not rec:
                 return {}
+            by_tipo = {
+                row["tipo"]: int(row["qtd"])
+                for row in session.run(by_tipo_cypher, telegram_id=telegram_id)
+                if row.get("tipo")
+            }
 
         total_assistidos = rec.get("total_assistidos") or 0
         total_dropados = rec.get("total_dropados") or 0
@@ -1278,6 +1294,7 @@ class Neo4jClient:
             "drop_rate": drop_rate,
             "top_generos": top_generos,
             "top_estudios": top_estudios,
+            "por_tipo": by_tipo,
         }
 
     def _top_items_por_relacao(
@@ -1310,6 +1327,91 @@ class Neo4jClient:
         with self.driver.session() as session:
             result = session.run(cypher)
             return [row["tid"] for row in result if row["tid"]]
+
+    # ── Artistas e Autores favoritos (para notificações) ────────────────────
+
+    def adicionar_artista_favorito(self, telegram_id: str, artista: str) -> None:
+        """Adiciona artista à lista de favoritos do usuario (para notificacoes)."""
+        artista_clean = (artista or "").strip()
+        if not artista_clean:
+            return
+        with self.driver.session() as session:
+            session.run(
+                """
+                MERGE (u:Usuario {telegram_id: $telegram_id})
+                SET u.artistas_favoritos = CASE
+                    WHEN $artista IN coalesce(u.artistas_favoritos, [])
+                    THEN coalesce(u.artistas_favoritos, [])
+                    ELSE coalesce(u.artistas_favoritos, []) + [$artista]
+                END
+                """,
+                telegram_id=telegram_id,
+                artista=artista_clean,
+            )
+
+    def adicionar_autor_favorito(self, telegram_id: str, autor: str) -> None:
+        """Adiciona autor à lista de favoritos do usuario (para notificacoes)."""
+        autor_clean = (autor or "").strip()
+        if not autor_clean:
+            return
+        with self.driver.session() as session:
+            session.run(
+                """
+                MERGE (u:Usuario {telegram_id: $telegram_id})
+                SET u.autores_favoritos = CASE
+                    WHEN $autor IN coalesce(u.autores_favoritos, [])
+                    THEN coalesce(u.autores_favoritos, [])
+                    ELSE coalesce(u.autores_favoritos, []) + [$autor]
+                END
+                """,
+                telegram_id=telegram_id,
+                autor=autor_clean,
+            )
+
+    def get_artistas_favoritos(self, telegram_id: str) -> list[str]:
+        """Retorna artistas favoritos do usuario."""
+        with self.driver.session() as session:
+            result = session.run(
+                "MATCH (u:Usuario {telegram_id: $telegram_id}) "
+                "RETURN coalesce(u.artistas_favoritos, []) AS artistas",
+                telegram_id=telegram_id,
+            )
+            record = result.single()
+            return list(record["artistas"]) if record else []
+
+    def get_autores_favoritos(self, telegram_id: str) -> list[str]:
+        """Retorna autores favoritos do usuario."""
+        with self.driver.session() as session:
+            result = session.run(
+                "MATCH (u:Usuario {telegram_id: $telegram_id}) "
+                "RETURN coalesce(u.autores_favoritos, []) AS autores",
+                telegram_id=telegram_id,
+            )
+            record = result.single()
+            return list(record["autores"]) if record else []
+
+    def get_usuarios_com_preferencias_culturais(self) -> list[dict]:
+        """Retorna usuarios que tem artistas ou autores favoritos cadastrados."""
+        cypher = """
+        MATCH (u:Usuario)
+        WHERE size(coalesce(u.artistas_favoritos, [])) > 0
+           OR size(coalesce(u.autores_favoritos, [])) > 0
+        RETURN
+            u.telegram_id AS telegram_id,
+            coalesce(u.artistas_favoritos, []) AS artistas_favoritos,
+            coalesce(u.autores_favoritos, []) AS autores_favoritos
+        """
+        with self.driver.session() as session:
+            result = session.run(cypher)
+            return [
+                {
+                    "telegram_id": row["telegram_id"],
+                    "artistas_favoritos": list(row["artistas_favoritos"]),
+                    "autores_favoritos": list(row["autores_favoritos"]),
+                }
+                for row in result
+                if row["telegram_id"]
+            ]
 
     def get_historico(self, telegram_id: str) -> dict:
         cypher = """
