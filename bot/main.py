@@ -10,15 +10,21 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, fil
 
 from bot.handlers import (
     handle_audio,
+    handle_candidaturas,
+    handle_curriculo_ats,
+    handle_document,
     handle_error,
     handle_help,
     handle_historico,
     handle_limpar,
     handle_maratona,
     handle_message,
+    handle_noticias,
     handle_novidades,
+    handle_perfil_pro,
     handle_start,
     handle_stats,
+    handle_vagas,
 )
 
 load_dotenv()
@@ -108,10 +114,17 @@ def main():
     app.add_handler(CommandHandler("maratona", handle_maratona))
     app.add_handler(CommandHandler("novidades", handle_novidades))
     app.add_handler(CommandHandler("limpar", handle_limpar))
+    app.add_handler(CommandHandler("noticias", handle_noticias))
+    app.add_handler(CommandHandler("vagas", handle_vagas))
+    app.add_handler(CommandHandler("curriculo_ats", handle_curriculo_ats))
+    app.add_handler(CommandHandler("perfil_pro", handle_perfil_pro))
+    app.add_handler(CommandHandler("candidaturas", handle_candidaturas))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_audio))
-    app.add_handler(MessageHandler(filters.ATTACHMENT & ~filters.PHOTO & ~filters.VIDEO, handle_audio))
+    # PDF handler — antes do handler de audio generico
+    app.add_handler(MessageHandler(filters.Document.PDF, handle_document))
+    app.add_handler(MessageHandler(filters.ATTACHMENT & ~filters.PHOTO & ~filters.VIDEO & ~filters.Document.PDF, handle_audio))
 
     app.add_error_handler(handle_error)
 

@@ -89,16 +89,24 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "- \"Analisa o Attack on Titan pra mim\"\n"
             "- \"Quem e o pai do Eren?\"\n"
             "- \"Tem temporada nova de Chainsaw Man?\"\n"
-            "- \"Sites para ler manhwa\"\n"
-            "- \"Acabei de assistir Steins;Gate, nota 10\"\n"
+            "- \"Noticias de tech hoje\"\n"
+            "- \"Tem vaga de dev python remoto?\"\n"
+            "- \"Gera meu curriculo ATS\"\n"
+            "- \"Me candidata nessa vaga\"\n"
+            "- Envie um PDF para analise automatica\n"
             "- Envie audio de voz e eu transcrevo para responder\n\n"
             "<b>Comandos:</b>\n"
             "/start - inicio\n"
             "/help - ajuda\n"
-            "/historico - seu historico completo\n"
+            "/historico - seu historico de midia\n"
             "/stats - suas estatisticas pessoais\n"
-            "/maratona &lt;franquia&gt; - ordem de watch de uma franquia\n"
-            "/novidades - digest de novidades\n"
+            "/maratona &lt;franquia&gt; - ordem de watch\n"
+            "/novidades - digest de novidades de anime\n"
+            "/noticias [area] - noticias gerais (tech, ia, mercado...)\n"
+            "/vagas [query] - busca vagas de emprego\n"
+            "/curriculo_ats - gera curriculo ATS personalizado\n"
+            "/perfil_pro - seu perfil profissional\n"
+            "/candidaturas - pipeline de candidaturas\n"
             "/limpar - limpa o historico da conversa"
         ),
     )
@@ -236,6 +244,10 @@ async def handle_limpar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+_CONFIRMAR = {"sim", "sim!", "confirmo", "ok", "yes", "yeah", "claro", "pode", "bora"}
+_CANCELAR = {"nao", "não", "nã", "nã!", "cancelar", "cancel", "no", "nope", "desistir"}
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler principal - processa toda mensagem de texto."""
     if not update.message or not update.message.text:
@@ -244,9 +256,53 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = str(user.id)
     text = update.message.text.strip()
+    text_lower = text.lower().strip().rstrip("!")
 
     logger.info("Mensagem recebida: user_id=%s len=%d preview='%s'", user_id, len(text), text[:50])
 
+    # --- Fluxo de confirmação de candidatura ---
+    cand_pendente = get_redis_history().get_data(f"cand_pendente:{user_id}")
+    if cand_pendente:
+        if text_lower in _CONFIRMAR:
+            get_redis_history().delete_data(f"cand_pendente:{user_id}")
+            msg_exec = await _telegram_call_with_retry(
+                "reply_text_candidatura_exec",
+                lambda: update.message.reply_text("Executando candidatura..."),
+            )
+            try:
+                from agents.apply import executar_candidatura
+                resultado_cand = await executar_candidatura(
+                    user_id=user_id,
+                    vaga=cand_pendente["vaga"],
+                    perfil=cand_pendente["perfil"],
+                    plataforma=cand_pendente["plataforma"],
+                )
+                resp_cand = resultado_cand.get("mensagem", "Candidatura processada!")
+            except Exception as e:
+                logger.error("executar_candidatura erro user=%s: %s", user_id, e, exc_info=True)
+                resp_cand = "Erro ao executar candidatura. Tenta manualmente!"
+            texto_fmt = formatar_telegram(resp_cand)
+            try:
+                await _telegram_call_with_retry(
+                    "edit_text_candidatura_resultado",
+                    lambda: msg_exec.edit_text(texto_fmt, parse_mode="HTML"),
+                )
+            except Exception:
+                await _telegram_call_with_retry(
+                    "reply_text_candidatura_resultado",
+                    lambda: update.message.reply_text(resp_cand),
+                )
+                await _safe_delete_message(msg_exec)
+            return
+        elif text_lower in _CANCELAR:
+            get_redis_history().delete_data(f"cand_pendente:{user_id}")
+            await _telegram_call_with_retry(
+                "reply_text_candidatura_cancelada",
+                lambda: update.message.reply_text("Candidatura cancelada!"),
+            )
+            return
+
+    # --- Fluxo normal ---
     msg_processando = await _telegram_call_with_retry(
         "reply_text_processing",
         lambda: update.message.reply_text("Pensando..."),
@@ -302,15 +358,23 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-async def _processar_input(update: Update, user_id: str, text: str, msg_processando: Message) -> None:
+async def _processar_input(
+    update: Update,
+    user_id: str,
+    text: str,
+    msg_processando: Message,
+    pdf_path: str = "",
+) -> None:
     """Roda fluxo principal (orquestrador + resposta)."""
     history = get_redis_history().get(user_id)
 
     try:
-        response = await processar_mensagem(user_id, text, history)
+        resultado = await processar_mensagem(user_id, text, history, pdf_path=pdf_path)
+        response = resultado.get("response", "Algo deu errado. Tenta de novo!")
     except Exception as e:
         logger.error("processar_input erro: user=%s error=%s", user_id, e, exc_info=True)
         response = "Algo deu errado. Tenta de novo em instantes!"
+        resultado = {"response": response, "pdf_bytes": None, "pdf_filename": "", "candidatura_pendente": None}
 
     history = history + [
         {"role": "user", "content": text},
@@ -321,20 +385,51 @@ async def _processar_input(update: Update, user_id: str, text: str, msg_processa
     texto_formatado = formatar_telegram(response)
 
     # 1) Tenta editar a mensagem "Pensando..."
+    edit_success = False
     try:
         await _telegram_call_with_retry(
             "edit_text_resposta",
             lambda: msg_processando.edit_text(texto_formatado, parse_mode="HTML"),
         )
+        edit_success = True
         logger.info("Resposta enviada via edit: user=%s len=%d", user_id, len(response))
-        return
     except BadRequest as e:
-        # message is not modified, message to edit not found, parse mode issue etc.
         logger.warning("Falha edit_text (BadRequest) user=%s: %s", user_id, e)
+        await _enviar_resposta_fallback(update, user_id, response, texto_formatado)
     except Exception as e:
         logger.warning("Falha edit_text user=%s: %s", user_id, e)
+        await _enviar_resposta_fallback(update, user_id, response, texto_formatado)
 
-    # 2) Fallback: envia nova mensagem (html -> texto puro)
+    # Só apaga "Pensando..." se o edit falhou (fallback enviou nova mensagem)
+    if not edit_success:
+        await _safe_delete_message(msg_processando)
+
+    # Armazena candidatura pendente para confirmação posterior
+    candidatura_pendente = resultado.get("candidatura_pendente")
+    if candidatura_pendente:
+        get_redis_history().set_data(f"cand_pendente:{user_id}", candidatura_pendente, ttl=3600)
+        logger.info("Candidatura pendente salva no Redis: user=%s", user_id)
+
+    # Envia PDF gerado se houver
+    pdf_bytes = resultado.get("pdf_bytes")
+    if pdf_bytes:
+        pdf_filename = resultado.get("pdf_filename", "documento.pdf")
+        try:
+            import io
+            await _telegram_call_with_retry(
+                "send_document_pdf",
+                lambda: update.message.reply_document(
+                    document=io.BytesIO(pdf_bytes),
+                    filename=pdf_filename,
+                ),
+            )
+            logger.info("PDF enviado: user=%s filename=%s", user_id, pdf_filename)
+        except Exception as e:
+            logger.error("Falha ao enviar PDF user=%s: %s", user_id, e)
+
+
+async def _enviar_resposta_fallback(update: Update, user_id: str, response: str, texto_formatado: str) -> None:
+    """Fallback: envia nova mensagem quando edit falha."""
     sent = False
     try:
         await _telegram_call_with_retry(
@@ -358,7 +453,114 @@ async def _processar_input(update: Update, user_id: str, text: str, msg_processa
         except Exception as e:
             logger.error("Falha total ao enviar resposta user=%s: %s", user_id, e, exc_info=True)
 
-    await _safe_delete_message(msg_processando)
+
+async def handle_noticias(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /noticias [categoria] - busca noticias gerais ou por area."""
+    user_id = str(update.effective_user.id)
+    args = context.args
+    query = " ".join(args).strip() if args else "noticias gerais"
+
+    logger.info("/noticias: user_id=%s query=%s", user_id, query)
+    msg = await _telegram_call_with_retry(
+        "reply_text_noticias_processing",
+        lambda: update.message.reply_text("Buscando noticias..."),
+    )
+    await _processar_input(update, user_id, query or "noticias gerais", msg)
+
+
+async def handle_vagas(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /vagas [query] - busca vagas de emprego."""
+    user_id = str(update.effective_user.id)
+    args = context.args
+    query = " ".join(args).strip() if args else "vagas para meu perfil"
+
+    logger.info("/vagas: user_id=%s query=%s", user_id, query)
+    msg = await _telegram_call_with_retry(
+        "reply_text_vagas_processing",
+        lambda: update.message.reply_text("Buscando vagas..."),
+    )
+    await _processar_input(update, user_id, f"busca vagas {query}" if query else "recomenda vagas para meu perfil", msg)
+
+
+async def handle_curriculo_ats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /curriculo_ats - gera curriculo ATS personalizado."""
+    user_id = str(update.effective_user.id)
+    logger.info("/curriculo_ats: user_id=%s", user_id)
+    msg = await _telegram_call_with_retry(
+        "reply_text_curriculo_processing",
+        lambda: update.message.reply_text("Gerando seu curriculo ATS..."),
+    )
+    await _processar_input(update, user_id, "gera meu curriculo ats personalizado", msg)
+
+
+async def handle_perfil_pro(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /perfil_pro - mostra perfil profissional."""
+    user_id = str(update.effective_user.id)
+    logger.info("/perfil_pro: user_id=%s", user_id)
+    msg = await _telegram_call_with_retry(
+        "reply_text_perfil_pro_processing",
+        lambda: update.message.reply_text("Carregando seu perfil profissional..."),
+    )
+    await _processar_input(update, user_id, "me mostra meu perfil profissional", msg)
+
+
+async def handle_candidaturas(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /candidaturas - mostra pipeline de candidaturas."""
+    user_id = str(update.effective_user.id)
+    logger.info("/candidaturas: user_id=%s", user_id)
+    msg = await _telegram_call_with_retry(
+        "reply_text_candidaturas_processing",
+        lambda: update.message.reply_text("Carregando suas candidaturas..."),
+    )
+    await _processar_input(update, user_id, "minhas candidaturas", msg)
+
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler para documentos PDF recebidos pelo Telegram."""
+    if not update.message or not update.message.document:
+        return
+
+    doc = update.message.document
+    mime = (doc.mime_type or "").lower()
+
+    if "pdf" not in mime:
+        await _telegram_call_with_retry(
+            "reply_text_doc_nao_pdf",
+            lambda: update.message.reply_text("Por enquanto so aceito PDFs. Manda um arquivo .pdf!"),
+        )
+        return
+
+    user_id = str(update.effective_user.id)
+    logger.info("PDF recebido: user_id=%s filename=%s size=%s", user_id, doc.file_name, doc.file_size)
+
+    # Verifica tamanho (max 20MB)
+    max_bytes = int(__import__("os").getenv("PDF_MAX_SIZE_MB", "20")) * 1024 * 1024
+    if doc.file_size and doc.file_size > max_bytes:
+        await _telegram_call_with_retry(
+            "reply_text_doc_grande",
+            lambda: update.message.reply_text(f"Esse PDF e muito grande (max {max_bytes // 1024 // 1024}MB). Tenta um menor!"),
+        )
+        return
+
+    msg = await _telegram_call_with_retry(
+        "reply_text_pdf_processing",
+        lambda: update.message.reply_text("Recebi o PDF! Analisando..."),
+    )
+
+    try:
+        import os
+        tg_file = await doc.get_file()
+        caminho = f"/tmp/{doc.file_unique_id}.pdf"
+        await tg_file.download_to_drive(caminho)
+
+        nome = doc.file_name or "documento.pdf"
+        await _processar_input(update, user_id, f"analisa este PDF: {nome}", msg, pdf_path=caminho)
+    except Exception as e:
+        logger.error("handle_document erro: user=%s error=%s", user_id, e)
+        await _telegram_call_with_retry(
+            "edit_text_pdf_erro",
+            lambda: msg.edit_text("Erro ao processar o PDF. Tenta novamente!"),
+        )
 
 
 async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE):

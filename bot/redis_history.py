@@ -44,6 +44,29 @@ class RedisHistoryClient:
         except Exception as e:
             logger.warning("Redis delete erro user=%s: %s", user_id, e)
 
+    def set_data(self, key: str, data: dict, ttl: int = 3600) -> None:
+        """Salva dado JSON arbitrário com TTL (padrão 1h)."""
+        try:
+            self._client.setex(key, ttl, json.dumps(data, default=str))
+        except Exception as e:
+            logger.warning("Redis set_data erro key=%s: %s", key, e)
+
+    def get_data(self, key: str) -> dict | None:
+        """Lê dado JSON arbitrário; retorna None se não existir."""
+        try:
+            raw = self._client.get(key)
+            return json.loads(raw) if raw else None
+        except Exception as e:
+            logger.warning("Redis get_data erro key=%s: %s", key, e)
+            return None
+
+    def delete_data(self, key: str) -> None:
+        """Remove chave arbitrária."""
+        try:
+            self._client.delete(key)
+        except Exception as e:
+            logger.warning("Redis delete_data erro key=%s: %s", key, e)
+
 
 _client: RedisHistoryClient | None = None
 

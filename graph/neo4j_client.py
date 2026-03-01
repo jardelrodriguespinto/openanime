@@ -1478,6 +1478,293 @@ class Neo4jClient:
             }
 
 
+    # ─── Noticias — interesses do usuario ────────────────────────────────────
+
+    def get_interesses_noticias(self, telegram_id: str) -> list[str]:
+        cypher = "MATCH (u:Usuario {telegram_id: $tid}) RETURN coalesce(u.interesses_noticias, []) AS interesses"
+        with self.driver.session() as session:
+            result = session.run(cypher, tid=telegram_id)
+            record = result.single()
+            if not record:
+                return []
+            return list(record["interesses"] or [])
+
+    def salvar_interesses_noticias(self, telegram_id: str, categorias: list[str]) -> None:
+        cypher = """
+        MERGE (u:Usuario {telegram_id: $tid})
+        SET u.interesses_noticias = $categorias
+        """
+        with self.driver.session() as session:
+            session.run(cypher, tid=telegram_id, categorias=categorias)
+
+    # ─── Documentos ──────────────────────────────────────────────────────────
+
+    def registrar_documento(self, telegram_id: str, doc_id: str, nome: str, tipo: str) -> None:
+        cypher = """
+        MERGE (u:Usuario {telegram_id: $tid})
+        MERGE (d:Documento {id: $doc_id})
+        SET d.nome = $nome, d.tipo = $tipo, d.data_upload = datetime()
+        MERGE (u)-[:ENVIOU]->(d)
+        """
+        with self.driver.session() as session:
+            session.run(cypher, tid=telegram_id, doc_id=doc_id, nome=nome, tipo=tipo)
+
+    # ─── Perfil profissional ──────────────────────────────────────────────────
+
+    def salvar_perfil_profissional(self, telegram_id: str, dados: dict) -> None:
+        """Salva perfil completo extraido de curriculo."""
+        with self.driver.session() as session:
+            # Campos diretos no usuario
+            campos = {k: v for k, v in {
+                "nome_real": dados.get("nome"),
+                "email": dados.get("email"),
+                "telefone": dados.get("telefone"),
+                "linkedin_url": dados.get("linkedin"),
+                "github_url": dados.get("github"),
+                "portfolio_url": dados.get("portfolio"),
+                "cargo_atual": dados.get("cargo_atual"),
+                "nivel_senioridade": dados.get("nivel_senioridade"),
+                "localizacao": dados.get("localizacao"),
+                "pretensao_salarial": dados.get("pretensao_salarial"),
+                "modalidade_preferida": dados.get("modalidade_preferida"),
+                "objetivo_profissional": dados.get("objetivo"),
+            }.items() if v}
+
+            if campos:
+                set_clause = ", ".join(f"u.{k} = ${k}" for k in campos)
+                session.run(
+                    f"MERGE (u:Usuario {{telegram_id: $tid}}) SET {set_clause}",
+                    tid=telegram_id, **campos,
+                )
+
+            # Habilidades
+            for hab in (dados.get("habilidades") or []):
+                if not hab or not hab.get("nome"):
+                    continue
+                self.upsert_habilidade(
+                    telegram_id, hab["nome"],
+                    hab.get("nivel", 3), hab.get("anos_exp", 0)
+                )
+
+            # Experiencias
+            for exp in (dados.get("experiencias") or []):
+                if not exp or not exp.get("empresa"):
+                    continue
+                session.run("""
+                    MERGE (u:Usuario {telegram_id: $tid})
+                    MERGE (e:Empresa {nome: $empresa})
+                    MERGE (u)-[r:TRABALHOU_EM {cargo: $cargo}]->(e)
+                    SET r.inicio = $inicio, r.fim = $fim, r.descricao = $desc
+                """, tid=telegram_id, empresa=exp.get("empresa", ""),
+                    cargo=exp.get("cargo", ""), inicio=exp.get("inicio", ""),
+                    fim=exp.get("fim", "atual"), desc=exp.get("descricao", ""))
+
+            # Formacao
+            for form in (dados.get("formacao") or []):
+                if not form or not form.get("curso"):
+                    continue
+                session.run("""
+                    MERGE (u:Usuario {telegram_id: $tid})
+                    MERGE (f:Formacao {curso: $curso, instituicao: $inst})
+                    SET f.nivel = $nivel, f.ano = $ano
+                    MERGE (u)-[:CURSOU]->(f)
+                """, tid=telegram_id, curso=form.get("curso", ""),
+                    inst=form.get("instituicao", ""), nivel=form.get("nivel", ""),
+                    ano=form.get("ano", ""))
+
+            # Idiomas
+            for idioma in (dados.get("idiomas") or []):
+                if idioma and idioma.get("idioma"):
+                    session.run("""
+                        MERGE (u:Usuario {telegram_id: $tid})
+                        SET u.idiomas = coalesce(u.idiomas, []) + [$idioma_nivel]
+                    """, tid=telegram_id,
+                        idioma_nivel=f"{idioma['idioma']}:{idioma.get('nivel', '')}")
+
+        logger.info("Neo4j: perfil profissional salvo user=%s", telegram_id)
+
+    def upsert_habilidade(self, telegram_id: str, nome: str, nivel: int = 3, anos_exp: int = 0) -> None:
+        cypher = """
+        MERGE (u:Usuario {telegram_id: $tid})
+        MERGE (h:Habilidade {nome: $nome})
+        MERGE (u)-[r:TEM_HABILIDADE]->(h)
+        SET r.nivel = $nivel, r.anos_exp = $anos_exp
+        """
+        with self.driver.session() as session:
+            session.run(cypher, tid=telegram_id, nome=nome.lower(), nivel=nivel, anos_exp=anos_exp)
+
+    def salvar_preferencias_emprego(self, telegram_id: str, prefs: dict) -> None:
+        campos = {k: v for k, v in prefs.items() if v}
+        if not campos:
+            return
+        set_clause = ", ".join(f"u.{k} = ${k}" for k in campos)
+        cypher = f"MERGE (u:Usuario {{telegram_id: $tid}}) SET {set_clause}"
+        with self.driver.session() as session:
+            session.run(cypher, tid=telegram_id, **campos)
+
+    def adicionar_cargo_desejado(self, telegram_id: str, cargo: str) -> None:
+        cypher = """
+        MERGE (u:Usuario {telegram_id: $tid})
+        MERGE (c:Cargo {titulo: $cargo})
+        MERGE (u)-[:QUER_CARGO]->(c)
+        """
+        with self.driver.session() as session:
+            session.run(cypher, tid=telegram_id, cargo=cargo)
+
+    def get_perfil_profissional(self, telegram_id: str) -> dict:
+        cypher = """
+        MATCH (u:Usuario {telegram_id: $tid})
+        OPTIONAL MATCH (u)-[th:TEM_HABILIDADE]->(h:Habilidade)
+        OPTIONAL MATCH (u)-[tr:TRABALHOU_EM]->(e:Empresa)
+        OPTIONAL MATCH (u)-[:CURSOU]->(f:Formacao)
+        OPTIONAL MATCH (u)-[:QUER_CARGO]->(c:Cargo)
+        RETURN u,
+               collect(DISTINCT {nome: h.nome, nivel: th.nivel, anos_exp: th.anos_exp}) AS habilidades,
+               collect(DISTINCT {empresa: e.nome, cargo: tr.cargo, inicio: tr.inicio, fim: tr.fim, descricao: tr.descricao}) AS experiencias,
+               collect(DISTINCT {curso: f.curso, instituicao: f.instituicao, nivel: f.nivel, ano: f.ano}) AS formacao,
+               collect(DISTINCT c.titulo) AS cargos_desejados
+        """
+        with self.driver.session() as session:
+            result = session.run(cypher, tid=telegram_id)
+            record = result.single()
+            if not record:
+                return {}
+            u = dict(record["u"])
+            return {
+                "nome": u.get("nome_real", ""),
+                "email": u.get("email", ""),
+                "telefone": u.get("telefone", ""),
+                "linkedin": u.get("linkedin_url", ""),
+                "github": u.get("github_url", ""),
+                "portfolio": u.get("portfolio_url", ""),
+                "cargo_atual": u.get("cargo_atual", ""),
+                "nivel_senioridade": u.get("nivel_senioridade", ""),
+                "localizacao": u.get("localizacao", ""),
+                "pretensao_salarial": u.get("pretensao_salarial", ""),
+                "modalidade_preferida": u.get("modalidade_preferida", ""),
+                "objetivo": u.get("objetivo_profissional", ""),
+                "habilidades": [h for h in record["habilidades"] if h.get("nome")],
+                "experiencias": [e for e in record["experiencias"] if e.get("empresa")],
+                "formacao": [f for f in record["formacao"] if f.get("curso")],
+                "cargos_desejados": [c for c in record["cargos_desejados"] if c],
+                "idiomas": self._parse_idiomas(u.get("idiomas", [])),
+            }
+
+    def _parse_idiomas(self, idiomas_raw: list) -> list[dict]:
+        result = []
+        for item in (idiomas_raw or []):
+            if ":" in str(item):
+                parts = str(item).split(":", 1)
+                result.append({"idioma": parts[0], "nivel": parts[1]})
+        return result
+
+    def get_score_completude_perfil(self, telegram_id: str) -> int:
+        """Retorna score de completude do perfil profissional (0-100)."""
+        perfil = self.get_perfil_profissional(telegram_id)
+        score = 0
+        if len(perfil.get("habilidades", [])) >= 3:
+            score += 20
+        if perfil.get("experiencias"):
+            score += 20
+        if perfil.get("formacao"):
+            score += 10
+        if perfil.get("cargos_desejados"):
+            score += 15
+        if perfil.get("pretensao_salarial"):
+            score += 10
+        if perfil.get("modalidade_preferida"):
+            score += 10
+        if perfil.get("localizacao"):
+            score += 10
+        if perfil.get("nivel_senioridade"):
+            score += 5
+        return score
+
+    # ─── Vagas ───────────────────────────────────────────────────────────────
+
+    def upsert_vaga(self, dados: dict) -> None:
+        cypher = """
+        MERGE (v:Vaga {id: $id})
+        SET v.titulo = $titulo,
+            v.empresa = $empresa,
+            v.url = $url,
+            v.fonte = $fonte,
+            v.salario = $salario,
+            v.modalidade = $modalidade,
+            v.descricao = $descricao,
+            v.status = 'aberta',
+            v.data_indexacao = datetime()
+        """
+        with self.driver.session() as session:
+            session.run(cypher,
+                id=dados.get("id", ""),
+                titulo=dados.get("titulo", ""),
+                empresa=dados.get("empresa", ""),
+                url=dados.get("url", ""),
+                fonte=dados.get("fonte", ""),
+                salario=dados.get("salario", ""),
+                modalidade=dados.get("modalidade", ""),
+                descricao=dados.get("descricao", "")[:500],
+            )
+
+    def get_ultima_vaga_visualizada(self, telegram_id: str) -> dict | None:
+        cypher = """
+        MATCH (u:Usuario {telegram_id: $tid})-[r:VISUALIZOU|FAVORITOU]->(v:Vaga)
+        RETURN v ORDER BY r.data DESC LIMIT 1
+        """
+        with self.driver.session() as session:
+            result = session.run(cypher, tid=telegram_id)
+            record = result.single()
+            if not record:
+                return None
+            return dict(record["v"])
+
+    def registrar_candidatura(self, user_id: str, vaga_id: str, plataforma: str, status: str) -> None:
+        cypher = """
+        MERGE (u:Usuario {telegram_id: $uid})
+        MERGE (v:Vaga {id: $vaga_id})
+        MERGE (u)-[r:SE_CANDIDATOU {vaga_id: $vaga_id}]->(v)
+        SET r.data = datetime(), r.plataforma = $plataforma, r.status = $status,
+            r.data_ultima_atualizacao = datetime()
+        """
+        with self.driver.session() as session:
+            session.run(cypher, uid=user_id, vaga_id=vaga_id,
+                        plataforma=plataforma, status=status)
+
+    def get_candidaturas(self, telegram_id: str) -> list[dict]:
+        cypher = """
+        MATCH (u:Usuario {telegram_id: $tid})-[r:SE_CANDIDATOU]->(v:Vaga)
+        RETURN v.titulo AS titulo, v.empresa AS empresa, v.url AS url,
+               r.status AS status, r.plataforma AS plataforma,
+               toString(r.data) AS data
+        ORDER BY r.data DESC LIMIT 20
+        """
+        with self.driver.session() as session:
+            result = session.run(cypher, tid=telegram_id)
+            return [dict(r) for r in result]
+
+    def ja_se_candidatou(self, telegram_id: str, vaga_id: str) -> bool:
+        cypher = """
+        MATCH (u:Usuario {telegram_id: $tid})-[r:SE_CANDIDATOU {vaga_id: $vaga_id}]->(v:Vaga)
+        RETURN count(r) > 0 AS existe
+        """
+        with self.driver.session() as session:
+            result = session.run(cypher, tid=telegram_id, vaga_id=vaga_id)
+            record = result.single()
+            return record["existe"] if record else False
+
+    def contar_candidaturas_hoje(self, telegram_id: str) -> int:
+        cypher = """
+        MATCH (u:Usuario {telegram_id: $tid})-[r:SE_CANDIDATOU]->(v:Vaga)
+        WHERE r.data >= datetime({year: date().year, month: date().month, day: date().day})
+        RETURN count(r) AS total
+        """
+        with self.driver.session() as session:
+            result = session.run(cypher, tid=telegram_id)
+            record = result.single()
+            return record["total"] if record else 0
+
+
 _client: Neo4jClient | None = None
 
 

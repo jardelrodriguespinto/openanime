@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<!--
+  Template ATS-friendly:
+  - Uma coluna apenas (sem colunas paralelas)
+  - Fontes padrao (Arial)
+  - Texto selecionavel (nao imagem)
+  - Sem tabelas para layout
+  - Titulos de secao em texto puro
+  - Datas em formato MM/AAAA
+-->
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: Arial, Helvetica, sans-serif;
+    font-size: 11pt;
+    line-height: 1.5;
+    color: #000;
+    padding: 2cm 2.5cm;
+  }
+  .nome { font-size: 20pt; font-weight: bold; margin-bottom: 4px; }
+  .contato { font-size: 10pt; color: #333; margin-bottom: 16px; }
+  .contato span { margin-right: 14px; }
+  h2 {
+    font-size: 12pt;
+    font-weight: bold;
+    text-transform: uppercase;
+    border-bottom: 1px solid #000;
+    padding-bottom: 2px;
+    margin: 18px 0 8px;
+    letter-spacing: 0.5px;
+  }
+  .objetivo { margin-bottom: 10px; }
+  .exp-header { overflow: hidden; margin-bottom: 2px; }
+  .exp-empresa { font-weight: bold; float: left; }
+  .exp-periodo { float: right; font-size: 10pt; }
+  .exp-cargo { font-style: italic; font-size: 10pt; color: #333; margin-bottom: 4px; }
+  .exp-bullets { margin-left: 16px; margin-bottom: 10px; }
+  .exp-bullets li { margin-bottom: 3px; }
+  .skills-lista { margin-bottom: 8px; }
+  .formacao-header { overflow: hidden; }
+  .formacao-curso { font-weight: bold; float: left; }
+  .formacao-ano { float: right; font-size: 10pt; }
+  .formacao-inst { font-size: 10pt; color: #333; margin-bottom: 8px; }
+  .idiomas-lista { }
+</style>
+</head>
+<body>
+
+<div class="nome">{{ nome }}</div>
+<div class="contato">
+  {% if email %}<span>{{ email }}</span>{% endif %}
+  {% if telefone %}<span>{{ telefone }}</span>{% endif %}
+  {% if linkedin %}<span>{{ linkedin }}</span>{% endif %}
+  {% if localizacao %}<span>{{ localizacao }}</span>{% endif %}
+</div>
+
+{% if objetivo %}
+<h2>Objetivo Profissional</h2>
+<div class="objetivo">{{ objetivo }}</div>
+{% endif %}
+
+{% if habilidades %}
+<h2>Habilidades</h2>
+<div class="skills-lista">{{ habilidades | join(', ') }}</div>
+{% endif %}
+
+{% if experiencias %}
+<h2>Experiência Profissional</h2>
+{% for exp in experiencias %}
+<div class="exp-header">
+  <span class="exp-empresa">{{ exp.empresa }}</span>
+  <span class="exp-periodo">{{ exp.periodo }}</span>
+</div>
+<div class="exp-cargo">{{ exp.cargo }}</div>
+{% if exp.bullets %}
+<ul class="exp-bullets">
+{% for bullet in exp.bullets %}
+<li>{{ bullet }}</li>
+{% endfor %}
+</ul>
+{% endif %}
+{% endfor %}
+{% endif %}
+
+{% if formacao %}
+<h2>Formação Acadêmica</h2>
+{% for f in formacao %}
+<div class="formacao-header">
+  <span class="formacao-curso">{{ f.curso }}</span>
+  <span class="formacao-ano">{{ f.ano }}</span>
+</div>
+<div class="formacao-inst">{{ f.instituicao }}{% if f.nivel %} — {{ f.nivel }}{% endif %}</div>
+{% endfor %}
+{% endif %}
+
+{% if idiomas %}
+<h2>Idiomas</h2>
+<div class="idiomas-lista">
+{% for idioma in idiomas %}
+{{ idioma.idioma }}: {{ idioma.nivel }}{% if not loop.last %} | {% endif %}
+{% endfor %}
+</div>
+{% endif %}
+
+{% if github or portfolio %}
+<h2>Links</h2>
+{% if github %}<div>GitHub: {{ github }}</div>{% endif %}
+{% if portfolio %}<div>Portfolio: {{ portfolio }}</div>{% endif %}
+{% endif %}
+
+</body>
+</html>

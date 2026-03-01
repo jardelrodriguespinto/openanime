@@ -6,6 +6,29 @@ logger = logging.getLogger(__name__)
 
 ANIME_CLASS = "Anime"
 REVIEW_CLASS = "Review"
+DOCUMENT_CLASS = "Document"
+
+DOCUMENT_SCHEMA = {
+    "class": DOCUMENT_CLASS,
+    "description": "Documentos PDF enviados pelos usuarios",
+    "vectorizer": "text2vec-openai",
+    "moduleConfig": {
+        "text2vec-openai": {
+            "vectorizeClassName": False,
+            "model": "text-embedding-3-small",
+            "type": "text",
+        }
+    },
+    "properties": [
+        {"name": "user_id",     "dataType": ["text"], "moduleConfig": {"text2vec-openai": {"skip": True}}},
+        {"name": "doc_id",      "dataType": ["text"], "moduleConfig": {"text2vec-openai": {"skip": True}}},
+        {"name": "nome",        "dataType": ["text"], "moduleConfig": {"text2vec-openai": {"skip": True}}},
+        {"name": "tipo",        "dataType": ["text"], "moduleConfig": {"text2vec-openai": {"skip": True}}},
+        {"name": "conteudo",    "dataType": ["text"]},
+        {"name": "resumo",      "dataType": ["text"], "moduleConfig": {"text2vec-openai": {"skip": True}}},
+        {"name": "data_upload", "dataType": ["text"], "moduleConfig": {"text2vec-openai": {"skip": True}}},
+    ],
+}
 
 ANIME_SCHEMA = {
     "class": ANIME_CLASS,
@@ -61,7 +84,7 @@ class WeaviateClient:
     def setup_schema(self):
         """Cria schema se não existir."""
         existing = {c["class"] for c in self.client.schema.get().get("classes", [])}
-        for schema in [ANIME_SCHEMA, REVIEW_SCHEMA]:
+        for schema in [ANIME_SCHEMA, REVIEW_SCHEMA, DOCUMENT_SCHEMA]:
             if schema["class"] not in existing:
                 self.client.schema.create_class(schema)
                 logger.info("Weaviate: classe %s criada", schema["class"])
@@ -156,6 +179,50 @@ class WeaviateClient:
             .do()
         )
         return result.get("data", {}).get("Get", {}).get(REVIEW_CLASS, [])
+
+    def upsert_documento(self, doc: dict) -> None:
+        """Insere ou atualiza documento do usuario no Weaviate."""
+        from datetime import datetime
+        doc_id = str(doc.get("doc_id", ""))
+        data = {
+            "user_id": str(doc.get("user_id", "")),
+            "doc_id": doc_id,
+            "nome": doc.get("nome", ""),
+            "tipo": doc.get("tipo", "generico"),
+            "conteudo": doc.get("conteudo", "")[:8000],
+            "resumo": doc.get("resumo", "")[:500],
+            "data_upload": datetime.utcnow().isoformat(),
+        }
+
+        result = (
+            self.client.query
+            .get(DOCUMENT_CLASS, ["doc_id"])
+            .with_where({"path": ["doc_id"], "operator": "Equal", "valueText": doc_id})
+            .with_additional(["id"])
+            .with_limit(1)
+            .do()
+        )
+        existing = result.get("data", {}).get("Get", {}).get(DOCUMENT_CLASS, [])
+
+        if existing:
+            uuid = existing[0].get("_additional", {}).get("id")
+            if uuid:
+                self.client.data_object.update(data, DOCUMENT_CLASS, uuid)
+                return
+        self.client.data_object.create(data, DOCUMENT_CLASS)
+        logger.debug("Weaviate: documento inserido doc_id=%s", doc_id)
+
+    def busca_documento(self, user_id: str, query: str, limit: int = 3) -> list[dict]:
+        """Busca documentos do usuario por similaridade semantica."""
+        result = (
+            self.client.query
+            .get(DOCUMENT_CLASS, ["user_id", "doc_id", "nome", "tipo", "conteudo", "resumo"])
+            .with_near_text({"concepts": [query]})
+            .with_where({"path": ["user_id"], "operator": "Equal", "valueText": str(user_id)})
+            .with_limit(limit)
+            .do()
+        )
+        return result.get("data", {}).get("Get", {}).get(DOCUMENT_CLASS, []) or []
 
     def total_animes(self) -> int:
         result = (

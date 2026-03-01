@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: Arial, Helvetica, sans-serif;
+    font-size: 11pt;
+    line-height: 1.6;
+    color: #222;
+    padding: 2cm;
+  }
+  h1 { font-size: 20pt; margin-bottom: 6px; color: #1a1a1a; }
+  h2 { font-size: 13pt; border-bottom: 2px solid #333; padding-bottom: 4px; margin: 20px 0 10px; }
+  .meta { font-size: 10pt; color: #666; margin-bottom: 16px; }
+  .resumo { background: #f5f5f5; padding: 12px; border-left: 4px solid #333; margin-bottom: 20px; }
+  ul { margin: 6px 0 12px 20px; }
+  li { margin-bottom: 4px; }
+  p { margin-bottom: 10px; }
+  .entidade { display: inline-block; background: #e8e8e8; border-radius: 3px; padding: 1px 6px; margin: 2px; font-size: 9.5pt; }
+</style>
+</head>
+<body>
+<h1>{{ titulo }}</h1>
+<div class="meta">Tipo: {{ tipo }} | Paginas: {{ paginas }} | Gerado em: {{ data_geracao }}</div>
+
+<h2>Resumo</h2>
+<div class="resumo">{{ resumo }}</div>
+
+{% if pontos_chave %}
+<h2>Pontos-chave</h2>
+<ul>
+{% for ponto in pontos_chave %}
+<li>{{ ponto }}</li>
+{% endfor %}
+</ul>
+{% endif %}
+
+{% if entidades %}
+<h2>Entidades Encontradas</h2>
+<p>
+{% for entidade in entidades %}
+<span class="entidade">{{ entidade }}</span>
+{% endfor %}
+</p>
+{% endif %}
+
+{% if conteudo_extra %}
+<h2>Detalhes</h2>
+{{ conteudo_extra }}
+{% endif %}
+</body>
+</html>
