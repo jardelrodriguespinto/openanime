@@ -16,10 +16,18 @@ def responder_node(state: State) -> dict:
     if not response:
         response = "Hmm, não soube o que responder. Tenta reformular?"
 
+    pdf_bytes = state.get("pdf_bytes")
+    pdf_filename = state.get("pdf_filename", "")
+
     logger.info(
-        "Responder: finalizando | user=%s intent=%s resposta_len=%d",
+        "Responder: finalizando | user=%s intent=%s resposta_len=%d pdf=%s",
         user_id,
         intent,
         len(response),
+        bool(pdf_bytes),
     )
-    return {"response": response}
+    return {
+        "response": response,
+        "pdf_bytes": pdf_bytes,
+        "pdf_filename": pdf_filename,
+    }
