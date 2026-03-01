@@ -36,7 +36,7 @@ def orchestrator_node(state: State) -> dict:
     # Intenção já definida externamente (ex: override de PDF) — não reclassifica
     if state.get("intent"):
         logger.info("Orquestrador: intent já definido como '%s', pulando classificador", state["intent"])
-        return {}
+        return {"intent": state["intent"]}
 
     user_message = state["raw_input"]
     history = state.get("messages", [])
