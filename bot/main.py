@@ -14,9 +14,11 @@ from bot.handlers import (
     handle_help,
     handle_historico,
     handle_limpar,
+    handle_maratona,
     handle_message,
     handle_novidades,
     handle_start,
+    handle_stats,
 )
 
 load_dotenv()
@@ -74,6 +76,14 @@ def main():
         logger.error("Weaviate: falha na conexao: %s", e)
 
     try:
+        from bot.redis_history import get_redis_history
+
+        get_redis_history().get("__ping__")
+        logger.info("Redis: conectado")
+    except Exception as e:
+        logger.error("Redis: falha na conexao: %s", e)
+
+    try:
         from agents.orchestrator import get_graph
 
         get_graph()
@@ -94,6 +104,8 @@ def main():
     app.add_handler(CommandHandler("start", handle_start))
     app.add_handler(CommandHandler("help", handle_help))
     app.add_handler(CommandHandler("historico", handle_historico))
+    app.add_handler(CommandHandler("stats", handle_stats))
+    app.add_handler(CommandHandler("maratona", handle_maratona))
     app.add_handler(CommandHandler("novidades", handle_novidades))
     app.add_handler(CommandHandler("limpar", handle_limpar))
 
@@ -114,17 +126,23 @@ def main():
 
 def _registrar_jobs(app):
     """Registra jobs agendados via JobQueue do python-telegram-bot."""
-    from bot.notificador import enviar_diario
+    from bot.notificador import enviar_diario, verificar_novos_episodios
 
     tz_br = pytz.timezone("America/Sao_Paulo")
-    horario_diario = datetime.time(hour=8, minute=0, tzinfo=tz_br)
 
     app.job_queue.run_daily(
         enviar_diario,
-        time=horario_diario,
+        time=datetime.time(hour=8, minute=0, tzinfo=tz_br),
         name="digest_diario",
     )
     logger.info("Job agendado: digest_diario as 08:00 America/Sao_Paulo")
+
+    app.job_queue.run_daily(
+        verificar_novos_episodios,
+        time=datetime.time(hour=20, minute=0, tzinfo=tz_br),
+        name="alerta_episodios",
+    )
+    logger.info("Job agendado: alerta_episodios as 20:00 America/Sao_Paulo")
 
 
 if __name__ == "__main__":

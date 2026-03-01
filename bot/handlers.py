@@ -8,12 +8,10 @@ from telegram.ext import ContextTypes
 from agents.orchestrator import processar_mensagem
 from ai.assemblyai import get_assemblyai
 from bot.formatter import formatar_telegram
+from bot.redis_history import get_redis_history
 
 logger = logging.getLogger(__name__)
 
-# Historico de conversa por usuario (em memoria)
-_historicos: dict[str, list] = {}
-MAX_HISTORY = 20
 MAX_AUDIO_PREVIEW = 120
 MAX_TELEGRAM_RETRIES = 3
 
@@ -98,6 +96,8 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/start - inicio\n"
             "/help - ajuda\n"
             "/historico - seu historico completo\n"
+            "/stats - suas estatisticas pessoais\n"
+            "/maratona &lt;franquia&gt; - ordem de watch de uma franquia\n"
             "/novidades - digest de novidades\n"
             "/limpar - limpa o historico da conversa"
         ),
@@ -151,10 +151,82 @@ async def handle_novidades(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-async def handle_limpar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Limpa historico de conversa em memoria."""
+async def handle_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /stats - estatisticas pessoais do usuario."""
+    from graph.neo4j_client import get_neo4j
+
     user_id = str(update.effective_user.id)
-    _historicos.pop(user_id, None)
+    logger.info("/stats: user_id=%s", user_id)
+
+    try:
+        neo4j = get_neo4j()
+        stats = neo4j.get_stats_pessoais(user_id)
+        texto = _formatar_stats(stats)
+        await _telegram_call_with_retry(
+            "reply_html_stats",
+            lambda: update.message.reply_html(texto),
+        )
+    except Exception as e:
+        logger.error("/stats erro: %s", e)
+        await _telegram_call_with_retry(
+            "reply_text_stats_erro",
+            lambda: update.message.reply_text("Erro ao carregar suas stats."),
+        )
+
+
+def _formatar_stats(stats: dict) -> str:
+    if not stats:
+        return "Nenhuma estatistica ainda. Registra o que voce assistiu!"
+
+    linhas = ["<b>Suas stats:</b>\n"]
+
+    total_assistidos = stats.get("total_assistidos", 0)
+    total_dropados = stats.get("total_dropados", 0)
+    total_progresso = stats.get("total_progresso", 0)
+    media_notas = stats.get("media_notas")
+    drop_rate = stats.get("drop_rate", 0)
+    top_generos = stats.get("top_generos", [])
+    top_estudios = stats.get("top_estudios", [])
+
+    linhas.append(f"Assistidos: <b>{total_assistidos}</b>")
+    linhas.append(f"Em progresso: <b>{total_progresso}</b>")
+    linhas.append(f"Dropados: <b>{total_dropados}</b>")
+    if media_notas is not None:
+        linhas.append(f"Nota media: <b>{media_notas}/10</b>")
+    linhas.append(f"Taxa de drop: <b>{drop_rate}%</b>")
+    if top_generos:
+        linhas.append(f"\nGeneros favoritos: <b>{', '.join(top_generos)}</b>")
+    if top_estudios:
+        linhas.append(f"Studios favoritos: <b>{', '.join(top_estudios)}</b>")
+
+    return "\n".join(linhas)
+
+
+async def handle_maratona(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /maratona <franquia> - monta ordem completa de watch."""
+    user_id = str(update.effective_user.id)
+    args = context.args
+    titulo = " ".join(args).strip() if args else ""
+
+    if not titulo:
+        await _telegram_call_with_retry(
+            "reply_text_maratona_ajuda",
+            lambda: update.message.reply_text("Me diz qual franquia! Ex: /maratona Naruto"),
+        )
+        return
+
+    logger.info("/maratona: user_id=%s titulo=%s", user_id, titulo)
+    msg_processando = await _telegram_call_with_retry(
+        "reply_text_maratona_processing",
+        lambda: update.message.reply_text("Montando guia de maratona..."),
+    )
+    await _processar_input(update, user_id, f"/maratona {titulo}", msg_processando)
+
+
+async def handle_limpar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Limpa historico de conversa."""
+    user_id = str(update.effective_user.id)
+    get_redis_history().delete(user_id)
     logger.info("/limpar: user_id=%s", user_id)
     await _telegram_call_with_retry(
         "reply_text_limpar",
@@ -230,7 +302,7 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _processar_input(update: Update, user_id: str, text: str, msg_processando: Message) -> None:
     """Roda fluxo principal (orquestrador + resposta)."""
-    history = _historicos.get(user_id, [])
+    history = get_redis_history().get(user_id)
 
     try:
         response = await processar_mensagem(user_id, text, history)
@@ -242,7 +314,7 @@ async def _processar_input(update: Update, user_id: str, text: str, msg_processa
         {"role": "user", "content": text},
         {"role": "assistant", "content": response},
     ]
-    _historicos[user_id] = history[-MAX_HISTORY:]
+    get_redis_history().set(user_id, history)
 
     texto_formatado = formatar_telegram(response)
 

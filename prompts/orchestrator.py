@@ -6,6 +6,7 @@ Classifique a mensagem em UMA dessas categorias:
 - analise: pedir análise, review, crítica, avaliação detalhada de uma obra específica
 - busca: notícias, lançamentos, temporadas novas, sites para ler/assistir, links, informações recentes
 - perfil: registrar que assistiu ou leu algo, dar nota, registrar drop, ver histórico, lista pessoal
+- maratona: pedir ordem de watch de uma franquia, guia de maratona, watch order completo
 
 Exemplos:
 "me recomenda algo parecido com solo leveling" → recomendacao
@@ -32,8 +33,15 @@ Exemplos:
 "me recomenda videos de resumo de attack on titan" → busca
 "tem video bom explicando o final de evangelion?" → busca
 "quem é o pai do eren?" → conversa
+"quero maratonar naruto" → maratona
+"qual a ordem para assistir fate?" → maratona
+"/maratona evangelion" → maratona
+"qual e a ordem certa de attack on titan?" → maratona
+"como assistir steins gate em ordem?" → maratona
+"watch order de monogatari" → maratona
+"me manda um guia de maratona de one piece" → maratona
 
-Responda APENAS com uma palavra: conversa, recomendacao, analise, busca ou perfil.
+Responda APENAS com uma palavra: conversa, recomendacao, analise, busca, perfil ou maratona.
 Sem explicação, sem pontuação, sem aspas.
 """
 

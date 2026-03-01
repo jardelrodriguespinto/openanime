@@ -1242,6 +1242,69 @@ class Neo4jClient:
                     ponte=route.get("ponte_animemanga", []),
                 )
 
+    def get_stats_pessoais(self, telegram_id: str) -> dict:
+        """Retorna estatisticas agregadas do usuario para o comando /stats."""
+        cypher = """
+        MATCH (u:Usuario {telegram_id: $telegram_id})
+        OPTIONAL MATCH (u)-[r:ASSISTIU]->(a:Anime)
+        OPTIONAL MATCH (u)-[d:DROPOU]->(da:Anime)
+        OPTIONAL MATCH (u)-[p:EM_PROGRESSO]->(pa:Anime)
+        RETURN
+            count(DISTINCT a)  AS total_assistidos,
+            count(DISTINCT da) AS total_dropados,
+            count(DISTINCT pa) AS total_progresso,
+            avg(CASE WHEN r.nota IS NOT NULL THEN toFloat(r.nota) ELSE null END) AS media_notas
+        """
+        with self.driver.session() as session:
+            rec = session.run(cypher, telegram_id=telegram_id).single()
+            if not rec:
+                return {}
+
+        total_assistidos = rec.get("total_assistidos") or 0
+        total_dropados = rec.get("total_dropados") or 0
+        total_progresso = rec.get("total_progresso") or 0
+        media_notas = rec.get("media_notas")
+        total = total_assistidos + total_dropados
+        drop_rate = round((total_dropados / total) * 100) if total > 0 else 0
+
+        top_generos = self._top_items_por_relacao(telegram_id, "ASSISTIU", "Genero", "TEM_GENERO", limit=3)
+        top_estudios = self._top_items_por_relacao(telegram_id, "ASSISTIU", "Estudio", "PRODUZIDO_POR", limit=3)
+
+        return {
+            "total_assistidos": total_assistidos,
+            "total_dropados": total_dropados,
+            "total_progresso": total_progresso,
+            "media_notas": round(media_notas, 1) if media_notas is not None else None,
+            "drop_rate": drop_rate,
+            "top_generos": top_generos,
+            "top_estudios": top_estudios,
+        }
+
+    def _top_items_por_relacao(
+        self, telegram_id: str, user_rel: str, node_label: str, anime_rel: str, limit: int = 3
+    ) -> list[str]:
+        cypher = f"""
+        MATCH (u:Usuario {{telegram_id: $telegram_id}})-[:{user_rel}]->(a:Anime)-[:{anime_rel}]->(n:{node_label})
+        WHERE n.nome IS NOT NULL
+        RETURN n.nome AS nome, count(*) AS freq
+        ORDER BY freq DESC
+        LIMIT $limit
+        """
+        with self.driver.session() as session:
+            rows = session.run(cypher, telegram_id=telegram_id, limit=limit)
+            return [row["nome"] for row in rows if row.get("nome")]
+
+    def get_progresso_ativo(self, telegram_id: str) -> list[str]:
+        """Retorna titulos das series que o usuario tem EM_PROGRESSO."""
+        cypher = """
+        MATCH (u:Usuario {telegram_id: $telegram_id})-[p:EM_PROGRESSO]->(a:Anime)
+        RETURN a.titulo AS titulo
+        ORDER BY p.atualizado_em DESC
+        """
+        with self.driver.session() as session:
+            rows = session.run(cypher, telegram_id=telegram_id)
+            return [row["titulo"] for row in rows if row.get("titulo")]
+
     def get_all_user_ids(self) -> list[str]:
         cypher = "MATCH (u:Usuario) RETURN u.telegram_id AS tid"
         with self.driver.session() as session:

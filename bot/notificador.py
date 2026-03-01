@@ -342,3 +342,68 @@ async def enviar_diario(context: CallbackContext) -> None:
             logger.warning("Notificador: erro ao notificar user=%s: %s", user_id, e)
 
     logger.info("Notificador: digest concluido - enviados=%d erros=%d", enviados, erros)
+
+
+async def verificar_novos_episodios(context: CallbackContext) -> None:
+    """
+    Job de alerta de episodios (20h) - notifica series em progresso com
+    episodios chegando nos proximos 2 dias. Sem LLM, direto ao ponto.
+    """
+    logger.info("Notificador: verificando novos episodios")
+
+    try:
+        neo4j = get_neo4j()
+        user_ids = neo4j.get_all_user_ids()
+    except Exception as e:
+        logger.error("Notificador episodios: erro ao buscar usuarios: %s", e)
+        return
+
+    tvmaze_cache: dict[str, list[dict]] = {}
+    enviados = 0
+
+    for user_id in user_ids:
+        try:
+            titulos = neo4j.get_progresso_ativo(user_id)
+            if not titulos:
+                continue
+
+            alertas = []
+            seen = set()
+            for titulo in titulos[:6]:
+                if titulo not in tvmaze_cache:
+                    try:
+                        tvmaze_cache[titulo] = tvmaze.get_upcoming_episodes(query=titulo, days=2, limit=1)
+                    except Exception as e:
+                        logger.debug("TVMaze falhou para '%s': %s", titulo, e)
+                        tvmaze_cache[titulo] = []
+                for ep in tvmaze_cache[titulo]:
+                    key = f"{ep.get('show_name')}|{ep.get('airdate')}|{ep.get('season')}|{ep.get('episode')}"
+                    if key not in seen:
+                        seen.add(key)
+                        alertas.append(ep)
+
+            if not alertas:
+                continue
+
+            alertas.sort(key=lambda x: x.get("airdate") or "")
+            linhas = ["<b>Episodios chegando (proximos 2 dias):</b>\n"]
+            for ep in alertas[:4]:
+                show = ep.get("show_name", "?")
+                airdate = ep.get("airdate", "?")
+                season = ep.get("season")
+                episode = ep.get("episode")
+                ep_label = f" S{season:02d}E{episode:02d}" if season and episode else ""
+                linhas.append(f"- <b>{show}</b>{ep_label} · {airdate}")
+
+            await context.bot.send_message(
+                chat_id=user_id,
+                text="\n".join(linhas),
+                parse_mode="HTML",
+            )
+            enviados += 1
+            logger.info("Notificador episodios: alerta enviado para user=%s", user_id)
+
+        except Exception as e:
+            logger.warning("Notificador episodios: erro user=%s: %s", user_id, e)
+
+    logger.info("Notificador episodios: concluido - enviados=%d", enviados)

@@ -65,6 +65,31 @@ services:
     logging: *default-logging
     restart: unless-stopped
 
+  redis:
+    image: redis/redis-stack-server:latest
+    container_name: anime-redis
+    labels:
+      service: redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./data/redis:/data
+      - ./users.acl:/usr/local/etc/redis/users.acl:ro
+    command: >
+      redis-server
+      --aclfile /usr/local/etc/redis/users.acl
+      --save 60 1000
+      --appendonly yes
+      --appendfsync everysec
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning --user open-anime -a open-anime ping | grep PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    logging: *default-logging
+    restart: unless-stopped
+
   bot:
     build:
       context: .
@@ -76,6 +101,8 @@ services:
       neo4j:
         condition: service_healthy
       weaviate:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     env_file: .env
     volumes:

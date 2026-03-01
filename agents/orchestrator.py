@@ -10,7 +10,7 @@ import prompts.orchestrator as orch_prompt
 
 logger = logging.getLogger(__name__)
 
-VALID_INTENTS = {"conversa", "recomendacao", "analise", "busca", "perfil"}
+VALID_INTENTS = {"conversa", "recomendacao", "analise", "busca", "perfil", "maratona"}
 
 
 class State(TypedDict):
@@ -59,20 +59,20 @@ def build_graph() -> StateGraph:
     from agents.analysis import analysis_node
     from agents.search import search_node
     from agents.profile import profile_node
+    from agents.maratona import maratona_node
     from agents.responder import responder_node
 
     graph = StateGraph(State)
 
-    # Adiciona nós — 5 sub-agentes especializados + orquestrador + responder
     graph.add_node("orchestrator", orchestrator_node)
-    graph.add_node("conversa", conversation_node)       # lore, personagens, história
-    graph.add_node("recomendacao", recommendation_node) # sugestões personalizadas
-    graph.add_node("analise", analysis_node)            # review profundo de uma obra
-    graph.add_node("busca", search_node)                # notícias, sites, lançamentos
-    graph.add_node("perfil", profile_node)              # histórico e watchlist
+    graph.add_node("conversa", conversation_node)
+    graph.add_node("recomendacao", recommendation_node)
+    graph.add_node("analise", analysis_node)
+    graph.add_node("busca", search_node)
+    graph.add_node("perfil", profile_node)
+    graph.add_node("maratona", maratona_node)
     graph.add_node("responder", responder_node)
 
-    # Fluxo: orchestrator → sub-agente → responder → END
     graph.set_entry_point("orchestrator")
     graph.add_conditional_edges(
         "orchestrator",
@@ -83,16 +83,17 @@ def build_graph() -> StateGraph:
             "analise":      "analise",
             "busca":        "busca",
             "perfil":       "perfil",
+            "maratona":     "maratona",
         },
     )
 
-    for node in ["conversa", "recomendacao", "analise", "busca", "perfil"]:
+    for node in ["conversa", "recomendacao", "analise", "busca", "perfil", "maratona"]:
         graph.add_edge(node, "responder")
 
     graph.add_edge("responder", END)
 
     compiled = graph.compile()
-    logger.info("Grafo LangGraph compilado | agentes: conversa, recomendacao, analise, busca, perfil")
+    logger.info("Grafo LangGraph compilado | agentes: conversa, recomendacao, analise, busca, perfil, maratona")
     return compiled
 
 
