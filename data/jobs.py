@@ -623,67 +623,155 @@ def _buscar_revelo(query: str, limite: int = JOBS_LIMITE_POR_FONTE) -> list[Vaga
 
 # ─── Fonte 10: Google Dorks (DuckDuckGo como proxy gratuito) ─────────────────
 
-_DORK_SITES = [
+# Sites brasileiros de vagas tech
+_DORK_SITES_BR = [
     "revelo.com.br", "trampos.co", "programathor.com.br", "remotar.com.br",
-    "weworkremotely.com", "remoteok.com", "gupy.io",
+    "inhire.com.br", "vagas.com.br", "99jobs.com", "getmanifest.com.br",
+    "kenoby.com", "solides.com.br",
 ]
+# Sites internacionais / plataformas de ATS com pages publicas
+_DORK_SITES_INTL = [
+    "gupy.io", "weworkremotely.com", "remoteok.com",
+    "lever.co", "greenhouse.io", "jobs.lever.co", "boards.greenhouse.io",
+    "wellfound.com", "angel.co",
+]
+# Lista completa para detectar fonte pelo domínio
+_DORK_SITES_ALL = list(dict.fromkeys(_DORK_SITES_BR + _DORK_SITES_INTL))
 
 
-def _buscar_google_dork(query: str, localizacao: str = "", limite: int = JOBS_LIMITE_POR_FONTE) -> list[Vaga]:
-    """
-    Usa DuckDuckGo Lite como motor de busca com Google Dork para encontrar
-    vagas em multiplos sites ao mesmo tempo.
-    site:gupy.io OR site:trampos.co <query> <localizacao> vaga emprego
-    """
+def _ddg_uma_dork(dork: str, sites_alvo: list[str], limite: int, localizacao: str = "") -> list[Vaga]:
+    """Executa uma unica query DDG Lite e retorna vagas dos sites alvo."""
     vagas: list[Vaga] = []
     try:
-        sites_dork = " OR ".join(f"site:{s}" for s in _DORK_SITES)
-        loc_str = f" {localizacao}" if localizacao and localizacao.lower() != "remoto" else ""
-        dork = f"({sites_dork}) {query}{loc_str} vaga emprego"
-
-        with httpx.Client(timeout=20, headers=_HEADERS, follow_redirects=True) as client:
+        with httpx.Client(timeout=22, headers=_HEADERS, follow_redirects=True) as client:
             resp = client.get(
                 "https://lite.duckduckgo.com/lite/",
-                params={"q": dork},
+                params={"q": dork, "kl": "br-pt"},
             )
             if resp.status_code != 200:
                 return []
 
             soup = BeautifulSoup(resp.text, "html.parser")
-            links = soup.find_all("a", class_=re.compile(r"result-link|link"), href=True)
-            if not links:
-                links = soup.select("a.result-link") or soup.select("a[href*='http']")
 
-            vistas_dork: set[str] = set()
-            for link_el in links[:limite * 2]:
+            # DDG Lite: links em <a class="result-link"> + snippets em <td class="result-snippet">
+            links = soup.find_all("a", class_="result-link", href=True)
+            if not links:
+                # Fallback: qualquer <a> com href externo
+                links = [a for a in soup.find_all("a", href=True)
+                         if a.get("href", "").startswith("http")]
+
+            snippets_els = soup.find_all("td", class_="result-snippet")
+            snippets = [el.get_text(" ", strip=True) for el in snippets_els]
+
+            vistas: set[str] = set()
+            for i, link_el in enumerate(links[:limite * 4]):
                 href = link_el.get("href", "")
-                if not href or href.startswith("/") or "duckduckgo" in href:
+
+                # DDG às vezes usa redirect /l/?uddg=URL_ENCODED
+                if "duckduckgo.com/l/" in href or href.startswith("/l/"):
+                    m = re.search(r"uddg=([^&]+)", href)
+                    if m:
+                        from urllib.parse import unquote
+                        href = unquote(m.group(1))
+                    else:
+                        continue
+
+                if not href or "duckduckgo" in href or href in vistas:
                     continue
-                # Filtra apenas dos sites alvo
-                if not any(s in href for s in _DORK_SITES):
+                if not any(s in href for s in sites_alvo):
                     continue
-                titulo = link_el.get_text(strip=True) or href
-                if href in vistas_dork:
-                    continue
-                vistas_dork.add(href)
-                # Detecta fonte pelo dominio
-                fonte = next((s.split(".")[0].capitalize() for s in _DORK_SITES if s in href), "Dork")
+
+                vistas.add(href)
+                titulo = link_el.get_text(strip=True)
+                if not titulo or len(titulo) < 4:
+                    titulo = href.split("/")[-1].replace("-", " ").replace("_", " ").strip() or href
+
+                snippet = snippets[i] if i < len(snippets) else ""
+                fonte = next((s.split(".")[0].capitalize() for s in sites_alvo if s in href), "Dork")
+
                 vagas.append(Vaga(
-                    id=f"dork_{hash(href) % 1000000}",
+                    id=f"dork_{hash(href) % 10000000}",
                     titulo=titulo, empresa="",
                     localizacao=localizacao or "Brasil",
-                    modalidade=_normalizar_modalidade(localizacao),
-                    salario="A combinar", descricao="",
+                    modalidade=_normalizar_modalidade(snippet or localizacao),
+                    salario="A combinar",
+                    descricao=snippet[:400],
+                    requisitos=_extrair_requisitos(snippet),
                     url=href, fonte=fonte,
                 ))
                 if len(vagas) >= limite:
                     break
 
-        if vagas:
-            logger.info("dork: %d vagas para '%s'", len(vagas), query)
     except Exception as e:
-        logger.debug("dork: erro: %s", e)
+        logger.debug("dork query erro [%s]: %s", dork[:60], e)
     return vagas
+
+
+def _buscar_google_dork(
+    query: str,
+    localizacao: str = "",
+    limite: int = JOBS_LIMITE_POR_FONTE,
+    queries_extras: list[str] | None = None,
+) -> list[Vaga]:
+    """
+    Busca agressiva via DuckDuckGo Dorks.
+    Gera múltiplas combinações de sites × queries × sufixos e roda em paralelo.
+    """
+    loc_str = (
+        f" {localizacao}"
+        if localizacao and localizacao.lower() not in ("remoto", "brasil", "brazil")
+        else ""
+    )
+
+    # Strings de site-groups (DDG suporta uns 4-5 site: por query)
+    br_str   = " OR ".join(f"site:{s}" for s in _DORK_SITES_BR[:5])
+    br2_str  = " OR ".join(f"site:{s}" for s in _DORK_SITES_BR[5:])
+    intl_str = " OR ".join(f"site:{s}" for s in _DORK_SITES_INTL[:5])
+    intl2_str = " OR ".join(f"site:{s}" for s in _DORK_SITES_INTL[5:])
+
+    # Queries a tentar (principal + extras)
+    todas_q = [query] + (queries_extras or [])[:2]
+
+    # Gera lista de (dork_string, sites_alvo)
+    dorks: list[tuple[str, list[str]]] = []
+    for q in todas_q:
+        q = q.strip()
+        # Grupo BR — termos PT
+        dorks.append((f"({br_str}) {q}{loc_str} vaga emprego", _DORK_SITES_BR[:5]))
+        dorks.append((f"({br_str}) {q}{loc_str} desenvolvedor programador", _DORK_SITES_BR[:5]))
+        # Grupo BR2 — outros sites brasileiros
+        if br2_str:
+            dorks.append((f"({br2_str}) {q}{loc_str} vaga", _DORK_SITES_BR[5:]))
+        # Grupo INTL — termos EN
+        dorks.append((f"({intl_str}) {q} job remote", _DORK_SITES_INTL[:5]))
+        # Grupo INTL2
+        if intl2_str:
+            dorks.append((f"({intl2_str}) {q} software engineer remote", _DORK_SITES_INTL[5:]))
+
+    # Limita a 8 dorks para não estourar timeout
+    dorks = dorks[:8]
+    limite_por = max(5, limite // 3)
+
+    todas: list[Vaga] = []
+    with ThreadPoolExecutor(max_workers=min(len(dorks), 6)) as ex:
+        futs = [ex.submit(_ddg_uma_dork, d, sites, limite_por, localizacao) for d, sites in dorks]
+        for f in as_completed(futs, timeout=28):
+            try:
+                todas.extend(f.result())
+            except Exception:
+                pass
+
+    # Deduplica por URL
+    vistas: set[str] = set()
+    unicas: list[Vaga] = []
+    for v in todas:
+        if v.url and v.url not in vistas and v.titulo:
+            vistas.add(v.url)
+            unicas.append(v)
+
+    if unicas:
+        logger.info("dork: %d vagas para '%s' (%d dorks)", len(unicas), query, len(dorks))
+    return unicas[:limite]
 
 
 # ─── Fonte 11: Inhire (tech Brasil) ──────────────────────────────────────────
@@ -797,12 +885,11 @@ def buscar_vagas(
             tarefas.append((_buscar_weworkremotely, (q, limite_por)))
             tarefas.append((_buscar_workingnomads, (q, limite_por)))
 
-    # Google Dork (uma chamada por query principal — evita flood)
-    for q in queries_unicas[:2]:
-        tarefas.append((_buscar_google_dork, (q, localizacao, limite_por)))
+    # Google Dork — uma tarefa que internamente expande em múltiplas queries × site-groups
+    tarefas.append((_buscar_google_dork, (queries_unicas[0], localizacao, limite_por * 2, queries_unicas[1:])))
 
-    # Execucao paralela (max 12 workers)
-    with ThreadPoolExecutor(max_workers=min(len(tarefas), 12)) as executor:
+    # Execucao paralela (max 16 workers)
+    with ThreadPoolExecutor(max_workers=min(len(tarefas), 16)) as executor:
         futures = {executor.submit(fn, *args): fn.__name__ for fn, args in tarefas}
         for future in as_completed(futures, timeout=30):
             try:
