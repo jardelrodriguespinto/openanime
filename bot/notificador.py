@@ -1,4 +1,4 @@
-﻿"""
+"""
 Notificador diario - envia digest de novidades e sugestoes para todos os usuarios.
 Roda via JobQueue do python-telegram-bot.
 """
@@ -6,6 +6,10 @@ Roda via JobQueue do python-telegram-bot.
 import logging
 import re
 import time
+import datetime
+import asyncio
+import html
+from urllib.parse import urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -30,6 +34,32 @@ _DDG_HEADERS = {
     "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
     "Referer": "https://lite.duckduckgo.com/",
 }
+
+
+def _escape_html(value: str) -> str:
+    return html.escape(str(value or ""), quote=True)
+
+
+def _sanitize_href(url: str) -> str:
+    raw = str(url or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = urlparse(raw)
+    except Exception:
+        return ""
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return ""
+    return _escape_html(raw)
+
+
+def _format_html_link(title: str, href: str, max_len: int = 80) -> str:
+    text = (str(title or "").strip() or "link")[:max(1, max_len)]
+    safe_text = _escape_html(text)
+    safe_href = _sanitize_href(href)
+    if not safe_href:
+        return safe_text
+    return f"<a href='{safe_href}'>{safe_text}</a>"
 
 
 def _buscar_novidades_ddg(query: str, max_results: int = 6) -> list[dict]:
@@ -90,9 +120,9 @@ def _buscar_novidades_ddg(query: str, max_results: int = 6) -> list[dict]:
 
 def _coletar_dados_diarios() -> tuple[list, list, list]:
     """Coleta temporada atual, novidades web e Reddit."""
-    import datetime
-
-    hoje = datetime.date.today().strftime("%d/%m/%Y")
+    hoje_date = datetime.date.today()
+    hoje = hoje_date.strftime("%d/%m/%Y")
+    ano_atual = hoje_date.year
 
     temporada = []
     try:
@@ -130,7 +160,7 @@ def _coletar_dados_diarios() -> tuple[list, list, list]:
 
         queries = [
             f"anime novidades lancamentos {hoje}",
-            "anime news today temporada 2026",
+            f"anime news today temporada {ano_atual}",
             "manhwa webtoon novidades semana",
         ]
         for q in queries:
@@ -284,11 +314,53 @@ def _filtrar_temporada_por_alertas(temporada: list[dict], user_profile: dict) ->
     return filtrados or temporada
 
 
+async def _enviar_digest_usuario(
+    context: CallbackContext,
+    neo4j,
+    user_id: str,
+    temporada: list[dict],
+    novidades_web: list[dict],
+    novidades_reddit: list[dict],
+    tvmaze_cache: dict[str, list[dict]],
+) -> bool:
+    """Gera e envia digest para um unico usuario."""
+    user_profile = {}
+    try:
+        user_profile = neo4j.get_user_profile(user_id)
+    except Exception:
+        pass
+
+    temporada_user = _filtrar_temporada_por_alertas(temporada, user_profile)
+    radar = _build_personal_radar(user_profile, temporada_user)
+    radar["agenda_episodios"] = _build_tvmaze_episode_alerts(
+        user_profile,
+        cache=tvmaze_cache,
+        days=10,
+        limit=4,
+    )
+
+    messages = notif_prompt.build_messages(
+        temporada_user,
+        novidades_web,
+        novidades_reddit,
+        user_profile,
+        radar=radar,
+    )
+    digest = await asyncio.to_thread(openrouter.converse, messages)
+    texto = formatar_telegram(digest)
+    await context.bot.send_message(
+        chat_id=user_id,
+        text=texto,
+        parse_mode="HTML",
+    )
+    return True
+
+
 async def enviar_diario(context: CallbackContext) -> None:
     """Job diario - coleta novidades e envia digest personalizado por usuario."""
     logger.info("Notificador: iniciando digest diario")
 
-    temporada, novidades_web, novidades_reddit = _coletar_dados_diarios()
+    temporada, novidades_web, novidades_reddit = await asyncio.to_thread(_coletar_dados_diarios)
 
     try:
         neo4j = get_neo4j()
@@ -304,35 +376,14 @@ async def enviar_diario(context: CallbackContext) -> None:
 
     for user_id in user_ids:
         try:
-            user_profile = {}
-            try:
-                user_profile = neo4j.get_user_profile(user_id)
-            except Exception:
-                pass
-
-            temporada_user = _filtrar_temporada_por_alertas(temporada, user_profile)
-            radar = _build_personal_radar(user_profile, temporada_user)
-            radar["agenda_episodios"] = _build_tvmaze_episode_alerts(
-                user_profile,
-                cache=tvmaze_cache,
-                days=10,
-                limit=4,
-            )
-
-            messages = notif_prompt.build_messages(
-                temporada_user,
-                novidades_web,
-                novidades_reddit,
-                user_profile,
-                radar=radar,
-            )
-            digest = openrouter.converse(messages)
-
-            texto = formatar_telegram(digest)
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=texto,
-                parse_mode="HTML",
+            await _enviar_digest_usuario(
+                context=context,
+                neo4j=neo4j,
+                user_id=user_id,
+                temporada=temporada,
+                novidades_web=novidades_web,
+                novidades_reddit=novidades_reddit,
+                tvmaze_cache=tvmaze_cache,
             )
             enviados += 1
             logger.info("Notificador: digest enviado para user=%s", user_id)
@@ -342,6 +393,36 @@ async def enviar_diario(context: CallbackContext) -> None:
             logger.warning("Notificador: erro ao notificar user=%s: %s", user_id, e)
 
     logger.info("Notificador: digest concluido - enviados=%d erros=%d", enviados, erros)
+
+
+async def enviar_diario_usuario(context: CallbackContext, user_id: str) -> bool:
+    """Gera digest imediatamente para um unico usuario (uso no comando /novidades)."""
+    user_id = str(user_id)
+    logger.info("Notificador: digest on-demand user=%s", user_id)
+
+    temporada, novidades_web, novidades_reddit = await asyncio.to_thread(_coletar_dados_diarios)
+
+    try:
+        neo4j = get_neo4j()
+    except Exception as e:
+        logger.error("Notificador: erro ao abrir Neo4j no modo usuario=%s: %s", user_id, e)
+        return False
+
+    try:
+        await _enviar_digest_usuario(
+            context=context,
+            neo4j=neo4j,
+            user_id=user_id,
+            temporada=temporada,
+            novidades_web=novidades_web,
+            novidades_reddit=novidades_reddit,
+            tvmaze_cache={},
+        )
+        logger.info("Notificador: digest on-demand enviado user=%s", user_id)
+        return True
+    except Exception as e:
+        logger.warning("Notificador: erro digest on-demand user=%s: %s", user_id, e)
+        return False
 
 
 async def verificar_novos_episodios(context: CallbackContext) -> None:
@@ -393,7 +474,7 @@ async def verificar_novos_episodios(context: CallbackContext) -> None:
                 season = ep.get("season")
                 episode = ep.get("episode")
                 ep_label = f" S{season:02d}E{episode:02d}" if season and episode else ""
-                linhas.append(f"- <b>{show}</b>{ep_label} · {airdate}")
+                linhas.append(f"- <b>{_escape_html(show)}</b>{ep_label} · {_escape_html(airdate)}")
 
             await context.bot.send_message(
                 chat_id=user_id,
@@ -437,6 +518,7 @@ async def verificar_lancamentos_culturais(context: CallbackContext) -> None:
     mb_cache: dict[str, list[dict]] = {}
     ol_cache: dict[str, list[dict]] = {}
     enviados = 0
+    ano_atual = datetime.date.today().year
 
     for usuario in usuarios:
         user_id = usuario.get("telegram_id")
@@ -462,18 +544,33 @@ async def verificar_lancamentos_culturais(context: CallbackContext) -> None:
                 titulo = lc.get("titulo", "?")
                 data = lc.get("data", "")
                 tipo = lc.get("subtipo", "album")
-                linhas.append(f"🎵 <b>{artista}</b> - {titulo} ({tipo}){' · ' + data if data else ''}")
+                safe_artist = _escape_html(artista)
+                safe_titulo = _escape_html(titulo)
+                safe_tipo = _escape_html(tipo)
+                safe_data = _escape_html(data) if data else ""
+                linhas.append(
+                    f"🎵 <b>{safe_artist}</b> - {safe_titulo} ({safe_tipo})"
+                    f"{' · ' + safe_data if safe_data else ''}"
+                )
 
         # Busca tambem por DDG para turnês e shows ao vivo
         for artista in artistas[:3]:
             try:
-                query = f"{artista} turne show 2026"
-                resultados = _buscar_novidades_ddg(query, max_results=2)
-                for r in resultados:
-                    title = r.get("title", "")
-                    href = r.get("href", "")
-                    if any(k in title.lower() for k in ["tour", "turne", "show", "concert", "live"]):
-                        linhas.append(f"🎤 <b>{artista}</b>: <a href='{href}'>{title[:80]}</a>")
+                anos_busca = [ano_atual, ano_atual + 1]
+                achou = False
+                for ano in anos_busca:
+                    query = f"{artista} turne show {ano}"
+                    resultados = _buscar_novidades_ddg(query, max_results=2)
+                    for r in resultados:
+                        title = r.get("title", "")
+                        href = r.get("href", "")
+                        if any(k in title.lower() for k in ["tour", "turne", "show", "concert", "live"]):
+                            safe_artist = _escape_html(artista)
+                            safe_link = _format_html_link(title, href, max_len=80)
+                            linhas.append(f"🎤 <b>{safe_artist}</b>: {safe_link}")
+                            achou = True
+                            break
+                    if achou:
                         break
             except Exception as e:
                 logger.debug("Notificador cultural: DDG turne erro: %s", e)
@@ -491,7 +588,10 @@ async def verificar_lancamentos_culturais(context: CallbackContext) -> None:
             for livro in livros[:1]:
                 titulo = livro.get("titulo", "?")
                 ano = livro.get("ano", "")
-                linhas.append(f"📚 <b>{autor}</b> - {titulo}{' (' + str(ano) + ')' if ano else ''}")
+                safe_autor = _escape_html(autor)
+                safe_titulo = _escape_html(titulo)
+                safe_ano = _escape_html(str(ano)) if ano else ""
+                linhas.append(f"📚 <b>{safe_autor}</b> - {safe_titulo}{' (' + safe_ano + ')' if safe_ano else ''}")
 
         if not linhas:
             continue

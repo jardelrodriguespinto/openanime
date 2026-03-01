@@ -2,6 +2,7 @@ import logging
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 
 import httpx
 from bs4 import BeautifulSoup
@@ -30,7 +31,8 @@ _KEYWORDS_NEWS = re.compile(
 )
 
 _KEYWORDS_YOUTUBE = re.compile(
-    r"\b(video|videos|youtube|resumo|recap|review|analise|explicado|explained)\b",
+    r"\b(video|videos|youtube|resumo|recap|review|analise|explicado|explained|"
+    r"clipe|clip|mv|lyric|visualizer|official\s+video|live)\b",
     re.IGNORECASE,
 )
 
@@ -40,7 +42,7 @@ _KEYWORDS_SCHEDULE = re.compile(
 )
 
 _KEYWORDS_MUSICA = re.compile(
-    r"\b(musica|musicas|artista|banda|album|single|turnê|turne|show|concerto|"
+    r"\b(musica|musicas|artista|banda|album|single|turne|show|concerto|"
     r"lancamento musical|novo album|nova musica|spotify|kpop|rock|pop|jazz|rap|funk)\b",
     re.IGNORECASE,
 )
@@ -51,12 +53,29 @@ _KEYWORDS_LIVRO = re.compile(
     re.IGNORECASE,
 )
 
+_KEYWORDS_WIKIPEDIA = re.compile(
+    r"\b(quem\s+e|quem\s+é|personagem|historia|história|lore|origem|explica|"
+    r"resumo\s+da\s+historia|enredo|biografia)\b",
+    re.IGNORECASE,
+)
+
+_KEYWORDS_EXPLICIT_NON_PT = re.compile(
+    r"\b(ingles|ingl[eê]s|english|in english|em english|"
+    r"espanhol|spanish|japones|japanese|qualquer idioma|any language)\b",
+    re.IGNORECASE,
+)
+
 _DDG_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
     "Referer": "https://lite.duckduckgo.com/",
+}
+
+_LINK_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; anime-assistant-linkcheck/1.0)",
+    "Accept": "text/html,application/json;q=0.9,*/*;q=0.8",
 }
 
 
@@ -150,18 +169,21 @@ def _collector_web(query: str) -> list[dict]:
 
 
 def _collector_reddit(query: str) -> list[dict]:
-    return reddit.buscar_discussoes(query, limit=6)
+    # Reddit recebe prioridade alta por pedido de "tempo real" e feedback do usuario.
+    return reddit.buscar_discussoes(query, limit=12)
 
 
 def _collector_news(query: str) -> dict:
     rss_results = rss_news.get_latest_news(query=query, limit=8, days=10)
     anilist_results = anilist.get_trending(limit=10) if _KEYWORDS_NEWS.search(query) else []
-    wikipedia_results = wikipedia.search_summaries(query=query, limit=3)
-    tvmaze_results = tvmaze.search_with_schedule(
-        query=query,
-        limit=3,
-        days=30 if _KEYWORDS_SCHEDULE.search(query) else 14,
-    )
+    wikipedia_results = wikipedia.search_summaries(query=query, limit=3) if _KEYWORDS_WIKIPEDIA.search(query) else []
+    tvmaze_results = []
+    if _KEYWORDS_SCHEDULE.search(query):
+        tvmaze_results = tvmaze.search_with_schedule(
+            query=query,
+            limit=3,
+            days=30,
+        )
     return {
         "rss": rss_results,
         "anilist": anilist_results,
@@ -171,14 +193,16 @@ def _collector_news(query: str) -> dict:
 
 
 def _collector_youtube(query: str) -> list[dict]:
-    # So consulta YouTube quando a intencao da pergunta bate com video/resumo.
-    if not _KEYWORDS_YOUTUBE.search(query):
+    if not (_KEYWORDS_YOUTUBE.search(query) or _KEYWORDS_MUSICA.search(query)):
         return []
-    return youtube_search.search_summary_videos(query=query, limit=5)
+    yt_query = query
+    if _KEYWORDS_MUSICA.search(query) and not _KEYWORDS_YOUTUBE.search(query):
+        yt_query = f"{query} clipe oficial lyric"
+    return youtube_search.search_summary_videos(query=yt_query, limit=5)
 
 
 def _collector_musica_livro(query: str) -> dict:
-    """Coleta lancamentos de musica e livros via MusicBrainz e Open Library."""
+    """Coleta de musica e livro via APIs abertas (opcional por keyword)."""
     if not _KEYWORDS_MUSICA.search(query) and not _KEYWORDS_LIVRO.search(query):
         return {"musica": [], "livro": []}
 
@@ -188,24 +212,180 @@ def _collector_musica_livro(query: str) -> dict:
     if _KEYWORDS_MUSICA.search(query):
         try:
             from data.musicbrainz import musicbrainz
-            resultados = musicbrainz.buscar_artista(query[:80])
-            musica_results = resultados[:5]
+
+            musica_results = musicbrainz.buscar_artista(query[:80])[:5]
         except Exception as e:
             logger.debug("collector_musica_livro: musicbrainz erro: %s", e)
 
     if _KEYWORDS_LIVRO.search(query):
         try:
             from data.openlibrary import openlibrary
-            resultados = openlibrary.buscar_livro(query[:80])
-            livro_results = resultados[:5]
+
+            livro_results = openlibrary.buscar_livro(query[:80])[:5]
         except Exception as e:
             logger.debug("collector_musica_livro: openlibrary erro: %s", e)
 
     return {"musica": musica_results, "livro": livro_results}
 
 
+def _pick_url(item: dict, preferred_keys: tuple[str, ...] = ()) -> str:
+    for key in preferred_keys:
+        value = (item.get(key) or "").strip()
+        if value:
+            return value
+    for key in ("href", "url", "permalink", "show_url"):
+        value = (item.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _is_http_url(url: str) -> bool:
+    return isinstance(url, str) and (url.startswith("http://") or url.startswith("https://"))
+
+
+def _check_link(url: str, timeout: float = 6.0) -> bool:
+    if not _is_http_url(url):
+        return False
+
+    try:
+        with httpx.Client(timeout=timeout, follow_redirects=True, headers=_LINK_HEADERS) as client:
+            resp = client.get(url)
+            code = resp.status_code
+            if 200 <= code < 400:
+                return True
+            # Sites com antibot costumam retornar isso para clients.
+            if code in {401, 403, 405, 429}:
+                return True
+            # Erro de gateway/transiente nao deve derrubar link potencialmente valido.
+            if 500 <= code <= 599:
+                return True
+            return False
+    except Exception:
+        return False
+
+
+def _validate_items_with_links(
+    items: list[dict],
+    preferred_keys: tuple[str, ...] = (),
+    max_to_check: int = 10,
+) -> tuple[list[dict], dict]:
+    if not items:
+        return [], {"checked": 0, "alive": 0, "removed": 0}
+
+    keep = []
+    check_bucket = []
+
+    for item in items:
+        url = _pick_url(item, preferred_keys=preferred_keys)
+        if not url:
+            keep.append(item)
+            continue
+
+        if len(check_bucket) < max(1, max_to_check):
+            check_bucket.append((item, url))
+        else:
+            keep.append(item)
+
+    checked = len(check_bucket)
+    if checked == 0:
+        return keep, {"checked": 0, "alive": 0, "removed": 0}
+
+    alive_items = []
+    with ThreadPoolExecutor(max_workers=min(8, checked)) as executor:
+        future_map = {executor.submit(_check_link, url): item for item, url in check_bucket}
+        for fut in as_completed(future_map):
+            item = future_map[fut]
+            try:
+                if fut.result():
+                    alive_items.append(item)
+            except Exception:
+                pass
+
+    alive = len(alive_items)
+    removed = checked - alive
+    return keep + alive_items, {"checked": checked, "alive": alive, "removed": removed}
+
+
+def _prefer_portuguese(query: str) -> bool:
+    text = (query or "").strip()
+    if not text:
+        return True
+    return _KEYWORDS_EXPLICIT_NON_PT.search(text) is None
+
+
+def _is_portuguese_link(item: dict) -> bool:
+    fields = [
+        str(item.get("href", "")),
+        str(item.get("url", "")),
+        str(item.get("permalink", "")),
+        str(item.get("title", "")),
+        str(item.get("body", "")),
+        str(item.get("snippet", "")),
+    ]
+    text = " ".join(fields).lower()
+    return (
+        ".br" in text
+        or "/pt/" in text
+        or "pt-br" in text
+        or "portugu" in text
+        or ".com.br" in text
+    )
+
+
+def _rank_language(items: list[dict], prefer_pt: bool) -> list[dict]:
+    if not items:
+        return []
+    if not prefer_pt:
+        return items
+
+    pt_items = [it for it in items if _is_portuguese_link(it)]
+    other_items = [it for it in items if not _is_portuguese_link(it)]
+    return pt_items + other_items
+
+
+def _agent_link_validator(payload: dict) -> tuple[dict, str]:
+    """Subagente de confiabilidade: remove links quebrados antes da sintese."""
+    total_checked = 0
+    total_alive = 0
+
+    web_valid, st = _validate_items_with_links(payload.get("web", []), preferred_keys=("href", "url"), max_to_check=10)
+    payload["web"] = web_valid
+    total_checked += st["checked"]
+    total_alive += st["alive"]
+
+    rss_valid, st = _validate_items_with_links(payload.get("rss", []), preferred_keys=("href", "url"), max_to_check=8)
+    payload["rss"] = rss_valid
+    total_checked += st["checked"]
+    total_alive += st["alive"]
+
+    wiki_valid, st = _validate_items_with_links(payload.get("wikipedia", []), preferred_keys=("url",), max_to_check=6)
+    payload["wikipedia"] = wiki_valid
+    total_checked += st["checked"]
+    total_alive += st["alive"]
+
+    tv_valid, st = _validate_items_with_links(payload.get("tvmaze", []), preferred_keys=("url",), max_to_check=6)
+    payload["tvmaze"] = tv_valid
+    total_checked += st["checked"]
+    total_alive += st["alive"]
+
+    yt_valid, st = _validate_items_with_links(payload.get("youtube", []), preferred_keys=("href", "url"), max_to_check=8)
+    payload["youtube"] = yt_valid
+    total_checked += st["checked"]
+    total_alive += st["alive"]
+
+    reddit_valid, st = _validate_items_with_links(payload.get("reddit", []), preferred_keys=("permalink", "url"), max_to_check=8)
+    payload["reddit"] = reddit_valid
+    total_checked += st["checked"]
+    total_alive += st["alive"]
+
+    if total_checked == 0:
+        return payload, "n/a"
+    return payload, f"ok {total_alive}/{total_checked}"
+
+
 def search_node(state: State) -> dict:
-    """Agente de busca com 4 subagentes paralelos + orquestracao final por LLM."""
+    """Agente de busca com coletores paralelos + validador de links + sintese final."""
     user_message = state["raw_input"]
     history = state.get("messages", [])
     user_id = state.get("user_id", "?")
@@ -222,10 +402,7 @@ def search_node(state: State) -> dict:
     status = {k: "ok" for k in collectors}
 
     with ThreadPoolExecutor(max_workers=5) as executor:
-        future_map = {
-            executor.submit(fn, user_message): name
-            for name, fn in collectors.items()
-        }
+        future_map = {executor.submit(fn, user_message): name for name, fn in collectors.items()}
         for fut in as_completed(future_map):
             name = future_map[fut]
             try:
@@ -234,46 +411,60 @@ def search_node(state: State) -> dict:
                 status[name] = f"erro: {e}"
                 results[name] = []
 
-    web_results = results["web"] or []
-    reddit_results = results["reddit"] or []
     news = results["news"] if isinstance(results["news"], dict) else {}
-    rss_results = (news.get("rss") or []) if isinstance(news, dict) else []
-    anilist_results = (news.get("anilist") or []) if isinstance(news, dict) else []
-    wikipedia_results = (news.get("wikipedia") or []) if isinstance(news, dict) else []
-    tvmaze_results = (news.get("tvmaze") or []) if isinstance(news, dict) else []
-    youtube_results = results["youtube"] or []
     cultural = results["cultural"] if isinstance(results["cultural"], dict) else {}
-    musica_results = (cultural.get("musica") or []) if isinstance(cultural, dict) else []
-    livro_results = (cultural.get("livro") or []) if isinstance(cultural, dict) else []
+
+    payload = {
+        "web": results["web"] or [],
+        "reddit": results["reddit"] or [],
+        "rss": (news.get("rss") or []) if isinstance(news, dict) else [],
+        "anilist": (news.get("anilist") or []) if isinstance(news, dict) else [],
+        "wikipedia": (news.get("wikipedia") or []) if isinstance(news, dict) else [],
+        "tvmaze": (news.get("tvmaze") or []) if isinstance(news, dict) else [],
+        "youtube": results["youtube"] or [],
+        "musica": (cultural.get("musica") or []) if isinstance(cultural, dict) else [],
+        "livro": (cultural.get("livro") or []) if isinstance(cultural, dict) else [],
+    }
+
+    payload, linkcheck_status = _agent_link_validator(payload)
+
+    prefer_pt = _prefer_portuguese(user_message)
+    for key in ("web", "rss", "youtube", "wikipedia", "tvmaze", "reddit"):
+        payload[key] = _rank_language(payload.get(key, []), prefer_pt=prefer_pt)
+    status["linkcheck"] = linkcheck_status
+    status["collected_at"] = datetime.now(timezone.utc).isoformat()
+    status["language_mode"] = "pt-first" if prefer_pt else "user-requested-language"
 
     logger.info(
-        "Busca paralela: user=%s web=%d reddit=%d rss=%d anilist=%d wiki=%d tvmaze=%d youtube=%d musica=%d livro=%d",
+        "Busca paralela: user=%s web=%d reddit=%d rss=%d anilist=%d wiki=%d tvmaze=%d youtube=%d musica=%d livro=%d linkcheck=%s",
         user_id,
-        len(web_results),
-        len(reddit_results),
-        len(rss_results),
-        len(anilist_results),
-        len(wikipedia_results),
-        len(tvmaze_results),
-        len(youtube_results),
-        len(musica_results),
-        len(livro_results),
+        len(payload["web"]),
+        len(payload["reddit"]),
+        len(payload["rss"]),
+        len(payload["anilist"]),
+        len(payload["wikipedia"]),
+        len(payload["tvmaze"]),
+        len(payload["youtube"]),
+        len(payload["musica"]),
+        len(payload["livro"]),
+        linkcheck_status,
     )
 
     messages = search_prompt.build_messages(
         user_message=user_message,
         history=history,
-        search_results=web_results,
-        reddit_results=reddit_results,
-        rss_results=rss_results,
-        anilist_results=anilist_results,
-        wikipedia_results=wikipedia_results,
-        tvmaze_results=tvmaze_results,
-        youtube_results=youtube_results,
-        musica_results=musica_results,
-        livro_results=livro_results,
+        search_results=payload["web"],
+        reddit_results=payload["reddit"],
+        rss_results=payload["rss"],
+        anilist_results=payload["anilist"],
+        wikipedia_results=payload["wikipedia"],
+        tvmaze_results=payload["tvmaze"],
+        youtube_results=payload["youtube"],
+        musica_results=payload["musica"],
+        livro_results=payload["livro"],
         source_status=status,
         is_sites_query=_KEYWORDS_SITES.search(user_message) is not None,
+        prefer_portuguese=prefer_pt,
     )
 
     logger.info("Agente Busca: orquestrando sintese para user=%s", user_id)

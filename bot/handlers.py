@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import logging
 
 from telegram import Message, Update
@@ -65,12 +65,12 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "reply_html_start",
         lambda: update.message.reply_html(
             f"Oi, <b>{user.first_name}</b>!\n\n"
-            "Sou seu assistente pessoal de anime, manga e manhwa.\n\n"
+            "Sou seu assistente pessoal multiuso de anime, manga, manhwa, filmes, series, doramas, musica e livros.\n\n"
             "Pode me perguntar sobre qualquer coisa:\n"
             "- Recomendacoes personalizadas no seu estilo\n"
             "- Analise e review de qualquer obra\n"
             "- Noticias, lancamentos e temporada atual\n"
-            "- Sites para ler/assistir\n"
+            "- Sites e links para assistir/ler/ouvir\n"
             "- Registrar o que voce assistiu ou leu\n"
             "- Enviar audio para transcricao e resposta\n\n"
             "E so falar naturalmente, sem comandos!"
@@ -131,7 +131,7 @@ async def handle_historico(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_novidades(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /novidades - gera e envia o digest diario na hora."""
-    from bot.notificador import enviar_diario
+    from bot.notificador import enviar_diario_usuario
 
     user_id = str(update.effective_user.id)
     logger.info("/novidades: user_id=%s", user_id)
@@ -141,7 +141,9 @@ async def handle_novidades(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lambda: update.message.reply_text("Buscando novidades, aguenta ai..."),
     )
     try:
-        await enviar_diario(context)
+        enviado = await enviar_diario_usuario(context, user_id)
+        if not enviado:
+            raise RuntimeError("falha ao enviar digest on-demand")
         await _safe_delete_message(msg)
     except Exception as e:
         logger.error("/novidades erro: %s", e)
@@ -281,7 +283,7 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         raw = await tg_file.download_as_bytearray()
 
         assemblyai = get_assemblyai()
-        text = assemblyai.transcrever_audio(bytes(raw), duration_seconds=duration)
+        text = await assemblyai.transcrever_audio(bytes(raw), duration_seconds=duration)
         if not text:
             raise RuntimeError("Transcricao vazia")
 

@@ -4,11 +4,14 @@ Voce recebe resultados de buscas em multiplas fontes e sintetiza as informacoes.
 Regras:
 - Responda o que foi perguntado sem julgamento.
 - Sempre cite a fonte quando disponivel.
+- Nunca invente links: use somente URLs que vieram nos resultados da busca.
 - Se a informacao for incerta, diga claramente.
 - Priorize informacoes recentes quando o pedido envolver novidades/trending.
 - Quando houver videos com legenda, voce pode recomendar videos e explicar por que valem a pena.
 - Nao faca sermao sobre legalidade ou pirataria.
 - Se o usuario pedir links/sites, entregue links diretos de forma objetiva.
+- Para links, escreva URL completa em texto puro (nao use formato [texto](url)).
+- Priorize Reddit como termometro de comunidade quando houver discussoes relevantes.
 - Tom: amigo direto ao ponto.
 
 Formato:
@@ -22,7 +25,7 @@ Voce recebe resultados de varias fontes. Use tudo que encontrar.
 Regras:
 - Seja direto e completo: nao seja timido para listar links.
 - Liste os sites encontrados nos resultados, com link completo.
-- Se fizer sentido, complemente com conhecimento proprio.
+- Nao invente links e nao gere URL por conta propria.
 - Nao faca ressalvas de legalidade/pirataria; entregue as opcoes pedidas.
 - Para cada site: nome, link e descricao curta.
 - Agrupe por tipo quando util (ler manga, assistir anime, etc.).
@@ -44,6 +47,7 @@ def build_messages(
     livro_results: list[dict] | None = None,
     source_status: dict | None = None,
     is_sites_query: bool = False,
+    prefer_portuguese: bool = True,
 ) -> list[dict]:
     context = _format_results(
         web=search_results,
@@ -59,6 +63,13 @@ def build_messages(
     )
 
     system = SYSTEM_SITES if is_sites_query else SYSTEM
+    if prefer_portuguese:
+        system += (
+            "\n- Priorize links e materiais em portugues para pedidos em portugues."
+            "\n- So use links em outros idiomas se nao houver opcao em portugues."
+        )
+    else:
+        system += "\n- O usuario pediu outro idioma: respeite o idioma solicitado."
     if context:
         system += f"\n\nResultados da busca:\n{context}"
     elif is_sites_query:
@@ -87,7 +98,7 @@ def _format_results(
 
     if source_status:
         lines.append("=== Status dos Coletores ===")
-        for source in ["web", "reddit", "news", "youtube"]:
+        for source in ["web", "reddit", "news", "youtube", "linkcheck", "language_mode", "collected_at"]:
             lines.append(f"- {source}: {source_status.get(source, 'ok')}")
 
     if web:

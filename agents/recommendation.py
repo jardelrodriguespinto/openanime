@@ -3,15 +3,37 @@ import re
 
 from agents.orchestrator import State
 from ai.openrouter import openrouter
-from graph.neo4j_client import get_neo4j
-from graph.weaviate_client import get_weaviate
 from data.jikan import jikan
+from data.musicbrainz import musicbrainz
+from data.openlibrary import openlibrary
 from data.reddit import reddit
 from data.tmdb import tmdb
+from graph.neo4j_client import get_neo4j
+from graph.weaviate_client import get_weaviate
 import prompts.recommendation as rec_prompt
+
+_KEYWORDS_ANIME = re.compile(
+    r"\b(anime|manga|manhwa|webtoon|donghua|ova)\b",
+    re.IGNORECASE,
+)
 
 _KEYWORDS_MIDIA = re.compile(
     r"\b(filme|filmes|cinema|movie|serie|series|dorama|k-?drama|netflix|amazon|hbo|disney)\b",
+    re.IGNORECASE,
+)
+
+_KEYWORDS_MUSICA = re.compile(
+    r"\b(musica|musicas|artista|banda|album|single|faixa|track|playlist|spotify|deezer|show|turne)\b",
+    re.IGNORECASE,
+)
+
+_KEYWORDS_MUSICA_ALBUM = re.compile(
+    r"\b(album|single|faixa|track|ep|lp|disco)\b",
+    re.IGNORECASE,
+)
+
+_KEYWORDS_LIVRO = re.compile(
+    r"\b(livro|livros|autor|autora|romance|novel|ebook|literatura|conto|ficcao)\b",
     re.IGNORECASE,
 )
 
@@ -26,14 +48,17 @@ _PATTERNS_REFERENCIA = [
 ]
 
 _FEEDBACK_POS = re.compile(r"\b(curti|gostei|amei|mais assim|mais desse)\b", re.IGNORECASE)
-_FEEDBACK_NEG = re.compile(r"\b(nao curti|não curti|nao gostei|não gostei|odiei|menos assim|evita isso)\b", re.IGNORECASE)
+_FEEDBACK_NEG = re.compile(r"\b(nao curti|nao gostei|odiei|menos assim|evita isso)\b", re.IGNORECASE)
+
 
 
 def recommendation_node(state: State) -> dict:
-    """Agente de recomendacao personalizada."""
+    """Agente de recomendacao personalizada multi-dominio."""
     user_message = state["raw_input"]
     history = state.get("messages", [])
     user_id = state.get("user_id", "?")
+
+    target_domains = _infer_target_domains(user_message)
 
     user_profile = {}
     neo4j = None
@@ -42,14 +67,14 @@ def recommendation_node(state: State) -> dict:
         neo4j.get_or_create_user(user_id)
         user_profile = neo4j.get_user_profile(user_id)
         logger.info(
-            "Recomendacao: perfil carregado user=%s assistidos=%d",
+            "Recomendacao: perfil carregado user=%s assistidos=%d dominios=%s",
             user_id,
             len(user_profile.get("assistidos", [])),
+            ",".join(sorted(target_domains)),
         )
-    except Exception as e:
-        logger.error("Recomendacao: erro ao carregar perfil Neo4j: %s", e)
+    except Exception as exc:
+        logger.error("Recomendacao: erro ao carregar perfil Neo4j: %s", exc)
 
-    # Feedback explicito rapido (feature 17), mesmo que roteado para recomendacao.
     if neo4j:
         handled = _processar_feedback_rapido(neo4j, user_id, user_message)
         if handled:
@@ -76,34 +101,56 @@ def recommendation_node(state: State) -> dict:
             len(semantic_results),
             generos_preferidos[:3],
         )
-    except Exception as e:
-        logger.warning("Recomendacao: erro Weaviate: %s", e)
+    except Exception as exc:
+        logger.warning("Recomendacao: erro Weaviate: %s", exc)
 
-    jikan_results = []
-    try:
-        jikan_results = jikan.buscar_anime(user_message[:80])
-        logger.info("Recomendacao: %d resultados Jikan", len(jikan_results))
-    except Exception as e:
-        logger.warning("Recomendacao: erro Jikan: %s", e)
+    catalog_results = []
 
-    # Busca TMDB quando usuario menciona filmes/series/doramas
-    if _KEYWORDS_MIDIA.search(user_message):
+    if "anime" in target_domains:
+        try:
+            anime_results = jikan.buscar_anime(user_message[:80])
+            catalog_results.extend(anime_results)
+            logger.info("Recomendacao: %d resultados Jikan", len(anime_results))
+        except Exception as exc:
+            logger.warning("Recomendacao: erro Jikan: %s", exc)
+
+    if "midia" in target_domains:
         try:
             tmdb_results = tmdb.buscar_midia(user_message[:80])
-            jikan_results = jikan_results + tmdb_results
-            logger.info("Recomendacao: %d resultados TMDB adicionados", len(tmdb_results))
-        except Exception as e:
-            logger.warning("Recomendacao: erro TMDB: %s", e)
+            catalog_results.extend(tmdb_results)
+            logger.info("Recomendacao: %d resultados TMDB", len(tmdb_results))
+        except Exception as exc:
+            logger.warning("Recomendacao: erro TMDB: %s", exc)
+
+    if "musica" in target_domains:
+        musica_results = _collect_music_catalog(user_message)
+        catalog_results.extend(musica_results)
+        logger.info("Recomendacao: %d resultados MusicBrainz", len(musica_results))
+
+    if "livro" in target_domains:
+        livro_results = _collect_book_catalog(user_message)
+        catalog_results.extend(livro_results)
+        logger.info("Recomendacao: %d resultados OpenLibrary", len(livro_results))
+
+    catalog_results = _dedupe_catalog(catalog_results)
 
     reddit_results = []
     try:
         reddit_results = reddit.buscar_discussoes(user_message[:80], limit=4)
         logger.info("Recomendacao: %d posts Reddit", len(reddit_results))
-    except Exception as e:
-        logger.warning("Recomendacao: erro Reddit: %s", e)
+    except Exception as exc:
+        logger.warning("Recomendacao: erro Reddit: %s", exc)
 
-    assistidos = {a["titulo"].lower() for a in user_profile.get("assistidos", []) if a.get("titulo")}
-    dropados = {d["titulo"].lower() for d in user_profile.get("dropados", []) if d.get("titulo")}
+    assistidos = {
+        (a.get("titulo") or "").strip().lower()
+        for a in user_profile.get("assistidos", [])
+        if a.get("titulo")
+    }
+    dropados = {
+        (d.get("titulo") or "").strip().lower()
+        for d in user_profile.get("dropados", [])
+        if d.get("titulo")
+    }
     recomendados_recentes = {
         t.lower() for t in (user_profile.get("recomendados_recentes", []) or []) if t
     }
@@ -121,18 +168,23 @@ def recommendation_node(state: State) -> dict:
             continue
         semantic_filtrado.append(item)
 
-    jikan_filtrado = [r for r in jikan_results if (r.get("titulo") or "").lower() not in excluir]
-    if not permitir_nsfw:
-        jikan_filtrado = [r for r in jikan_filtrado if not _jikan_nsfw(r)]
+    catalog_filtrado = []
+    for item in catalog_results:
+        titulo = (item.get("titulo") or "").strip()
+        if not titulo or titulo.lower() in excluir:
+            continue
+        if not permitir_nsfw and _parece_nsfw(item):
+            continue
+        catalog_filtrado.append(item)
 
     tempo_disponivel = user_profile.get("tempo_disponivel_min")
     if isinstance(tempo_disponivel, int) and tempo_disponivel > 0:
-        jikan_filtrado = _ordenar_jikan_por_tempo(jikan_filtrado, tempo_disponivel)
+        catalog_filtrado = _ordenar_catalogo_por_tempo(catalog_filtrado, tempo_disponivel)
 
     logger.debug(
-        "Recomendacao: %d semanticos apos filtros | %d jikan apos filtros",
+        "Recomendacao: %d semanticos apos filtros | %d catalogo apos filtros",
         len(semantic_filtrado),
-        len(jikan_filtrado),
+        len(catalog_filtrado),
     )
 
     messages = rec_prompt.build_messages(
@@ -140,29 +192,128 @@ def recommendation_node(state: State) -> dict:
         history=history,
         user_profile=user_profile,
         semantic_results=semantic_filtrado,
-        jikan_results=jikan_filtrado,
+        catalog_results=catalog_filtrado,
         reddit_results=reddit_results,
+        target_domains=sorted(target_domains),
     )
 
     logger.info("Agente Recomendacao: gerando para user=%s", user_id)
     try:
         response = openrouter.converse(messages)
-    except Exception as e:
-        logger.error("Agente Recomendacao: erro OpenRouter: %s", e)
+    except Exception as exc:
+        logger.error("Agente Recomendacao: erro OpenRouter: %s", exc)
         response = "Nao consegui gerar recomendacoes agora. Tenta em instantes!"
 
     if neo4j:
         _salvar_preferencias(user_id, user_message, neo4j)
         recomendados = _extrair_titulos_recomendados(response)
         if not recomendados:
-            recomendados = _fallback_titles(semantic_filtrado, jikan_filtrado)
+            recomendados = _fallback_titles(semantic_filtrado, catalog_filtrado)
         if recomendados:
             try:
                 neo4j.registrar_recomendacoes(user_id, recomendados[:6])
-            except Exception as e:
-                logger.debug("Recomendacao: nao conseguiu registrar recomendados: %s", e)
+            except Exception as exc:
+                logger.debug("Recomendacao: nao conseguiu registrar recomendados: %s", exc)
 
     return {"response": response, "user_profile": user_profile}
+
+
+
+def _infer_target_domains(message: str) -> set[str]:
+    text = (message or "").strip()
+    domains = set()
+
+    if _KEYWORDS_ANIME.search(text):
+        domains.add("anime")
+    if _KEYWORDS_MIDIA.search(text):
+        domains.add("midia")
+    if _KEYWORDS_MUSICA.search(text):
+        domains.add("musica")
+    if _KEYWORDS_LIVRO.search(text):
+        domains.add("livro")
+
+    if not domains:
+        return {"anime", "midia"}
+
+    return domains
+
+
+
+def _collect_music_catalog(query: str) -> list[dict]:
+    q = (query or "").strip()[:80]
+    if not q:
+        return []
+
+    results = []
+
+    try:
+        if _KEYWORDS_MUSICA_ALBUM.search(q):
+            results.extend(musicbrainz.buscar_album(q))
+    except Exception as exc:
+        logger.debug("Recomendacao: erro MusicBrainz album: %s", exc)
+
+    try:
+        artists = musicbrainz.buscar_artista(q)
+        results.extend(artists)
+
+        if artists and not any((r.get("subtipo") == "album") for r in results):
+            seed = (artists[0].get("titulo") or "").strip()[:80]
+            if seed:
+                results.extend(musicbrainz.buscar_album(seed))
+    except Exception as exc:
+        logger.debug("Recomendacao: erro MusicBrainz artista: %s", exc)
+
+    return _dedupe_catalog(results)[:10]
+
+
+
+def _collect_book_catalog(query: str) -> list[dict]:
+    q = (query or "").strip()[:80]
+    if not q:
+        return []
+
+    try:
+        books = openlibrary.buscar_livro(q)
+        if books:
+            return _dedupe_catalog(books)[:10]
+    except Exception as exc:
+        logger.debug("Recomendacao: erro OpenLibrary livro: %s", exc)
+
+    try:
+        autores = openlibrary.buscar_autor(q)
+        if autores:
+            nome = (autores[0].get("nome") or "").strip()
+            if nome:
+                books = openlibrary.get_livros_recentes_autor(nome)
+                return _dedupe_catalog(books)[:10]
+    except Exception as exc:
+        logger.debug("Recomendacao: erro OpenLibrary autor: %s", exc)
+
+    return []
+
+
+
+def _dedupe_catalog(items: list[dict]) -> list[dict]:
+    seen = set()
+    out = []
+
+    for item in items:
+        titulo = (item.get("titulo") or "").strip()
+        if not titulo:
+            continue
+
+        tipo = (item.get("tipo") or "").strip().lower()
+        subtipo = (item.get("subtipo") or "").strip().lower()
+        key = f"{tipo}|{subtipo}|{titulo.lower()}"
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        out.append(item)
+
+    return out
+
 
 
 def _salvar_preferencias(user_id: str, message: str, neo4j) -> None:
@@ -176,63 +327,90 @@ def _salvar_preferencias(user_id: str, message: str, neo4j) -> None:
                     neo4j.registrar_quer_ver(user_id, titulo)
                     logger.info("Preferencia salva: user=%s titulo=%s", user_id, titulo)
                     break
-    except Exception as e:
-        logger.debug("Preferencia: erro ao salvar: %s", e)
+    except Exception as exc:
+        logger.debug("Preferencia: erro ao salvar: %s", exc)
+
 
 
 def _parece_nsfw(item: dict) -> bool:
+    generos = item.get("generos") or []
+    temas = item.get("temas") or []
+
+    if isinstance(generos, str):
+        generos = [generos]
+    if isinstance(temas, str):
+        temas = [temas]
+
     text = " ".join(
         [
             str(item.get("titulo", "")),
             str(item.get("synopsis", "")),
-            " ".join(item.get("generos", []) or []),
-            " ".join(item.get("temas", []) or []),
+            " ".join(generos),
+            " ".join(temas),
         ]
     ).lower()
+
     return any(tag in text for tag in ["hentai", "ecchi", "adult", "nsfw", "smut"])
 
 
-def _jikan_nsfw(item: dict) -> bool:
-    text = " ".join(
-        [
-            str(item.get("titulo", "")),
-            str(item.get("synopsis", "")),
-            " ".join(item.get("generos", []) or []),
-            " ".join(item.get("temas", []) or []),
-        ]
-    ).lower()
-    return any(tag in text for tag in ["hentai", "ecchi", "adult", "nsfw", "smut"])
+
+def _ordenar_catalogo_por_tempo(items: list[dict], tempo_min: int) -> list[dict]:
+    if not items:
+        return []
+
+    audiovisual = [it for it in items if _is_audiovisual(it)]
+    outros = [it for it in items if not _is_audiovisual(it)]
+    audiovisual_ordenado = sorted(audiovisual, key=lambda it: _score_audiovisual_tempo(it, tempo_min))
+
+    return audiovisual_ordenado + outros
 
 
-def _ordenar_jikan_por_tempo(items: list[dict], tempo_min: int) -> list[dict]:
-    def score(item: dict) -> tuple[float, float]:
-        eps = item.get("episodios")
-        nota = float(item.get("nota_mal") or 0.0)
-        if not isinstance(eps, int) or eps <= 0:
-            penalty = 5.0
-        elif tempo_min <= 25:
-            penalty = abs(eps - 12)
-        elif tempo_min <= 45:
-            penalty = abs(eps - 24)
+
+def _is_audiovisual(item: dict) -> bool:
+    tipo = (item.get("tipo") or "").strip().lower()
+    return tipo in {"anime", "filme", "serie", "dorama"}
+
+
+
+def _score_audiovisual_tempo(item: dict, tempo_min: int) -> tuple[float, float]:
+    tipo = (item.get("tipo") or "").strip().lower()
+    nota = float(item.get("nota_mal") or item.get("nota") or 0.0)
+
+    if tipo == "filme":
+        dur = item.get("duracao_min")
+        if isinstance(dur, int) and dur > 0:
+            penalty = abs(dur - tempo_min)
         else:
-            penalty = abs(eps - 36)
+            penalty = 40.0
         return (penalty, -nota)
 
-    return sorted(items, key=score)
+    eps = item.get("episodios")
+    if not isinstance(eps, int) or eps <= 0:
+        penalty = 12.0
+    elif tempo_min <= 25:
+        penalty = abs(eps - 12)
+    elif tempo_min <= 45:
+        penalty = abs(eps - 24)
+    else:
+        penalty = abs(eps - 36)
+
+    return (penalty, -nota)
+
 
 
 def _extrair_titulos_recomendados(response: str) -> list[str]:
     if not response:
         return []
+
     seen = set()
     out = []
 
-    for m in re.finditer(r"\*\*?([^*\n]{2,100})\*\*?", response):
-        t = m.group(1).strip(" -:()")
-        key = t.lower()
+    for match in re.finditer(r"\*\*?([^*\n]{2,100})\*\*?", response):
+        title = match.group(1).strip(" -:()")
+        key = title.lower()
         if key and key not in seen:
             seen.add(key)
-            out.append(t)
+            out.append(title)
 
     for line in response.splitlines():
         line = line.strip()
@@ -240,7 +418,7 @@ def _extrair_titulos_recomendados(response: str) -> list[str]:
             continue
         if line.startswith(("1.", "2.", "3.", "-", "*")):
             clean = re.sub(r"^[\d\-\*\.\)\s]+", "", line)
-            cand = clean.split(" - ")[0].split(" — ")[0].strip()
+            cand = clean.split(" - ")[0].strip()
             if 2 < len(cand) < 90:
                 key = cand.lower()
                 if key not in seen:
@@ -250,17 +428,21 @@ def _extrair_titulos_recomendados(response: str) -> list[str]:
     return out[:10]
 
 
-def _fallback_titles(semantic_filtrado: list[dict], jikan_filtrado: list[dict]) -> list[str]:
+
+def _fallback_titles(semantic_filtrado: list[dict], catalog_filtrado: list[dict]) -> list[str]:
     out = []
     for item in semantic_filtrado[:4]:
-        t = (item.get("titulo") or "").strip()
-        if t:
-            out.append(t)
-    for item in jikan_filtrado[:4]:
-        t = (item.get("titulo") or "").strip()
-        if t and t not in out:
-            out.append(t)
+        title = (item.get("titulo") or "").strip()
+        if title:
+            out.append(title)
+
+    for item in catalog_filtrado[:6]:
+        title = (item.get("titulo") or "").strip()
+        if title and title not in out:
+            out.append(title)
+
     return out[:8]
+
 
 
 def _processar_feedback_rapido(neo4j, user_id: str, msg: str) -> str | None:
@@ -273,14 +455,13 @@ def _processar_feedback_rapido(neo4j, user_id: str, msg: str) -> str | None:
     if not (is_pos or is_neg):
         return None
 
-    # Tenta extrair titulo apos "de", "deu", "sobre", ou entre aspas.
     quoted = re.findall(r'["\']([^"\']{2,120})["\']', text)
     titulo = quoted[0].strip() if quoted else ""
 
     if not titulo:
-        m = re.search(r"(?:de|sobre|em|do|da)\s+([^\n\.,!?]{2,100})", text, re.IGNORECASE)
-        if m:
-            titulo = m.group(1).strip()
+        match = re.search(r"(?:de|sobre|em|do|da)\s+([^\n\.,!?]{2,100})", text, re.IGNORECASE)
+        if match:
+            titulo = match.group(1).strip()
 
     if not titulo or len(titulo) < 2:
         return None
@@ -295,7 +476,6 @@ def _processar_feedback_rapido(neo4j, user_id: str, msg: str) -> str | None:
         if is_pos and not is_neg:
             return f"Perfeito, marquei que voce curtiu *{titulo}*. Vou puxar mais nesse estilo."
         return f"Fechado, marquei que voce nao curtiu *{titulo}*. Vou reduzir esse tipo nas proximas."
-    except Exception as e:
-        logger.debug("Feedback rapido: falha ao salvar: %s", e)
+    except Exception as exc:
+        logger.debug("Feedback rapido: falha ao salvar: %s", exc)
         return None
-

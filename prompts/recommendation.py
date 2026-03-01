@@ -1,15 +1,17 @@
-SYSTEM = """Voce e especialista em recomendacoes de anime, manga, manhwa, webtoon, filmes, series e doramas.
+SYSTEM = """Voce e especialista em recomendacoes de anime, manga, manhwa, webtoon, filmes, series, doramas, musica e livros.
 
 Regras principais:
 - Baseie recomendacoes no perfil real do usuario.
 - Nunca repetir obra ja assistida, dropada ou recomendada recentemente (se vier em contexto).
 - Respeitar tempo disponivel, mood do dia, filtro de maturidade e preferencia de audio quando existirem.
-- Se o usuario pedir modo casal/grupo, busque intersecao de gostos e explique trade-offs.
-- Se usuario pedir "mais assim" ou "menos assim", use feedback_memoria para ajustar direcao.
+- Se usuario pedir \"mais assim\" ou \"menos assim\", use feedback_memoria para ajustar direcao.
 - Recomende no maximo 3 opcoes por resposta.
-- Para cada opcao: diga por que combina, risco de nao gostar, e quando encaixa melhor (sessao curta/longa).
-- Inclua o tipo da obra (anime, filme, serie, dorama, manga) em cada recomendacao.
-- Tom: amigo que conhece seu gosto.
+- Para cada opcao: diga por que combina, risco de nao gostar, e quando encaixa melhor.
+- Inclua o tipo da recomendacao (anime, filme, serie, dorama, musica, livro).
+- Se o pedido for explicito de dominio (ex: so filmes, so musicas, so livros), nao misture dominios.
+- Para musica, voce pode recomendar artista, album ou faixa quando houver contexto.
+- Para livro, priorize livro e autor, e cite o perfil de leitura (fantasia, thriller, etc) quando der.
+- Tom: amigo que conhece o gosto do usuario.
 
 Formato sugerido:
 *TITULO* (tipo) - Por que combina: ...
@@ -23,21 +25,24 @@ def build_messages(
     history: list[dict],
     user_profile: dict,
     semantic_results: list[dict] | None = None,
-    jikan_results: list[dict] | None = None,
+    catalog_results: list[dict] | None = None,
     reddit_results: list[dict] | None = None,
+    target_domains: list[str] | None = None,
 ) -> list[dict]:
     profile_text = _format_profile(user_profile)
     semantic_text = _format_semantic(semantic_results or [])
-    jikan_text = _format_jikan(jikan_results or [])
+    catalog_text = _format_catalog(catalog_results or [])
     reddit_text = _format_reddit(reddit_results or [])
 
     system = SYSTEM
+    if target_domains:
+        system += f"\n\nDominios-alvo do pedido: {', '.join(target_domains)}"
     if profile_text:
         system += f"\n\nPerfil do usuario:\n{profile_text}"
     if semantic_text:
         system += f"\n\nObras semanticamente similares:\n{semantic_text}"
-    if jikan_text:
-        system += f"\n\nDados de catalogo (Jikan/MAL):\n{jikan_text}"
+    if catalog_text:
+        system += f"\n\nDados de catalogo cruzado:\n{catalog_text}"
     if reddit_text:
         system += f"\n\nComunidade (Reddit):\n{reddit_text}"
 
@@ -46,6 +51,7 @@ def build_messages(
         messages.append(msg)
     messages.append({"role": "user", "content": user_message})
     return messages
+
 
 
 def _format_profile(profile: dict) -> str:
@@ -61,22 +67,22 @@ def _format_profile(profile: dict) -> str:
             reverse=True,
         )
         lines.append("Assistidos (resumo):")
-        for a in top[:10]:
-            nota = a.get("nota", "?")
-            opiniao = (a.get("opiniao") or "").strip()
-            suffix = f' — "{opiniao}"' if opiniao else ""
-            lines.append(f"  - {a['titulo']} ({nota}/10){suffix}")
+        for item in top[:10]:
+            nota = item.get("nota", "?")
+            opiniao = (item.get("opiniao") or "").strip()
+            suffix = f' - "{opiniao}"' if opiniao else ""
+            lines.append(f"  - {item['titulo']} ({nota}/10){suffix}")
 
     if profile.get("dropados"):
         lines.append("Dropados:")
-        for d in profile["dropados"][:6]:
-            ep = d.get("episodio", "?")
-            lines.append(f"  - {d['titulo']} (ep {ep})")
+        for item in profile["dropados"][:6]:
+            ep = item.get("episodio", "?")
+            lines.append(f"  - {item['titulo']} (ep {ep})")
 
     if profile.get("quer_ver"):
         lines.append("Quer ver:")
-        for w in profile["quer_ver"][:8]:
-            lines.append(f"  - {w['titulo']}")
+        for item in profile["quer_ver"][:8]:
+            lines.append(f"  - {item['titulo']}")
 
     if profile.get("generos_favoritos"):
         lines.append(f"Generos favoritos: {', '.join(profile['generos_favoritos'][:6])}")
@@ -128,38 +134,59 @@ def _format_profile(profile: dict) -> str:
     return "\n".join(lines)
 
 
+
 def _format_semantic(results: list[dict]) -> str:
     if not results:
         return ""
     lines = []
-    for r in results[:8]:
+    for item in results[:8]:
         lines.append(
-            f"  - {r.get('titulo', '?')} ({r.get('ano', '?')}) - "
-            f"{(r.get('synopsis', '') or '')[:120]}"
+            f"  - {item.get('titulo', '?')} ({item.get('ano', '?')}) - "
+            f"{(item.get('synopsis', '') or '')[:120]}"
         )
     return "\n".join(lines)
 
 
-def _format_jikan(results: list[dict]) -> str:
+
+def _format_catalog(results: list[dict]) -> str:
     if not results:
         return ""
+
     lines = []
-    for r in results[:8]:
-        nota = r.get("nota_mal", "?")
-        generos = ", ".join(r.get("generos", [])[:4])
-        ep = r.get("episodios", "?")
-        lines.append(f"  - {r.get('titulo', '?')} | MAL {nota} | {ep} eps | {generos}")
+    for item in results[:10]:
+        tipo = (item.get("tipo") or "?").strip().lower()
+        titulo = item.get("titulo", "?")
+
+        if tipo == "musica":
+            subtipo = item.get("subtipo", "musica")
+            artista = item.get("artista") or item.get("pais") or ""
+            ano = item.get("ano") or "?"
+            lines.append(f"  - {titulo} ({tipo}/{subtipo}) | artista/info: {artista} | ano: {ano}")
+            continue
+
+        if tipo == "livro":
+            autor = item.get("autor", "")
+            ano = item.get("ano", "?")
+            paginas = item.get("paginas") or "?"
+            lines.append(f"  - {titulo} ({tipo}) | autor: {autor} | ano: {ano} | paginas: {paginas}")
+            continue
+
+        nota = item.get("nota_mal") or item.get("nota") or "?"
+        eps = item.get("episodios") or "?"
+        generos = ", ".join((item.get("generos") or [])[:4])
+        lines.append(f"  - {titulo} ({tipo}) | nota: {nota} | eps: {eps} | generos: {generos}")
+
     return "\n".join(lines)
+
 
 
 def _format_reddit(results: list[dict]) -> str:
     if not results:
         return ""
     lines = []
-    for r in results[:5]:
-        title = r.get("title", "")[:90]
-        sub = r.get("subreddit", "")
-        score = r.get("score", 0)
+    for item in results[:5]:
+        title = item.get("title", "")[:90]
+        sub = item.get("subreddit", "")
+        score = item.get("score", 0)
         lines.append(f"  - [{sub}] {title} (up {score})")
     return "\n".join(lines)
-

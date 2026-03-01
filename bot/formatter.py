@@ -1,4 +1,4 @@
-﻿import re
+import re
 
 
 def formatar_telegram(texto: str) -> str:
@@ -8,6 +8,29 @@ def formatar_telegram(texto: str) -> str:
     """
     if not texto:
         return "..."
+
+    link_placeholders = {}
+    url_placeholders = {}
+    link_counter = [0]
+    url_counter = [0]
+
+    def _save_md_link(match):
+        key = f"CODXMLINK{link_counter[0]}TOKEN"
+        label = match.group(1)
+        url = match.group(2)
+        link_placeholders[key] = (label, url)
+        link_counter[0] += 1
+        return key
+
+    def _save_url(match):
+        key = f"CODXURL{url_counter[0]}TOKEN"
+        url_placeholders[key] = match.group(1)
+        url_counter[0] += 1
+        return key
+
+    # Salva links antes das conversoes de markdown para nao quebrar URLs.
+    texto = re.sub(r"\[([^\]\n]{1,200})\]\((https?://[^\s)]+)\)", _save_md_link, texto)
+    texto = re.sub(r"(?<![\"'=])(https?://[^\s<]+)", _save_url, texto)
 
     placeholders = {}
     counter = [0]
@@ -45,8 +68,20 @@ def formatar_telegram(texto: str) -> str:
             inner = original[1:-1].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
             texto = texto.replace(key, f"<code>{inner}</code>")
 
+    # Restaura links markdown e URLs puras para links clicaveis no Telegram.
+    for key, (label, url) in link_placeholders.items():
+        safe_label = (label or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        safe_url = (url or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        texto = texto.replace(key, f'<a href="{safe_url}">{safe_label}</a>')
+
+    for key, url in url_placeholders.items():
+        safe_url = (url or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        texto = texto.replace(key, f'<a href="{safe_url}">{safe_url}</a>')
+
     # Nunca deixar token interno ou artefato de placeholder chegar ao usuario.
     texto = re.sub(r"CODXPH\d+TOKEN", "", texto)
+    texto = re.sub(r"CODXMLINK\d+TOKEN", "", texto)
+    texto = re.sub(r"CODXURL\d+TOKEN", "", texto)
     texto = _sanitize_placeholder_artifacts(texto)
 
     if len(texto) > 4000:

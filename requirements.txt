@@ -19,6 +19,6 @@ requests==2.32.3
 feedparser==6.0.11
 trafilatura==1.12.2
 readability-lxml==0.8.1
-scrapetube
-yt-dlp
-youtube-transcript-api
+scrapetube==2.5.1
+yt-dlp==2024.12.13
+youtube-transcript-api==0.6.3

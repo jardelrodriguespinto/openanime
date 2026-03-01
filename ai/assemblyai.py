@@ -1,8 +1,8 @@
 import logging
 import os
-import time
+import asyncio
 
-import requests
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -21,8 +21,13 @@ class AssemblyAIClient:
 
         self.base_url = "https://api.assemblyai.com/v2"
         self.headers = {"authorization": self.api_key}
+        self.client = httpx.AsyncClient(
+            base_url=self.base_url,
+            headers=self.headers,
+            timeout=60.0,
+        )
 
-    def transcrever_audio(
+    async def transcrever_audio(
         self,
         audio_bytes: bytes,
         duration_seconds: int | None = None,
@@ -35,16 +40,14 @@ class AssemblyAIClient:
             duration_seconds=duration_seconds,
             min_duration_seconds=min_duration_seconds,
         )
-        audio_url = self._upload(payload)
-        transcript_id = self._create_transcript(audio_url, language_code=language_code)
-        return self._wait_transcript(transcript_id, timeout_seconds=timeout_seconds)
+        audio_url = await self._upload(payload)
+        transcript_id = await self._create_transcript(audio_url, language_code=language_code)
+        return await self._wait_transcript(transcript_id, timeout_seconds=timeout_seconds)
 
-    def _upload(self, audio_bytes: bytes) -> str:
-        resp = requests.post(
-            f"{self.base_url}/upload",
-            headers=self.headers,
+    async def _upload(self, audio_bytes: bytes) -> str:
+        resp = await self.client.post(
+            "/upload",
             data=audio_bytes,
-            timeout=60,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -53,18 +56,17 @@ class AssemblyAIClient:
             raise RuntimeError("AssemblyAI nao retornou upload_url")
         return upload_url
 
-    def _create_transcript(self, audio_url: str, language_code: str = "pt") -> str:
+    async def _create_transcript(self, audio_url: str, language_code: str = "pt") -> str:
         payload = {
             "audio_url": audio_url,
             "language_code": language_code,
             "punctuate": True,
             "format_text": True,
         }
-        resp = requests.post(
-            f"{self.base_url}/transcript",
+        resp = await self.client.post(
+            "/transcript",
             headers={**self.headers, "content-type": "application/json"},
             json=payload,
-            timeout=30,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -73,14 +75,10 @@ class AssemblyAIClient:
             raise RuntimeError(f"AssemblyAI nao retornou id: {data}")
         return transcript_id
 
-    def _wait_transcript(self, transcript_id: str, timeout_seconds: int = 90) -> str:
-        deadline = time.time() + timeout_seconds
-        while time.time() < deadline:
-            resp = requests.get(
-                f"{self.base_url}/transcript/{transcript_id}",
-                headers=self.headers,
-                timeout=30,
-            )
+    async def _wait_transcript(self, transcript_id: str, timeout_seconds: int = 90) -> str:
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        while asyncio.get_running_loop().time() < deadline:
+            resp = await self.client.get(f"/transcript/{transcript_id}")
             resp.raise_for_status()
             data = resp.json()
             status = data.get("status")
@@ -94,7 +92,7 @@ class AssemblyAIClient:
             if status == "error":
                 raise RuntimeError(data.get("error") or "Erro desconhecido no AssemblyAI")
 
-            time.sleep(2)
+            await asyncio.sleep(2)
 
         raise TimeoutError("Timeout aguardando transcricao do AssemblyAI")
 
