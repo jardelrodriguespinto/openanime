@@ -7,7 +7,7 @@ import logging
 import re
 
 from ai.openrouter import openrouter
-from data.jobs import Vaga, buscar_vagas
+from data.jobs import Vaga, buscar_vagas, gerar_variantes
 from graph.neo4j_client import get_neo4j
 import prompts.jobs as jobs_prompt
 
@@ -125,7 +125,20 @@ def _modo_busca(state: dict) -> dict:
 
     query, localizacao, modalidade = _detectar_query(mensagem, perfil)
 
-    vagas = buscar_vagas(query, localizacao=localizacao, modalidade=modalidade)
+    # Gera variantes PT/EN + skills do perfil para ampliar a busca
+    top_skills = [h.get("nome", "") for h in perfil.get("habilidades", [])[:3] if h.get("nome")]
+    variantes = gerar_variantes(query, top_skills)
+    query_principal = variantes[0]
+    queries_extras = variantes[1:] if len(variantes) > 1 else []
+
+    logger.info("jobs: query='%s' variantes=%s", query_principal, queries_extras)
+
+    vagas = buscar_vagas(
+        query_principal,
+        localizacao=localizacao,
+        modalidade=modalidade,
+        queries_extras=queries_extras,
+    )
 
     # Calcula score de match para cada vaga
     for vaga in vagas:
