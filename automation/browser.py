@@ -1,16 +1,22 @@
 """
 Gerenciador de browser Playwright — stealth, anti-deteccao, comportamento humano.
+Suporte a persistencia de sessao por plataforma (salva/carrega cookies em JSON).
 """
 
 import asyncio
+import json
 import logging
 import os
 import random
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 PLAYWRIGHT_HEADLESS = os.getenv("PLAYWRIGHT_HEADLESS", "true").lower() == "true"
 PLAYWRIGHT_TIMEOUT = int(os.getenv("PLAYWRIGHT_TIMEOUT_MS", "45000"))
+
+# Diretorio onde as sessoes (cookies) sao persistidas por plataforma
+_SESSIONS_DIR = Path(os.getenv("SESSIONS_DIR", "/app/data/sessions"))
 
 _browser = None
 _playwright_instance = None
@@ -191,6 +197,87 @@ async def screenshot_debug(page, nome: str = "debug") -> str:
     except Exception as e:
         logger.debug("browser: screenshot falhou: %s", e)
         return ""
+
+
+async def nova_pagina_com_sessao(plataforma: str, stealth: bool = True):
+    """
+    Retorna pagina com contexto que ja carrega cookies salvos da plataforma.
+    Se nao houver sessao salva, retorna pagina normal (vai precisar de login).
+    """
+    browser = await get_browser()
+    user_agent = random.choice(_USER_AGENTS)
+    viewport = random.choice(_VIEWPORTS)
+
+    context = await browser.new_context(
+        user_agent=user_agent,
+        viewport=viewport,
+        locale="pt-BR",
+        timezone_id="America/Sao_Paulo",
+        permissions=["geolocation"],
+        geolocation={"longitude": -46.6388, "latitude": -23.5489},
+        color_scheme="light",
+        java_script_enabled=True,
+    )
+
+    # Carrega cookies salvos da plataforma
+    cookies = _carregar_cookies(plataforma)
+    if cookies:
+        try:
+            await context.add_cookies(cookies)
+            logger.info("browser: sessao carregada para '%s' (%d cookies)", plataforma, len(cookies))
+        except Exception as e:
+            logger.debug("browser: erro ao carregar cookies de '%s': %s", plataforma, e)
+
+    page = await context.new_page()
+    page.set_default_timeout(PLAYWRIGHT_TIMEOUT)
+
+    if stealth:
+        await _aplicar_stealth(page)
+
+    return page, context
+
+
+async def salvar_sessao(context, plataforma: str) -> None:
+    """
+    Salva cookies do contexto atual para a plataforma.
+    Chame apos login bem-sucedido.
+    """
+    try:
+        cookies = await context.cookies()
+        if not cookies:
+            return
+        _SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+        caminho = _SESSIONS_DIR / f"{plataforma}.json"
+        caminho.write_text(json.dumps(cookies, ensure_ascii=False, indent=2), encoding="utf-8")
+        logger.info("browser: sessao salva para '%s' (%d cookies -> %s)", plataforma, len(cookies), caminho)
+    except Exception as e:
+        logger.warning("browser: falha ao salvar sessao de '%s': %s", plataforma, e)
+
+
+def _carregar_cookies(plataforma: str) -> list:
+    """Carrega cookies salvos da plataforma. Retorna [] se nao houver."""
+    caminho = _SESSIONS_DIR / f"{plataforma}.json"
+    if not caminho.exists():
+        return []
+    try:
+        dados = json.loads(caminho.read_text(encoding="utf-8"))
+        return dados if isinstance(dados, list) else []
+    except Exception as e:
+        logger.debug("browser: erro ao ler cookies de '%s': %s", plataforma, e)
+        return []
+
+
+def sessao_existe(plataforma: str) -> bool:
+    """Retorna True se existe sessao salva para a plataforma."""
+    return (_SESSIONS_DIR / f"{plataforma}.json").exists()
+
+
+def limpar_sessao(plataforma: str) -> None:
+    """Remove sessao salva de uma plataforma (ex: apos logout ou erro de login)."""
+    caminho = _SESSIONS_DIR / f"{plataforma}.json"
+    if caminho.exists():
+        caminho.unlink()
+        logger.info("browser: sessao de '%s' removida", plataforma)
 
 
 async def fechar():

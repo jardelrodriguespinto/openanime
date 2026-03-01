@@ -43,11 +43,16 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "") -> dict
     """
     Candidatura via Gupy com multi-step, login e LLM para perguntas customizadas.
     """
-    from automation.browser import detectar_bloqueio, nova_pagina, clicar_qualquer, esperar_navegacao, screenshot_debug
+    from automation.browser import (
+        detectar_bloqueio, nova_pagina_com_sessao,
+        clicar_qualquer, esperar_navegacao, screenshot_debug,
+        salvar_sessao, sessao_existe, limpar_sessao,
+    )
 
     page = None
+    context = None
     try:
-        page = await nova_pagina(stealth=True)
+        page, context = await nova_pagina_com_sessao("gupy", stealth=True)
 
         await page.goto(vaga_url)
         await esperar_navegacao(page, timeout=15000)
@@ -78,7 +83,7 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "") -> dict
         # Verifica se redirecionou para login/cadastro
         url_atual = page.url
         if any(k in url_atual for k in ("login", "signup", "cadastro", "auth")):
-            resultado_login = await _fazer_login_gupy(page, url_atual)
+            resultado_login = await _fazer_login_gupy(page, context)
             if not resultado_login["sucesso"]:
                 await page.close()
                 return resultado_login
@@ -106,11 +111,17 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "") -> dict
             "motivo_falha": "erro_tecnico",
             "mensagem": f"Erro tecnico no Gupy. Candidate-se manualmente: {vaga_url}",
         }
+    finally:
+        if context:
+            try:
+                await context.close()
+            except Exception:
+                pass
 
 
-async def _fazer_login_gupy(page, url_login: str) -> dict:
-    """Login no Gupy via email/senha."""
-    from automation.browser import digitar_humano, esperar_navegacao
+async def _fazer_login_gupy(page, context=None) -> dict:
+    """Login no Gupy via email/senha. Salva sessao apos sucesso."""
+    from automation.browser import digitar_humano, esperar_navegacao, salvar_sessao
 
     if not GUPY_EMAIL:
         return {
@@ -165,6 +176,9 @@ async def _fazer_login_gupy(page, url_login: str) -> dict:
             }
 
         logger.info("gupy_apply: login OK")
+        # Salva sessao para proximas candidaturas
+        if context:
+            await salvar_sessao(context, "gupy")
         return {"sucesso": True}
 
     except Exception as e:

@@ -58,17 +58,36 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "") -> dict
             "mensagem": "Configure LINKEDIN_EMAIL e LINKEDIN_PASSWORD no .env para candidatura automatica.",
         }
 
-    from automation.browser import detectar_bloqueio, nova_pagina, clicar_qualquer, esperar_navegacao, screenshot_debug
+    from automation.browser import (
+        detectar_bloqueio, nova_pagina, nova_pagina_com_sessao,
+        clicar_qualquer, esperar_navegacao, screenshot_debug,
+        salvar_sessao, sessao_existe, limpar_sessao,
+    )
 
     page = None
+    context = None
     try:
-        page = await nova_pagina(stealth=True)
+        page, context = await nova_pagina_com_sessao("linkedin", stealth=True)
 
-        # --- LOGIN ---
-        resultado_login = await _fazer_login(page)
-        if not resultado_login["sucesso"]:
-            await page.close()
-            return resultado_login
+        # --- LOGIN (pula se sessao valida) ---
+        if sessao_existe("linkedin"):
+            # Verifica se sessao ainda e valida
+            await page.goto("https://www.linkedin.com/feed/")
+            await esperar_navegacao(page, timeout=10000)
+            if "feed" in page.url or "mynetwork" in page.url:
+                logger.info("linkedin_apply: sessao existente valida, pulando login")
+            else:
+                # Sessao expirou — remove e faz login
+                limpar_sessao("linkedin")
+                resultado_login = await _fazer_login(page, context)
+                if not resultado_login["sucesso"]:
+                    await page.close()
+                    return resultado_login
+        else:
+            resultado_login = await _fazer_login(page, context)
+            if not resultado_login["sucesso"]:
+                await page.close()
+                return resultado_login
 
         # --- NAVEGA PARA A VAGA ---
         await page.goto(vaga_url)
@@ -122,15 +141,21 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "") -> dict
             "motivo_falha": "erro_tecnico",
             "mensagem": f"Erro tecnico na automacao LinkedIn. Candidate-se manualmente: {vaga_url}",
         }
+    finally:
+        if context:
+            try:
+                await context.close()
+            except Exception:
+                pass
 
 
-async def _fazer_login(page) -> dict:
-    """Login no LinkedIn com retry."""
+async def _fazer_login(page, context=None) -> dict:
+    """Login no LinkedIn. Salva cookies apos sucesso para reutilizar na proxima vez."""
     try:
         await page.goto("https://www.linkedin.com/login")
         await asyncio.sleep(random.uniform(1, 2))
 
-        from automation.browser import digitar_humano, esperar_navegacao
+        from automation.browser import digitar_humano, esperar_navegacao, salvar_sessao
         await digitar_humano(page, "#username", LINKEDIN_EMAIL)
         await asyncio.sleep(random.uniform(0.3, 0.8))
         await digitar_humano(page, "#password", LINKEDIN_PASSWORD)
@@ -138,7 +163,6 @@ async def _fazer_login(page) -> dict:
         await page.click('button[type="submit"]')
         await esperar_navegacao(page, timeout=20000)
 
-        # Verifica checkpoint/2FA
         if "checkpoint" in page.url or "challenge" in page.url:
             return {
                 "sucesso": False,
@@ -148,9 +172,11 @@ async def _fazer_login(page) -> dict:
 
         if "feed" in page.url or "mynetwork" in page.url or "linkedin.com/in/" in page.url:
             logger.info("linkedin_apply: login OK")
+            # Salva sessao para proximas candidaturas
+            if context:
+                await salvar_sessao(context, "linkedin")
             return {"sucesso": True}
 
-        # Tenta verificar se esta logado
         html = await page.content()
         if "sign in" in html.lower() or "entrar" in html.lower():
             return {
@@ -159,6 +185,9 @@ async def _fazer_login(page) -> dict:
                 "mensagem": "Login no LinkedIn falhou. Verifique LINKEDIN_EMAIL e LINKEDIN_PASSWORD no .env.",
             }
 
+        # Sessao possivelmente valida — salva de qualquer forma
+        if context:
+            await salvar_sessao(context, "linkedin")
         return {"sucesso": True}
 
     except Exception as e:
