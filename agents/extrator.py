@@ -20,8 +20,8 @@ SYSTEM = """Analise a mensagem do usuario e extraia dados de perfil de anime, ma
 Retorne APENAS um JSON com o formato:
 {
   "acoes": [
-    {"tipo": "assistido", "titulo": "...", "nota": null_ou_numero, "tipo_midia": "anime"},
-    {"tipo": "lido", "titulo": "...", "nota": null_ou_numero, "tipo_midia": "manga"},
+    {"tipo": "assistido", "titulo": "...", "nota": null_ou_numero, "tipo_midia": "anime", "opiniao": "frase curta do usuario sobre a obra ou null"},
+    {"tipo": "lido", "titulo": "...", "nota": null_ou_numero, "tipo_midia": "manga", "opiniao": null},
     {"tipo": "drop", "titulo": "...", "episodio": null_ou_numero, "tipo_midia": "serie"},
     {"tipo": "quer_ver", "titulo": "...", "tipo_midia": "filme"},
     {"tipo": "gostou_de", "titulo": "...", "tipo_midia": "dorama"},
@@ -31,6 +31,10 @@ Retorne APENAS um JSON com o formato:
     {"tipo": "quer_ler", "titulo": "...", "autor": "...", "tipo_midia": "livro"}
   ]
 }
+
+O campo "opiniao" e opcional. Preencha SOMENTE quando o usuario expressou uma opiniao clara sobre a obra
+(ex: "amei o final", "achei lento mas o final compensou", "melhor anime do ano", "personagens rasos").
+Nao invente opiniao. Se nao houver opiniao expressa, use null.
 
 tipo_midia deve ser: "anime", "manga", "manhwa", "filme", "serie", "dorama", "musica" ou "livro"
 - anime: animacao japonesa
@@ -247,7 +251,8 @@ async def extrair_e_salvar(user_id: str, user_message: str) -> None:
                 nota = acao.get("nota")
                 if isinstance(nota, (int, float)) and not (0 <= nota <= 10):
                     nota = None
-                neo4j.registrar_assistido(user_id, titulo_resolvido, nota)
+                opiniao = (acao.get("opiniao") or "").strip() or None
+                neo4j.registrar_assistido(user_id, titulo_resolvido, nota, opiniao=opiniao)
                 logger.info(
                     "Extrator: %s user=%s titulo=%s nota=%s tipo_midia=%s",
                     tipo, user_id, titulo_resolvido, nota, tipo_midia,

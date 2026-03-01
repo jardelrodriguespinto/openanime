@@ -63,7 +63,9 @@ def _format_profile(profile: dict) -> str:
         lines.append("Assistidos (resumo):")
         for a in top[:10]:
             nota = a.get("nota", "?")
-            lines.append(f"  - {a['titulo']} ({nota}/10)")
+            opiniao = (a.get("opiniao") or "").strip()
+            suffix = f' — "{opiniao}"' if opiniao else ""
+            lines.append(f"  - {a['titulo']} ({nota}/10){suffix}")
 
     if profile.get("dropados"):
         lines.append("Dropados:")

@@ -70,7 +70,16 @@ def analysis_node(state: State) -> dict:
     weaviate_data = []
     try:
         wc = get_weaviate()
-        weaviate_data = wc.busca_semantica(user_message, limit=5)
+        # Prioriza busca pelo titulo canonico (Jikan) se disponivel; fallback para mensagem
+        query_weaviate = jikan_data[0].get("titulo") or user_message if jikan_data else user_message
+        weaviate_data = wc.busca_semantica(query_weaviate, limit=6)
+        # Em modo comparacao busca a segunda obra tambem
+        if compare_mode and len(jikan_data) >= 2:
+            titulo2 = jikan_data[1].get("titulo") or ""
+            if titulo2:
+                extra = wc.busca_semantica(titulo2, limit=3)
+                seen = {d.get("titulo") for d in weaviate_data}
+                weaviate_data += [d for d in extra if d.get("titulo") not in seen]
         logger.debug("Analise: %d resultados Weaviate", len(weaviate_data))
     except Exception as e:
         logger.warning("Analise: erro Weaviate: %s", e)

@@ -751,7 +751,7 @@ class Neo4jClient:
         OPTIONAL MATCH (u)-[pg:PREFERE_GENERO]->(g:Genero)
         OPTIONAL MATCH (u)-[pt:PREFERE_TEMA]->(t:Tema)
         RETURN
-          collect(DISTINCT {titulo: a.titulo, nota: r.nota, data: r.data}) AS assistidos,
+          collect(DISTINCT {titulo: a.titulo, nota: r.nota, data: r.data, opiniao: r.opiniao}) AS assistidos,
           collect(DISTINCT {titulo: da.titulo, episodio: d.episodio, data: d.data}) AS dropados,
           collect(DISTINCT {titulo: qv.titulo}) AS quer_ver,
           collect(
@@ -911,14 +911,22 @@ class Neo4jClient:
         }
     # Registro de interacoes ---------------------------------------------------
 
-    def registrar_assistido(self, telegram_id: str, titulo: str, nota: float | None = None):
+    def registrar_assistido(
+        self,
+        telegram_id: str,
+        titulo: str,
+        nota: float | None = None,
+        opiniao: str | None = None,
+    ):
+        opiniao_clean = (opiniao or "").strip()[:500] or None
         with self.driver.session() as session:
             anime_ref = self._ensure_anime_node(session, titulo=titulo, formato="anime")
             cypher = """
             MATCH (u:Usuario {telegram_id: $telegram_id})
             MATCH (a:Anime {titulo_key: $titulo_key})
             MERGE (u)-[r:ASSISTIU]->(a)
-            SET r.nota = $nota, r.data = datetime()
+            SET r.nota = $nota, r.data = datetime(),
+                r.opiniao = CASE WHEN $opiniao IS NOT NULL THEN $opiniao ELSE r.opiniao END
             WITH u, a
             OPTIONAL MATCH (u)-[p:EM_PROGRESSO]->(a)
             DELETE p
@@ -928,9 +936,27 @@ class Neo4jClient:
                 telegram_id=telegram_id,
                 titulo_key=anime_ref["titulo_key"],
                 nota=nota,
+                opiniao=opiniao_clean,
             )
         self.refresh_user_taste_links(telegram_id)
         logger.info("Registrado assistido: user=%s titulo=%s nota=%s", telegram_id, titulo, nota)
+
+    def get_opinioes_usuario(self, telegram_id: str, limit: int = 10) -> list[dict]:
+        """Retorna opinioes textuais do usuario sobre obras que assistiu/leu."""
+        cypher = """
+        MATCH (u:Usuario {telegram_id: $telegram_id})-[r:ASSISTIU]->(a:Anime)
+        WHERE r.opiniao IS NOT NULL AND r.opiniao <> ''
+        RETURN a.titulo AS titulo, r.nota AS nota, r.opiniao AS opiniao
+        ORDER BY r.data DESC
+        LIMIT $limit
+        """
+        with self.driver.session() as session:
+            result = session.run(cypher, telegram_id=telegram_id, limit=limit)
+            return [
+                {"titulo": row["titulo"], "nota": row["nota"], "opiniao": row["opiniao"]}
+                for row in result
+                if row["titulo"] and row["opiniao"]
+            ]
 
     def registrar_drop(self, telegram_id: str, titulo: str, episodio: int | None = None):
         ep_final = episodio

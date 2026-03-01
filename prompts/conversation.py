@@ -55,6 +55,11 @@ def _format_profile(profile: dict) -> str:
             top_str = ", ".join(f"{a['titulo']} ({a['nota']}/10)" for a in top)
             lines.append(f"Favoritos: {top_str}")
 
+        com_opiniao = [a for a in assistidos if (a.get("opiniao") or "").strip()][:4]
+        if com_opiniao:
+            ops = "; ".join(f'{a["titulo"]}: "{a["opiniao"]}"' for a in com_opiniao)
+            lines.append(f"O que falou: {ops}")
+
     dropados = profile.get("dropados", [])
     if dropados:
         titulos_drop = [d["titulo"] for d in dropados[:5]]
