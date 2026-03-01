@@ -230,65 +230,190 @@ def _buscar_indeed(query: str, localizacao: str = "", limite: int = JOBS_LIMITE_
 
 # ─── Fonte 2: Gupy API ────────────────────────────────────────────────────────
 
+def _gupy_parse_jobs(jobs: list, localizacao: str, query: str, fonte_tag: str) -> list[Vaga]:
+    """Converte lista de dicts Gupy em objetos Vaga."""
+    vagas = []
+    for item in jobs:
+        titulo = (item.get("name") or item.get("title") or "").strip()
+        if not titulo:
+            continue
+        empresa = (item.get("careerPageName") or item.get("company") or "").strip()
+        cidade = (item.get("city") or "").strip()
+        estado = (item.get("state") or "").strip()
+        loc = f"{cidade}, {estado}".strip(", ") or localizacao or "Brasil"
+        tipo = (item.get("workplaceType") or item.get("type") or "").strip()
+        job_id = item.get("id", "")
+        slug = empresa.lower().replace(" ", "-").replace("/", "").replace(".", "") if empresa else "empresa"
+        job_url = (item.get("jobUrl") or item.get("url") or
+                   f"https://{slug}.gupy.io/jobs/{job_id}" if job_id else "")
+        vagas.append(Vaga(
+            id=f"gupy_{job_id or hash(titulo + empresa) % 1000000}",
+            titulo=titulo, empresa=empresa,
+            localizacao=loc,
+            modalidade=_normalizar_modalidade(tipo),
+            salario="A combinar",
+            descricao=(item.get("description") or "")[:500],
+            url=job_url, fonte=fonte_tag,
+            data_publicacao=item.get("publishedDate") or item.get("createdAt") or "",
+        ))
+    return vagas
+
+
 def _buscar_gupy(query: str, localizacao: str = "", limite: int = JOBS_LIMITE_POR_FONTE) -> list[Vaga]:
     """Busca vagas via API publica da Gupy (varios endpoints em cascata)."""
     vagas: list[Vaga] = []
 
+    # Headers que simulam o portal Gupy
+    headers_gupy = {
+        **_HEADERS,
+        "Accept": "application/json",
+        "Origin": "https://portal.gupy.io",
+        "Referer": "https://portal.gupy.io/",
+    }
+
     endpoints = [
-        ("GET", f"https://portal.api.gupy.io/api/job?jobName={quote_plus(query)}&limit={limite}&offset=0"),
-        ("GET", f"https://portal.api.gupy.io/api/v1/jobs?name={quote_plus(query)}&limit={limite}"),
-        ("GET", f"https://portal.api.gupy.io/api/v2/jobs?name={quote_plus(query)}&limit={limite}"),
+        f"https://portal.api.gupy.io/api/job?jobName={quote_plus(query)}&limit={limite}&offset=0",
+        f"https://portal.api.gupy.io/api/v1/jobs?name={quote_plus(query)}&limit={limite}",
+        f"https://portal.api.gupy.io/api/v2/jobs?name={quote_plus(query)}&limit={limite}",
     ]
     if localizacao:
-        endpoints = [(m, u + f"&cityName={quote_plus(localizacao)}") for m, u in endpoints]
+        endpoints = [u + f"&cityName={quote_plus(localizacao)}" for u in endpoints]
 
-    headers_gupy = {**_HEADERS, "Accept": "application/json"}
-
-    for _, url in endpoints:
+    for url in endpoints:
         try:
             with httpx.Client(timeout=15, headers=headers_gupy, follow_redirects=True) as client:
                 resp = client.get(url)
                 if resp.status_code not in (200, 201):
-                    logger.debug("gupy: status %d para %s", resp.status_code, url)
+                    logger.debug("gupy central: status %d", resp.status_code)
                     continue
-
                 data = resp.json()
+                logger.debug("gupy central: resposta keys=%s", list(data.keys()) if isinstance(data, dict) else type(data))
                 jobs = data.get("data", data.get("jobs", data if isinstance(data, list) else []))
-                if not isinstance(jobs, list):
+                if not isinstance(jobs, list) or not jobs:
                     continue
-
-                for item in jobs[:limite]:
-                    titulo = (item.get("name") or item.get("title") or "").strip()
-                    empresa = (item.get("careerPageName") or item.get("company") or "").strip()
-                    cidade = (item.get("city") or "").strip()
-                    estado = (item.get("state") or "").strip()
-                    loc = f"{cidade}, {estado}".strip(", ") or localizacao or "Brasil"
-                    tipo = (item.get("workplaceType") or item.get("type") or "").strip()
-                    job_id = item.get("id", "")
-                    slug = empresa.lower().replace(" ", "-").replace("/", "")
-                    job_url = item.get("jobUrl") or item.get("url") or f"https://{slug}.gupy.io/jobs/{job_id}"
-
-                    if not titulo:
-                        continue
-
-                    vagas.append(Vaga(
-                        id=f"gupy_{job_id or hash(titulo) % 1000000}",
-                        titulo=titulo, empresa=empresa,
-                        localizacao=loc,
-                        modalidade=_normalizar_modalidade(tipo),
-                        salario="A combinar",
-                        descricao=(item.get("description") or "")[:500],
-                        url=job_url, fonte="Gupy",
-                        data_publicacao=item.get("publishedDate") or item.get("createdAt") or "",
-                    ))
-
+                vagas = _gupy_parse_jobs(jobs[:limite], localizacao, query, "Gupy")
                 if vagas:
-                    logger.info("gupy: %d vagas para '%s' via %s", len(vagas), query, url)
+                    logger.info("gupy central: %d vagas para '%s'", len(vagas), query)
                     return vagas
-
         except Exception as e:
-            logger.debug("gupy: erro com %s: %s", url, e)
+            logger.debug("gupy central: erro %s: %s", url[:60], e)
 
+    return vagas
+
+
+# Principais empresas tech BR com portais no Gupy
+_GUPY_EMPRESAS_BR = [
+    "nubank", "ifood", "stone", "totvs", "ci-t", "stefanini", "neon",
+    "picpay", "rappi", "loggi", "olist", "contabilizei", "creditas",
+    "dock", "pismo", "vtex", "hotmart", "madeiramadeira", "loft",
+    "cloudwalk", "zup", "conductor", "mercadolivre", "b2w", "americanas",
+    "raia-drogasil", "grupozap", "quinto-andar", "quintoandar",
+    "conta-azul", "contaazul", "gympass", "uol", "terra",
+    "movidesk", "solfacil", "warren", "nuvemshop", "linx",
+]
+
+
+def _buscar_gupy_portais(query: str, limite: int = JOBS_LIMITE_POR_FONTE) -> list[Vaga]:
+    """
+    Busca vagas diretamente nas portais Gupy das principais empresas BR.
+    Cada portal expoe a mesma API REST: /{empresa}.gupy.io/api/job
+    """
+    query_terms = [t.lower() for t in query.split() if len(t) > 2]
+
+    def _portal(empresa: str) -> list[Vaga]:
+        try:
+            url = f"https://{empresa}.gupy.io/api/job?jobName={quote_plus(query)}&limit=5&offset=0"
+            headers = {"Accept": "application/json", "User-Agent": _HEADERS["User-Agent"]}
+            with httpx.Client(timeout=10, headers=headers, follow_redirects=True) as client:
+                resp = client.get(url)
+                if resp.status_code != 200:
+                    return []
+                data = resp.json()
+                jobs = data.get("data", data if isinstance(data, list) else [])
+                if not isinstance(jobs, list):
+                    return []
+                result = _gupy_parse_jobs(jobs[:3], "", query, "Gupy")
+                # Filtra por relevância do título
+                if query_terms:
+                    result = [v for v in result if any(t in v.titulo.lower() for t in query_terms)]
+                return result
+        except Exception:
+            return []
+
+    todas: list[Vaga] = []
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        futs = [ex.submit(_portal, e) for e in _GUPY_EMPRESAS_BR]
+        for f in as_completed(futs, timeout=18):
+            try:
+                todas.extend(f.result())
+            except Exception:
+                pass
+
+    if todas:
+        logger.info("gupy_portais: %d vagas para '%s'", len(todas), query)
+    return todas[:limite]
+
+
+# ─── Fonte 2b: Vagas.com.br ───────────────────────────────────────────────────
+
+def _buscar_vagas_com_br(query: str, localizacao: str = "", limite: int = JOBS_LIMITE_POR_FONTE) -> list[Vaga]:
+    """Busca vagas via vagas.com.br (maior job board BR)."""
+    vagas: list[Vaga] = []
+    try:
+        slug = quote_plus(query.replace(" ", "-").lower())
+        urls = [
+            f"https://www.vagas.com.br/vagas-de-{slug}?ordenar_por=mais_recentes",
+            f"https://www.vagas.com.br/empregos?q={quote_plus(query)}&ordenar_por=mais_recentes",
+        ]
+        if localizacao:
+            urls = [u + f"&cidade={quote_plus(localizacao)}" for u in urls]
+
+        for url in urls:
+            try:
+                with httpx.Client(timeout=15, headers=_HEADERS, follow_redirects=True) as client:
+                    resp = client.get(url)
+                    if resp.status_code != 200:
+                        continue
+                    soup = BeautifulSoup(resp.text, "html.parser")
+                    # vagas.com.br usa <article class="job-shortcut--list" data-job-id="...">
+                    cards = soup.find_all("article", class_=re.compile(r"job-shortcut|job-item|vaga"))
+                    if not cards:
+                        cards = soup.find_all(attrs={"data-job-id": True})
+                    if not cards:
+                        # Fallback: qualquer li/div com link de vaga
+                        cards = soup.find_all("li", class_=re.compile(r"job|vaga|opportunity"))
+
+                    for card in cards[:limite]:
+                        titulo_el = (card.find("a", class_=re.compile(r"job-shortcut__title|title"))
+                                     or card.find(["h2", "h3", "a"]))
+                        empresa_el = card.find(class_=re.compile(r"company|empresa|recruiter"))
+                        local_el = card.find(class_=re.compile(r"location|local|city|cidade"))
+                        link_el = card.find("a", href=True)
+
+                        titulo = titulo_el.get_text(strip=True) if titulo_el else ""
+                        empresa = empresa_el.get_text(strip=True) if empresa_el else ""
+                        local = local_el.get_text(strip=True) if local_el else localizacao or "Brasil"
+                        href = link_el.get("href", "") if link_el else ""
+                        link = f"https://www.vagas.com.br{href}" if href.startswith("/") else href
+
+                        if not titulo:
+                            continue
+                        vagas.append(Vaga(
+                            id=f"vagas_br_{hash(link or titulo) % 1000000}",
+                            titulo=titulo, empresa=empresa,
+                            localizacao=local,
+                            modalidade=_normalizar_modalidade(local),
+                            salario="A combinar", descricao="",
+                            url=link, fonte="Vagas.com.br",
+                        ))
+
+                    if vagas:
+                        logger.info("vagas.com.br: %d vagas para '%s'", len(vagas), query)
+                        return vagas
+            except Exception as e:
+                logger.debug("vagas.com.br: erro com %s: %s", url[:60], e)
+    except Exception as e:
+        logger.debug("vagas.com.br: erro: %s", e)
     return vagas
 
 
@@ -880,32 +1005,29 @@ def buscar_vagas(
         tarefas.append((_buscar_programathor, (q, limite_por)))
         tarefas.append((_buscar_revelo, (q, limite_por)))
         tarefas.append((_buscar_inhire, (q, limite_por)))
+        tarefas.append((_buscar_vagas_com_br, (q, localizacao, limite_por)))
+        tarefas.append((_buscar_linkedin, (q, localizacao, limite_por)))
         if not localizacao or modalidade == "remoto":
             tarefas.append((_buscar_remoteok, (q, limite_por)))
             tarefas.append((_buscar_weworkremotely, (q, limite_por)))
             tarefas.append((_buscar_workingnomads, (q, limite_por)))
 
-    # Google Dork — uma tarefa que internamente expande em múltiplas queries × site-groups
+    # Gupy portais das empresas BR (uma tarefa paralela por query, vai internamente usar ThreadPool)
+    for q in queries_unicas[:2]:
+        tarefas.append((_buscar_gupy_portais, (q, limite_por)))
+
+    # Google Dork — expande em múltiplas queries × site-groups internamente
     tarefas.append((_buscar_google_dork, (queries_unicas[0], localizacao, limite_por * 2, queries_unicas[1:])))
 
-    # Execucao paralela (max 16 workers)
-    with ThreadPoolExecutor(max_workers=min(len(tarefas), 16)) as executor:
+    # Execucao paralela (max 20 workers)
+    with ThreadPoolExecutor(max_workers=min(len(tarefas), 20)) as executor:
         futures = {executor.submit(fn, *args): fn.__name__ for fn, args in tarefas}
-        for future in as_completed(futures, timeout=30):
+        for future in as_completed(futures, timeout=45):
             try:
                 resultado = future.result()
                 todas.extend(resultado)
             except Exception as e:
                 logger.debug("jobs: tarefa %s falhou: %s", futures[future], e)
-
-    # LinkedIn como fallback se poucos resultados
-    if len(todas) < 5:
-        for q in queries_unicas[:2]:
-            try:
-                vagas_li = _buscar_linkedin(q, localizacao, limite_por)
-                todas.extend(vagas_li)
-            except Exception:
-                pass
 
     # Filtra vagas com mais de 15 dias (mantém as sem data)
     todas = [v for v in todas if _dentro_prazo(v.data_publicacao, max_dias=15)]
