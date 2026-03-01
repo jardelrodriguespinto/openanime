@@ -1,0 +1,28 @@
+# Neo4j data (nunca versionar)
+data/
+**/data/neo4j/
+**/neo4j/data/
+**/neo4j/logs/
+**/neo4j/import/
+**/neo4j/plugins/
+
+# Docker volumes / state
+.volumes/
+volumes/
+**/.docker/
+
+# Env e segredos
+.env
+.env.*
+!.env.example
+
+# Python cache/build
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Logs temporarios
+logs/
+*.log
