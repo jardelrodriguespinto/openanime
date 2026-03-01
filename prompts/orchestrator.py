@@ -85,6 +85,14 @@ Exemplos:
 "gera meu curriculo ATS" → curriculo_ats
 "cria um curriculo para aquela vaga" → curriculo_ats
 "personaliza meu curriculo para a vaga da Nubank" → curriculo_ats
+"quero um curriculo em PDF" → curriculo_ats
+"gera o PDF do meu curriculo" → curriculo_ats
+"manda meu curriculo em pdf" → curriculo_ats
+"faz meu cv em pdf" → curriculo_ats
+"pdf do curriculo" → curriculo_ats
+"curriculo" → curriculo_ats
+"quero um cv" → curriculo_ats
+"meu cv" → curriculo_ats
 "me candidata nessa vaga" → candidatura
 "quero me candidatar na Nubank" → candidatura
 "minhas candidaturas" → candidatura

@@ -4,6 +4,7 @@ Agente de vagas — busca, recomendacao personalizada e geracao de curriculo ATS
 
 import logging
 import re
+import unicodedata
 
 from ai.openrouter import openrouter
 from data.jobs import Vaga, buscar_vagas, gerar_variantes
@@ -12,9 +13,16 @@ import prompts.jobs as jobs_prompt
 
 logger = logging.getLogger(__name__)
 
+
+def _sem_acento(texto: str) -> str:
+    """Remove acentos para comparacao case-insensitive robusta."""
+    return unicodedata.normalize("NFD", texto).encode("ascii", "ignore").decode().lower()
+
+
 _KEYWORDS_CURRICULO_ATS = [
-    "curriculo", "gera curriculo", "montar curriculo", "curriculo ats",
-    "customiza curriculo", "personaliza curriculo",
+    "curriculo", "curriculo ats", "gera curriculo", "montar curriculo",
+    "customiza curriculo", "personaliza curriculo", "cria curriculo",
+    "fazer curriculo", "meu curriculo", "quero curriculo",
 ]
 _KEYWORDS_CANDIDATURAS = [
     "minhas candidaturas", "candidaturas", "onde me candidatei",
@@ -169,14 +177,21 @@ def jobs_node(state: dict) -> dict:
     """No LangGraph do agente de vagas."""
     user_id = state.get("user_id", "")
     mensagem = state.get("raw_input", "")
-    msg_lower = mensagem.lower()
+    intent = state.get("intent", "")
+
+    # Orquestrador já classificou como curriculo_ats — vai direto, sem reclassificar
+    if intent == "curriculo_ats":
+        return _modo_curriculo_ats(state)
+
+    # Normaliza acentos para matching robusto ("currículo" == "curriculo")
+    msg_norm = _sem_acento(mensagem)
 
     # Modo curriculo ATS
-    if any(kw in msg_lower for kw in _KEYWORDS_CURRICULO_ATS):
+    if any(kw in msg_norm for kw in _KEYWORDS_CURRICULO_ATS):
         return _modo_curriculo_ats(state)
 
     # Modo candidaturas (historico)
-    if any(kw in msg_lower for kw in _KEYWORDS_CANDIDATURAS):
+    if any(_sem_acento(kw) in msg_norm for kw in _KEYWORDS_CANDIDATURAS):
         return _modo_candidaturas(user_id)
 
     # Modo busca/recomendacao
