@@ -16,7 +16,6 @@ Retorne APENAS JSON valido com todos os campos encontrados (deixe vazio se nao h
   "modalidade_preferida": "",
   "cargos_desejados": [],
   "setores_interesse": [],
-  "idiomas": [],
   "habilidades": [{"nome": "Python", "nivel": 4, "anos_exp": 3}],
   "experiencias": [{"cargo": "", "empresa": "", "inicio": "", "fim": "atual", "descricao": ""}],
   "formacao": [{"curso": "", "instituicao": "", "nivel": "graduacao", "ano": "2027"}],
