@@ -347,6 +347,16 @@ async def _enviar_digest_usuario(
         radar=radar,
     )
     digest = await asyncio.to_thread(openrouter.converse, messages)
+
+    # Salva os animes do radar como recomendados para nao repetir no proximo digest
+    if radar.get("picks"):
+        try:
+            titulos_picks = [p["titulo"] for p in radar["picks"] if p.get("titulo")]
+            if titulos_picks:
+                await asyncio.to_thread(neo4j.registrar_recomendacoes, user_id, titulos_picks)
+        except Exception as e:
+            logger.debug("Notificador: erro ao registrar recomendados user=%s: %s", user_id, e)
+
     texto = formatar_telegram(digest)
     await context.bot.send_message(
         chat_id=user_id,

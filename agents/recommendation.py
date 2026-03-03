@@ -212,8 +212,11 @@ def recommendation_node(state: State) -> dict:
         if recomendados:
             try:
                 neo4j.registrar_recomendacoes(user_id, recomendados[:6])
+                logger.info("Recomendacao: %d titulos registrados user=%s: %s", len(recomendados[:6]), user_id, recomendados[:6])
             except Exception as exc:
-                logger.debug("Recomendacao: nao conseguiu registrar recomendados: %s", exc)
+                logger.warning("Recomendacao: FALHA ao registrar recomendados user=%s: %s", user_id, exc)
+        else:
+            logger.warning("Recomendacao: nenhum titulo extraido da resposta para salvar user=%s", user_id)
 
     return {"response": response, "user_profile": user_profile}
 

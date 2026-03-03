@@ -23,9 +23,10 @@ _KEYWORDS_CATEGORIA: dict[str, list[str]] = {
     "mercado":    ["mercado", "economia", "financeiro", "bolsa", "dolar", "inflacao", "emprego"],
     "games":      ["game", "jogo", "playstation", "xbox", "nintendo", "steam", "fps", "rpg"],
     "ciencia":    ["ciencia", "pesquisa", "estudo", "descoberta", "fisica", "biologia", "espaco"],
-    "brasil":     ["brasil", "politica", "governo", "congresso", "stf", "eleicao"],
+    "brasil":     ["brasil", "politica", "governo", "congresso", "stf", "eleicao", "brasilia", "lula", "bolsonaro"],
     "programacao":["programacao", "codigo", "dev", "developer", "python", "javascript", "backend", "frontend"],
     "startup":    ["startup", "unicornio", "venture", "funding", "seed", "serie a"],
+    "geral":      ["mundo", "internacional", "global", "geral", "noticias gerais", "tudo", "hoje"],
 }
 
 

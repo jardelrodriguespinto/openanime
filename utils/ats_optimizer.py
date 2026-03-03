@@ -44,10 +44,12 @@ Cada bullet = Contexto + Acao + Resultado
 - Inclua nivel entre parenteses apenas para principais: Python (avancado), React (intermediario)
 - Maximo 18 habilidades
 
-=== NUNCA FACA ===
-- Nunca invente experiencias, empresas, projetos ou tecnologias que o candidato nao tem
-- Nunca coloque periodos de emprego imprecisos sem dados reais
-- Nunca repita a mesma keyword em bullets consecutivos
+=== NUNCA FACA (REGRAS ABSOLUTAS) ===
+- NUNCA invente experiencias, empresas, projetos, tecnologias ou conquistas que o candidato nao mencionou
+- NUNCA escreva bullets para experiencias sem descricao — deixe a lista de bullets vazia nesses casos
+- NUNCA infira ou suponha responsabilidades com base no cargo ou nivel — use apenas o que esta no campo descricao
+- NUNCA coloque porcentagens, numeros, metricas ou resultados que nao vieram do perfil
+- NUNCA coloque periodos de emprego sem dados reais
 
 Retorne APENAS JSON valido sem markdown:
 {
@@ -117,8 +119,10 @@ Requisitos: {', '.join(vaga_requisitos[:20]) if vaga_requisitos else 'nao inform
 Descricao: {vaga_descricao[:3000] if vaga_descricao else 'nao informada'}
 
 INSTRUCAO: Crie um curriculo ATS otimizado para esta vaga especifica.
-Se a descricao da vaga for escassa, use o titulo e requisitos para inferir keywords relevantes da industria.
-Escreva bullets impactantes mesmo que o perfil nao tenha descricao detalhada — use o cargo e periodo para inferir responsabilidades tipicas do nivel do candidato."""
+Se a descricao da vaga for escassa, use o titulo e requisitos para identificar keywords relevantes.
+CRITICO: Use APENAS os dados que existem no perfil. Para bullets de cada experiencia, reescreva o conteudo do campo "descricao" com formato CAR — nao invente informacoes que nao estejam la.
+Se uma experiencia nao tiver campo "descricao" preenchido, coloque apenas cargo + empresa + periodo com lista de bullets VAZIA.
+NUNCA crie bullets, projetos, numeros ou conquistas que o candidato nao mencionou."""
 
     messages = [
         {"role": "system", "content": SYSTEM_ATS},

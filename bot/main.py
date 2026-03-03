@@ -98,12 +98,25 @@ def main():
         logger.error("LangGraph: erro ao compilar grafo: %s", e)
         raise
 
+    async def _post_shutdown(_app):
+        """Aguarda tasks de background (extrator) terminarem antes de fechar."""
+        from agents.orchestrator import _background_tasks
+        pending = list(_background_tasks)
+        if pending:
+            logger.info("Aguardando %d tasks de background finalizarem...", len(pending))
+            import asyncio
+            try:
+                await asyncio.wait(pending, timeout=10)
+            except Exception:
+                pass
+
     app = (
         ApplicationBuilder()
         .token(token)
         .read_timeout(30)
         .write_timeout(30)
         .connect_timeout(30)
+        .post_shutdown(_post_shutdown)
         .build()
     )
 

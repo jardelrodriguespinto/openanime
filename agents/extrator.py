@@ -286,7 +286,7 @@ async def extrair_e_salvar(user_id: str, user_message: str) -> None:
                     _salvar_autor_favorito(neo4j, user_id, autor_raw)
 
     except Exception as e:
-        logger.debug("Extrator: erro (nao critico): %s", e)
+        logger.warning("Extrator: erro ao salvar perfil user=%s: %s", user_id, e)
 
 
 def _salvar_artista_favorito(neo4j, user_id: str, artista: str) -> None:
