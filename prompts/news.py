@@ -10,6 +10,8 @@ Regras:
 - Destaca se algo e urgente, surpreendente ou muito relevante
 - Nao invente informacoes — use apenas o que veio das fontes
 - Inclua o link sempre que disponivel
+- PRIORIZE noticias que batem com o topico pedido pelo usuario (query do usuario)
+- Se as noticias coletadas nao cobrem bem o topico, diga isso e apresente o que tem
 """
 
 
