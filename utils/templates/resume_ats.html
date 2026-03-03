@@ -2,153 +2,219 @@
 <html lang="pt-BR">
 <head>
 <meta charset="UTF-8">
-<!--
-  Template ATS-friendly:
-  - Uma coluna (sem colunas paralelas)
-  - Fontes padrao (Arial/Helvetica)
-  - Texto selecionavel
-  - Sem tabelas para layout
-  - Secoes com linha separadora
--->
 <style>
+  /* ── Reset ─────────────────────────────────────── */
   * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  /* ── Corpo ─────────────────────────────────────── */
   body {
     font-family: Arial, Helvetica, sans-serif;
     font-size: 10.5pt;
-    line-height: 1.55;
-    color: #111;
-    padding: 1.8cm 2.2cm;
+    line-height: 1.5;
+    color: #000;
+    background: #fff;
+    padding: 1.6cm 2cm;
   }
 
-  /* Cabecalho */
-  .header { margin-bottom: 18px; }
-  .nome { font-size: 22pt; font-weight: bold; letter-spacing: -0.3px; color: #000; }
-  .cargo-atual { font-size: 11pt; color: #444; margin-top: 1px; margin-bottom: 8px; }
+  /* ── Cabecalho ──────────────────────────────────── */
+  .cabecalho { margin-bottom: 10px; }
+
+  .nome {
+    font-size: 20pt;
+    font-weight: bold;
+    letter-spacing: -0.3px;
+    line-height: 1.2;
+  }
+
+  .cargo-titulo {
+    font-size: 11pt;
+    color: #333;
+    margin-top: 2px;
+    margin-bottom: 6px;
+  }
+
+  /* linha de contato em uma unica linha, separada por | */
   .contato {
     font-size: 9.5pt;
     color: #333;
-    border-top: 2px solid #000;
+    border-top: 1.5px solid #000;
     border-bottom: 1px solid #ccc;
-    padding: 5px 0;
+    padding: 4px 0;
     margin-top: 6px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0 12px;
   }
-  .contato span { margin-right: 16px; }
 
-  /* Secoes */
-  h2 {
-    font-size: 10pt;
+  /* ── Secoes ─────────────────────────────────────── */
+  .secao { margin-top: 14px; }
+
+  .secao-titulo {
+    font-size: 9pt;
     font-weight: bold;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;        /* weasyprint suporta em contexto de secao */
     border-bottom: 1.5px solid #000;
-    padding-bottom: 3px;
-    margin: 20px 0 9px;
-    letter-spacing: 0.8px;
+    padding-bottom: 2px;
+    margin-bottom: 7px;
   }
 
-  /* Objetivo */
-  .objetivo { margin-bottom: 4px; text-align: justify; }
+  /* ── Objetivo ───────────────────────────────────── */
+  .objetivo-texto {
+    text-align: justify;
+  }
 
-  /* Experiencias */
-  .exp-bloco { margin-bottom: 14px; }
-  .exp-header {
+  /* ── Habilidades ────────────────────────────────── */
+  /* Grade de 3 colunas, como padrao Indeed */
+  .skills-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 2px 8px;
+    list-style: disc inside;
+    padding-left: 4px;
+  }
+  .skills-grid li {
+    font-size: 10pt;
+  }
+
+  /* ── Experiencia ────────────────────────────────── */
+  .exp-bloco { margin-bottom: 12px; }
+
+  .exp-linha1 {
     display: flex;
     justify-content: space-between;
     align-items: baseline;
-    margin-bottom: 1px;
   }
   .exp-empresa { font-weight: bold; font-size: 10.5pt; }
-  .exp-periodo { font-size: 9.5pt; color: #555; white-space: nowrap; margin-left: 8px; }
-  .exp-cargo { font-style: italic; font-size: 9.5pt; color: #222; margin-bottom: 5px; }
-  .exp-bullets { margin-left: 14px; }
-  .exp-bullets li { margin-bottom: 3px; text-align: justify; }
+  .exp-periodo { font-size: 9.5pt; color: #444; white-space: nowrap; }
 
-  /* Habilidades */
-  .skills-lista { margin-bottom: 4px; }
+  .exp-linha2 {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 4px;
+  }
+  .exp-cargo { font-style: italic; font-size: 10pt; }
+  .exp-local { font-size: 9.5pt; color: #555; }
 
-  /* Formacao */
+  .exp-bullets {
+    margin-left: 16px;
+    margin-top: 2px;
+  }
+  .exp-bullets li {
+    margin-bottom: 2px;
+    text-align: justify;
+  }
+
+  /* ── Formacao ───────────────────────────────────── */
   .form-bloco { margin-bottom: 8px; }
-  .form-header {
+
+  .form-linha1 {
     display: flex;
     justify-content: space-between;
     align-items: baseline;
   }
   .form-curso { font-weight: bold; }
-  .form-ano { font-size: 9.5pt; color: #555; }
+  .form-ano { font-size: 9.5pt; color: #444; }
   .form-inst { font-size: 9.5pt; color: #333; }
 
-  /* Idiomas */
-  .idioma-item { margin-bottom: 2px; }
-
-  /* Links */
-  .link-item { margin-bottom: 2px; }
+  /* ── Idiomas ────────────────────────────────────── */
+  .idiomas-lista {
+    list-style: disc inside;
+    padding-left: 4px;
+  }
+  .idiomas-lista li { margin-bottom: 2px; }
 </style>
 </head>
 <body>
 
-<div class="header">
-  <div class="nome">{{ nome or 'Nome Completo' }}</div>
-  {% if cargo_atual %}<div class="cargo-atual">{{ cargo_atual }}</div>{% endif %}
+<!-- CABECALHO -->
+<div class="cabecalho">
+  <div class="nome">{{ nome or "Nome Completo" }}</div>
+  {% if cargo_atual %}
+  <div class="cargo-titulo">{{ cargo_atual }}</div>
+  {% endif %}
   <div class="contato">
     {% if email %}<span>{{ email }}</span>{% endif %}
     {% if telefone %}<span>{{ telefone }}</span>{% endif %}
     {% if linkedin %}<span>{{ linkedin }}</span>{% endif %}
     {% if github %}<span>{{ github }}</span>{% endif %}
+    {% if portfolio %}<span>{{ portfolio }}</span>{% endif %}
     {% if localizacao %}<span>{{ localizacao }}</span>{% endif %}
   </div>
 </div>
 
+<!-- RESUMO PROFISSIONAL -->
 {% if objetivo %}
-<h2>OBJETIVO PROFISSIONAL</h2>
-<div class="objetivo">{{ objetivo }}</div>
+<div class="secao">
+  <div class="secao-titulo">Resumo Profissional</div>
+  <p class="objetivo-texto">{{ objetivo }}</p>
+</div>
 {% endif %}
 
+<!-- HABILIDADES -->
 {% if habilidades %}
-<h2>HABILIDADES TECNICAS</h2>
-<div class="skills-lista">{{ habilidades | join(' &nbsp;·&nbsp; ') }}</div>
-{% endif %}
-
-{% if experiencias %}
-<h2>EXPERIENCIA PROFISSIONAL</h2>
-{% for exp in experiencias %}
-<div class="exp-bloco">
-  <div class="exp-header">
-    <span class="exp-empresa">{{ exp.empresa }}</span>
-    <span class="exp-periodo">{{ exp.periodo }}</span>
-  </div>
-  <div class="exp-cargo">{{ exp.cargo }}</div>
-  {% if exp.bullets %}
-  <ul class="exp-bullets">
-  {% for bullet in exp.bullets %}
-  <li>{{ bullet }}</li>
-  {% endfor %}
+<div class="secao">
+  <div class="secao-titulo">Habilidades</div>
+  <ul class="skills-grid">
+    {% for skill in habilidades %}
+    <li>{{ skill }}</li>
+    {% endfor %}
   </ul>
-  {% endif %}
 </div>
-{% endfor %}
 {% endif %}
 
-{% if formacao %}
-<h2>FORMACAO ACADEMICA</h2>
-{% for f in formacao %}
-<div class="form-bloco">
-  <div class="form-header">
-    <span class="form-curso">{{ f.curso }}</span>
-    <span class="form-ano">{{ f.ano }}</span>
+<!-- EXPERIENCIA PROFISSIONAL -->
+{% if experiencias %}
+<div class="secao">
+  <div class="secao-titulo">Experiência Profissional</div>
+  {% for exp in experiencias %}
+  <div class="exp-bloco">
+    <div class="exp-linha1">
+      <span class="exp-empresa">{{ exp.empresa }}</span>
+      <span class="exp-periodo">{{ exp.periodo }}</span>
+    </div>
+    <div class="exp-linha2">
+      <span class="exp-cargo">{{ exp.cargo }}</span>
+    </div>
+    {% if exp.bullets %}
+    <ul class="exp-bullets">
+      {% for bullet in exp.bullets %}
+      <li>{{ bullet }}</li>
+      {% endfor %}
+    </ul>
+    {% endif %}
   </div>
-  <div class="form-inst">{{ f.instituicao }}{% if f.nivel %} &mdash; {{ f.nivel }}{% endif %}</div>
+  {% endfor %}
 </div>
-{% endfor %}
 {% endif %}
 
+<!-- FORMACAO -->
+{% if formacao %}
+<div class="secao">
+  <div class="secao-titulo">Formação Acadêmica</div>
+  {% for f in formacao %}
+  <div class="form-bloco">
+    <div class="form-linha1">
+      <span class="form-curso">{{ f.curso }}</span>
+      <span class="form-ano">{{ f.ano }}</span>
+    </div>
+    <div class="form-inst">{{ f.instituicao }}{% if f.nivel %} &mdash; {{ f.nivel }}{% endif %}</div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<!-- IDIOMAS -->
 {% if idiomas %}
-<h2>IDIOMAS</h2>
-{% for idioma in idiomas %}
-<div class="idioma-item"><strong>{{ idioma.idioma }}</strong>: {{ idioma.nivel }}</div>
-{% endfor %}
-{% endif %}
-
-{% if portfolio %}
-<h2>PORTFOLIO</h2>
-<div class="link-item">{{ portfolio }}</div>
+<div class="secao">
+  <div class="secao-titulo">Idiomas</div>
+  <ul class="idiomas-lista">
+    {% for idioma in idiomas %}
+    <li><strong>{{ idioma.idioma }}</strong>: {{ idioma.nivel }}</li>
+    {% endfor %}
+  </ul>
+</div>
 {% endif %}
 
 </body>

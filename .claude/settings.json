@@ -4,7 +4,14 @@
       "Bash(docker compose exec bot python -c \":*)",
       "Bash(docker compose exec bot pip show pydyf weasyprint)",
       "Bash(docker compose exec bot pip install \"pydyf==0.10.0\")",
-      "Bash(docker system prune -f)"
+      "Bash(docker system prune -f)",
+      "Bash(docker system df)",
+      "Bash(docker builder prune -f)",
+      "Bash(docker image prune -f)",
+      "Bash(ls /d/anime-bot/*.md)",
+      "Bash(xargs grep -l -i \"curriculo\\\\|pdf\\\\|weasyprint\\\\|resume\\\\|curriculum\")",
+      "Bash(xargs grep -l \"curriculo\\\\|ATS\\\\|job\\\\|aplicacao\")",
+      "Bash(docker compose build bot --no-cache)"
     ]
   }
 }

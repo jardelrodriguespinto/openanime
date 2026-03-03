@@ -47,6 +47,9 @@ def otimizar_para_vaga(
     keywords = _extrair_keywords_vaga(vaga_titulo, vaga_descricao, vaga_requisitos)
     keywords_aderentes = _filtrar_keywords_aderentes_ao_perfil(perfil, keywords)
     habilidades = _priorizar_habilidades(perfil, keywords)
+    # Sanitiza vaga_titulo — rejeita mensagens cruas do usuario (ex: "mim mano")
+    vaga_titulo_limpo = _sanitizar_titulo_vaga(vaga_titulo, perfil)
+
     experiencias = _formatar_experiencias(perfil.get("experiencias", []), keywords)
 
     resultado = {
@@ -60,15 +63,15 @@ def otimizar_para_vaga(
         "cargo_atual": perfil.get("cargo_atual", ""),
         "objetivo": _gerar_objetivo(
             perfil=perfil,
-            vaga_titulo=vaga_titulo,
+            vaga_titulo=vaga_titulo_limpo,
             vaga_empresa=vaga_empresa,
             keywords=keywords_aderentes,
             contexto_vaga_especifica=contexto_vaga_especifica,
         ),
         "habilidades": habilidades or _habilidades_fallback(perfil),
         "experiencias": experiencias,
-        "formacao": _formatar_formacao(perfil.get("formacao", [])),
-        "idiomas": perfil.get("idiomas", []),
+        "formacao": _formatar_formacao(_dedup_formacao(perfil.get("formacao", []))),
+        "idiomas": _dedup_idiomas(perfil.get("idiomas", [])),
     }
 
     logger.info(
@@ -262,7 +265,8 @@ def _priorizar_habilidades(perfil: dict, keywords: list[str]) -> list[str]:
 
 def _formatar_experiencias(experiencias: list[dict], keywords: list[str]) -> list[dict]:
     resultado = []
-    for exp in experiencias[:5]:
+    vistos: set[str] = set()
+    for exp in experiencias[:8]:  # itera mais para ter margem de dedup
         empresa = str(exp.get("empresa", "") or "").strip()
         cargo = str(exp.get("cargo", "") or "").strip()
         inicio = str(exp.get("inicio", "") or "").strip()
@@ -272,6 +276,12 @@ def _formatar_experiencias(experiencias: list[dict], keywords: list[str]) -> lis
         if not empresa and not cargo and not descricao:
             continue
 
+        # Dedup por empresa + cargo + inicio
+        chave = f"{empresa.lower()}|{cargo.lower()}|{inicio}"
+        if chave in vistos:
+            continue
+        vistos.add(chave)
+
         bullets = _bullets_from_descricao(descricao, keywords) if descricao else []
         resultado.append({
             "empresa": empresa,
@@ -279,6 +289,8 @@ def _formatar_experiencias(experiencias: list[dict], keywords: list[str]) -> lis
             "periodo": _formatar_periodo(inicio, fim),
             "bullets": bullets,
         })
+        if len(resultado) >= 5:
+            break
     return resultado
 
 
@@ -317,6 +329,64 @@ def _habilidades_fallback(perfil: dict) -> list[str]:
         if nome:
             skills.append(nome)
     return skills
+
+
+def _sanitizar_titulo_vaga(vaga_titulo: str, perfil: dict) -> str:
+    """
+    Rejeita titulos que sao mensagens cruas do usuario (ex: 'mim mano', 'pdf', 'curriculo').
+    Retorna cargo_atual do perfil ou string vazia se o titulo parecer invalido.
+    """
+    titulo = (vaga_titulo or "").strip()
+    if not titulo:
+        return ""
+    # Considerado invalido se: muito curto, contem palavras coloquiais, ou nao tem termo tecnico
+    palavras_invalidas = {
+        "mano", "cara", "mim", "me", "eu", "meu", "minha", "vc", "voce",
+        "pdf", "curriculo", "cv", "sim", "nao", "ok", "please", "pls",
+    }
+    palavras = set(titulo.lower().split())
+    if palavras & palavras_invalidas:
+        return str(perfil.get("cargo_atual", "") or "")
+    # Titulo muito curto e sem termos tecnicos tambem e suspeito
+    if len(titulo) < 6:
+        return str(perfil.get("cargo_atual", "") or "")
+    return titulo
+
+
+def _dedup_idiomas(idiomas: list) -> list:
+    """Remove idiomas duplicados — mantém o de nivel mais alto."""
+    vistos: dict[str, dict] = {}
+    _nivel_ord = {"nativo": 5, "fluente": 4, "avancado": 4, "avançado": 4,
+                  "intermediario": 3, "intermediário": 3, "basico": 2, "básico": 2}
+    for item in idiomas:
+        idioma = str(item.get("idioma", "") or "").strip().lower()
+        nivel = str(item.get("nivel", "") or "").strip()
+        if not idioma:
+            continue
+        if idioma not in vistos:
+            vistos[idioma] = {"idioma": item.get("idioma", "").strip(), "nivel": nivel}
+        else:
+            # Mantém nivel mais alto
+            atual = vistos[idioma]["nivel"].lower()
+            novo = nivel.lower()
+            if _nivel_ord.get(novo, 0) > _nivel_ord.get(atual, 0):
+                vistos[idioma]["nivel"] = nivel
+    return list(vistos.values())
+
+
+def _dedup_formacao(formacao: list) -> list:
+    """Remove formacoes duplicadas — mesmo curso + instituicao."""
+    vistos: set[str] = set()
+    resultado = []
+    for f in formacao:
+        curso = str(f.get("curso", "") or "").strip().lower()
+        inst = str(f.get("instituicao", "") or "").strip().lower()
+        chave = f"{curso}|{inst}"
+        if chave in vistos or (not curso and not inst):
+            continue
+        vistos.add(chave)
+        resultado.append(f)
+    return resultado
 
 
 def _formatar_formacao(formacao_list: list[dict]) -> list[dict]:
