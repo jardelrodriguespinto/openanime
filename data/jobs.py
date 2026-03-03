@@ -9,11 +9,12 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlencode
 
 import feedparser
 import httpx
 from bs4 import BeautifulSoup
+from scrapling import Fetcher
 
 logger = logging.getLogger(__name__)
 
@@ -142,48 +143,43 @@ def _buscar_indeed(query: str, localizacao: str = "", limite: int = JOBS_LIMITE_
     ]
     for url in urls_tentar:
         try:
-            with httpx.Client(timeout=15, headers=_HEADERS, follow_redirects=True) as client:
-                resp = client.get(url)
-                if resp.status_code != 200:
-                    logger.debug("indeed: status %d para %s", resp.status_code, url)
+            page = Fetcher.get(url, stealthy_headers=True, impersonate='chrome124', timeout=15)
+            soup = BeautifulSoup(page.html, "html.parser")
+            cards = soup.find_all("div", class_=re.compile(r"job_seen_beacon|resultContent|tapItem"))
+            if not cards:
+                cards = soup.find_all("div", attrs={"data-testid": re.compile(r"slider_item|job")})
+
+            for card in cards[:limite]:
+                titulo_el = card.find(["h2", "h3"], class_=re.compile(r"jobTitle|title"))
+                empresa_el = card.find(class_=re.compile(r"companyName|company"))
+                local_el = card.find(class_=re.compile(r"companyLocation|location"))
+                link_el = card.find("a", href=True)
+
+                titulo = titulo_el.get_text(strip=True) if titulo_el else ""
+                empresa = empresa_el.get_text(strip=True) if empresa_el else ""
+                local = local_el.get_text(strip=True) if local_el else localizacao
+                link = ""
+                if link_el:
+                    href = link_el.get("href", "")
+                    if href.startswith("/"):
+                        link = f"https://br.indeed.com{href.split('?')[0]}"
+                    elif href.startswith("http"):
+                        link = href.split("?")[0]
+
+                if not titulo:
                     continue
 
-                soup = BeautifulSoup(resp.text, "html.parser")
-                cards = soup.find_all("div", class_=re.compile(r"job_seen_beacon|resultContent|tapItem"))
-                if not cards:
-                    cards = soup.find_all("div", attrs={"data-testid": re.compile(r"slider_item|job")})
-
-                for card in cards[:limite]:
-                    titulo_el = card.find(["h2", "h3"], class_=re.compile(r"jobTitle|title"))
-                    empresa_el = card.find(class_=re.compile(r"companyName|company"))
-                    local_el = card.find(class_=re.compile(r"companyLocation|location"))
-                    link_el = card.find("a", href=True)
-
-                    titulo = titulo_el.get_text(strip=True) if titulo_el else ""
-                    empresa = empresa_el.get_text(strip=True) if empresa_el else ""
-                    local = local_el.get_text(strip=True) if local_el else localizacao
-                    link = ""
-                    if link_el:
-                        href = link_el.get("href", "")
-                        if href.startswith("/"):
-                            link = f"https://br.indeed.com{href.split('?')[0]}"
-                        elif href.startswith("http"):
-                            link = href.split("?")[0]
-
-                    if not titulo:
-                        continue
-
-                    vagas.append(Vaga(
-                        id=f"indeed_{hash(link or titulo) % 1000000}",
-                        titulo=titulo,
-                        empresa=empresa,
-                        localizacao=local,
-                        modalidade=_normalizar_modalidade(local),
-                        salario="A combinar",
-                        descricao="",
-                        url=link,
-                        fonte="Indeed",
-                    ))
+                vagas.append(Vaga(
+                    id=f"indeed_{hash(link or titulo) % 1000000}",
+                    titulo=titulo,
+                    empresa=empresa,
+                    localizacao=local,
+                    modalidade=_normalizar_modalidade(local),
+                    salario="A combinar",
+                    descricao="",
+                    url=link,
+                    fonte="Indeed",
+                ))
 
             if vagas:
                 logger.info("indeed: %d vagas para '%s'", len(vagas), query)
@@ -236,50 +232,44 @@ def _buscar_glassdoor(query: str, localizacao: str = "", limite: int = JOBS_LIMI
     loc_str = f" {localizacao}" if localizacao else ""
     dork = f"site:glassdoor.com.br OR site:glassdoor.com {query}{loc_str} vaga emprego"
     try:
-        with httpx.Client(timeout=18, headers=_HEADERS, follow_redirects=True) as client:
-            resp = client.get(
-                "https://lite.duckduckgo.com/lite/",
-                params={"q": dork, "kl": "br-pt"},
-            )
-            if resp.status_code != 200:
-                return []
+        ddg_url = f"https://lite.duckduckgo.com/lite/?{urlencode({'q': dork, 'kl': 'br-pt'})}"
+        page = Fetcher.get(ddg_url, stealthy_headers=True, impersonate='chrome124', timeout=18)
+        soup = BeautifulSoup(page.html, "html.parser")
+        links = soup.select("a.result-link")
 
-            soup = BeautifulSoup(resp.text, "html.parser")
-            links = soup.select("a.result-link")
+        for link_el in links[:limite * 2]:
+            href = link_el.get("href", "")
+            # Resolve redirecionamento DDG
+            if "/l/?uddg=" in href:
+                from urllib.parse import unquote, parse_qs, urlparse
+                qs = parse_qs(urlparse(href).query)
+                href = unquote(qs.get("uddg", [""])[0])
 
-            for link_el in links[:limite * 2]:
-                href = link_el.get("href", "")
-                # Resolve redirecionamento DDG
-                if "/l/?uddg=" in href:
-                    from urllib.parse import unquote, parse_qs, urlparse
-                    qs = parse_qs(urlparse(href).query)
-                    href = unquote(qs.get("uddg", [""])[0])
+            if "glassdoor.com" not in href:
+                continue
 
-                if "glassdoor.com" not in href:
-                    continue
+            titulo = link_el.get_text(strip=True)
+            if not titulo or len(titulo) < 5:
+                continue
 
-                titulo = link_el.get_text(strip=True)
-                if not titulo or len(titulo) < 5:
-                    continue
+            # Snippet como descricao
+            snippet_el = link_el.find_next("td", class_="result-snippet")
+            descricao = snippet_el.get_text(strip=True) if snippet_el else ""
 
-                # Snippet como descricao
-                snippet_el = link_el.find_next("td", class_="result-snippet")
-                descricao = snippet_el.get_text(strip=True) if snippet_el else ""
-
-                vagas.append(Vaga(
-                    id=f"glassdoor_{hash(href) % 1000000}",
-                    titulo=titulo,
-                    empresa="",
-                    url=href,
-                    fonte="glassdoor",
-                    salario="",
-                    localizacao=localizacao or "Brasil",
-                    modalidade="",
-                    descricao=descricao,
-                    requisitos=[],
-                ))
-                if len(vagas) >= limite:
-                    break
+            vagas.append(Vaga(
+                id=f"glassdoor_{hash(href) % 1000000}",
+                titulo=titulo,
+                empresa="",
+                url=href,
+                fonte="glassdoor",
+                salario="",
+                localizacao=localizacao or "Brasil",
+                modalidade="",
+                descricao=descricao,
+                requisitos=[],
+            ))
+            if len(vagas) >= limite:
+                break
 
         if vagas:
             logger.info("glassdoor: %d vagas para '%s'", len(vagas), query)
@@ -431,46 +421,43 @@ def _buscar_vagas_com_br(query: str, localizacao: str = "", limite: int = JOBS_L
 
         for url in urls:
             try:
-                with httpx.Client(timeout=15, headers=_HEADERS, follow_redirects=True) as client:
-                    resp = client.get(url)
-                    if resp.status_code != 200:
+                page = Fetcher.get(url, stealthy_headers=True, impersonate='chrome124', timeout=15)
+                soup = BeautifulSoup(page.html, "html.parser")
+                # vagas.com.br usa <article class="job-shortcut--list" data-job-id="...">
+                cards = soup.find_all("article", class_=re.compile(r"job-shortcut|job-item|vaga"))
+                if not cards:
+                    cards = soup.find_all(attrs={"data-job-id": True})
+                if not cards:
+                    # Fallback: qualquer li/div com link de vaga
+                    cards = soup.find_all("li", class_=re.compile(r"job|vaga|opportunity"))
+
+                for card in cards[:limite]:
+                    titulo_el = (card.find("a", class_=re.compile(r"job-shortcut__title|title"))
+                                 or card.find(["h2", "h3", "a"]))
+                    empresa_el = card.find(class_=re.compile(r"company|empresa|recruiter"))
+                    local_el = card.find(class_=re.compile(r"location|local|city|cidade"))
+                    link_el = card.find("a", href=True)
+
+                    titulo = titulo_el.get_text(strip=True) if titulo_el else ""
+                    empresa = empresa_el.get_text(strip=True) if empresa_el else ""
+                    local = local_el.get_text(strip=True) if local_el else localizacao or "Brasil"
+                    href = link_el.get("href", "") if link_el else ""
+                    link = f"https://www.vagas.com.br{href}" if href.startswith("/") else href
+
+                    if not titulo:
                         continue
-                    soup = BeautifulSoup(resp.text, "html.parser")
-                    # vagas.com.br usa <article class="job-shortcut--list" data-job-id="...">
-                    cards = soup.find_all("article", class_=re.compile(r"job-shortcut|job-item|vaga"))
-                    if not cards:
-                        cards = soup.find_all(attrs={"data-job-id": True})
-                    if not cards:
-                        # Fallback: qualquer li/div com link de vaga
-                        cards = soup.find_all("li", class_=re.compile(r"job|vaga|opportunity"))
+                    vagas.append(Vaga(
+                        id=f"vagas_br_{hash(link or titulo) % 1000000}",
+                        titulo=titulo, empresa=empresa,
+                        localizacao=local,
+                        modalidade=_normalizar_modalidade(local),
+                        salario="A combinar", descricao="",
+                        url=link, fonte="Vagas.com.br",
+                    ))
 
-                    for card in cards[:limite]:
-                        titulo_el = (card.find("a", class_=re.compile(r"job-shortcut__title|title"))
-                                     or card.find(["h2", "h3", "a"]))
-                        empresa_el = card.find(class_=re.compile(r"company|empresa|recruiter"))
-                        local_el = card.find(class_=re.compile(r"location|local|city|cidade"))
-                        link_el = card.find("a", href=True)
-
-                        titulo = titulo_el.get_text(strip=True) if titulo_el else ""
-                        empresa = empresa_el.get_text(strip=True) if empresa_el else ""
-                        local = local_el.get_text(strip=True) if local_el else localizacao or "Brasil"
-                        href = link_el.get("href", "") if link_el else ""
-                        link = f"https://www.vagas.com.br{href}" if href.startswith("/") else href
-
-                        if not titulo:
-                            continue
-                        vagas.append(Vaga(
-                            id=f"vagas_br_{hash(link or titulo) % 1000000}",
-                            titulo=titulo, empresa=empresa,
-                            localizacao=local,
-                            modalidade=_normalizar_modalidade(local),
-                            salario="A combinar", descricao="",
-                            url=link, fonte="Vagas.com.br",
-                        ))
-
-                    if vagas:
-                        logger.info("vagas.com.br: %d vagas para '%s'", len(vagas), query)
-                        return vagas
+                if vagas:
+                    logger.info("vagas.com.br: %d vagas para '%s'", len(vagas), query)
+                    return vagas
             except Exception as e:
                 logger.debug("vagas.com.br: erro com %s: %s", url[:60], e)
     except Exception as e:
@@ -544,39 +531,35 @@ def _buscar_trampos(query: str, limite: int = JOBS_LIMITE_POR_FONTE) -> list[Vag
     vagas: list[Vaga] = []
     try:
         url = f"https://trampos.co/oportunidades?t={quote_plus(query)}"
-        with httpx.Client(timeout=15, headers=_HEADERS, follow_redirects=True) as client:
-            resp = client.get(url)
-            if resp.status_code != 200:
-                return []
+        page = Fetcher.get(url, stealthy_headers=True, impersonate='chrome124', timeout=15)
+        soup = BeautifulSoup(page.html, "html.parser")
+        cards = soup.find_all(class_=re.compile(r"opportunity|job|listing"))
 
-            soup = BeautifulSoup(resp.text, "html.parser")
-            cards = soup.find_all(class_=re.compile(r"opportunity|job|listing"))
+        for card in cards[:limite]:
+            titulo_el = card.find(["h2", "h3", "h4", "a"])
+            empresa_el = card.find(class_=re.compile(r"company|empresa"))
+            local_el = card.find(class_=re.compile(r"location|local|cidade"))
+            link_el = card.find("a", href=True)
 
-            for card in cards[:limite]:
-                titulo_el = card.find(["h2", "h3", "h4", "a"])
-                empresa_el = card.find(class_=re.compile(r"company|empresa"))
-                local_el = card.find(class_=re.compile(r"location|local|cidade"))
-                link_el = card.find("a", href=True)
+            titulo = titulo_el.get_text(strip=True) if titulo_el else ""
+            empresa = empresa_el.get_text(strip=True) if empresa_el else ""
+            local = local_el.get_text(strip=True) if local_el else "Brasil"
+            link = ""
+            if link_el:
+                href = link_el.get("href", "")
+                link = f"https://trampos.co{href}" if href.startswith("/") else href
 
-                titulo = titulo_el.get_text(strip=True) if titulo_el else ""
-                empresa = empresa_el.get_text(strip=True) if empresa_el else ""
-                local = local_el.get_text(strip=True) if local_el else "Brasil"
-                link = ""
-                if link_el:
-                    href = link_el.get("href", "")
-                    link = f"https://trampos.co{href}" if href.startswith("/") else href
+            if not titulo:
+                continue
 
-                if not titulo:
-                    continue
-
-                vagas.append(Vaga(
-                    id=f"trampos_{hash(link or titulo) % 1000000}",
-                    titulo=titulo, empresa=empresa,
-                    localizacao=local,
-                    modalidade=_normalizar_modalidade(local),
-                    salario="A combinar", descricao="",
-                    url=link, fonte="Trampos.co",
-                ))
+            vagas.append(Vaga(
+                id=f"trampos_{hash(link or titulo) % 1000000}",
+                titulo=titulo, empresa=empresa,
+                localizacao=local,
+                modalidade=_normalizar_modalidade(local),
+                salario="A combinar", descricao="",
+                url=link, fonte="Trampos.co",
+            ))
 
         if vagas:
             logger.info("trampos: %d vagas para '%s'", len(vagas), query)
@@ -597,34 +580,30 @@ def _buscar_linkedin(query: str, localizacao: str = "", limite: int = JOBS_LIMIT
             f"https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
             f"?keywords={q}&location={loc}&start=0"
         )
-        with httpx.Client(timeout=20, headers=_HEADERS, follow_redirects=True) as client:
-            resp = client.get(url)
-            if resp.status_code != 200:
-                return []
+        page = Fetcher.get(url, stealthy_headers=True, impersonate='chrome124', timeout=20)
+        soup = BeautifulSoup(page.html, "html.parser")
+        for card in soup.find_all("li")[:limite]:
+            titulo_el = card.find("h3")
+            empresa_el = card.find("h4")
+            local_el = card.find("span", class_=re.compile("location"))
+            link_el = card.find("a", href=True)
 
-            soup = BeautifulSoup(resp.text, "html.parser")
-            for card in soup.find_all("li")[:limite]:
-                titulo_el = card.find("h3")
-                empresa_el = card.find("h4")
-                local_el = card.find("span", class_=re.compile("location"))
-                link_el = card.find("a", href=True)
+            titulo = titulo_el.get_text(strip=True) if titulo_el else ""
+            empresa = empresa_el.get_text(strip=True) if empresa_el else ""
+            local = local_el.get_text(strip=True) if local_el else localizacao
+            link = link_el["href"].split("?")[0] if link_el else ""
 
-                titulo = titulo_el.get_text(strip=True) if titulo_el else ""
-                empresa = empresa_el.get_text(strip=True) if empresa_el else ""
-                local = local_el.get_text(strip=True) if local_el else localizacao
-                link = link_el["href"].split("?")[0] if link_el else ""
+            if not titulo:
+                continue
 
-                if not titulo:
-                    continue
-
-                vagas.append(Vaga(
-                    id=f"linkedin_{hash(link or titulo) % 1000000}",
-                    titulo=titulo, empresa=empresa,
-                    localizacao=local,
-                    modalidade=_normalizar_modalidade(local),
-                    salario="A combinar", descricao="",
-                    url=link, fonte="LinkedIn",
-                ))
+            vagas.append(Vaga(
+                id=f"linkedin_{hash(link or titulo) % 1000000}",
+                titulo=titulo, empresa=empresa,
+                localizacao=local,
+                modalidade=_normalizar_modalidade(local),
+                salario="A combinar", descricao="",
+                url=link, fonte="LinkedIn",
+            ))
 
         if vagas:
             logger.info("linkedin: %d vagas para '%s'", len(vagas), query)
@@ -737,32 +716,29 @@ def _buscar_programathor(query: str, limite: int = JOBS_LIMITE_POR_FONTE) -> lis
     vagas: list[Vaga] = []
     try:
         url = f"https://programathor.com.br/jobs?search={quote_plus(query)}"
-        with httpx.Client(timeout=15, headers=_HEADERS, follow_redirects=True) as client:
-            resp = client.get(url)
-            if resp.status_code != 200:
-                return []
-            soup = BeautifulSoup(resp.text, "html.parser")
-            cards = soup.find_all(class_=re.compile(r"job-opportunity|job-card|cell-list-developer"))
-            for card in cards[:limite]:
-                titulo_el = card.find(["h2", "h3", "h4"])
-                empresa_el = card.find(class_=re.compile(r"company|empresa"))
-                local_el = card.find(class_=re.compile(r"location|city|cidade"))
-                link_el = card.find("a", href=True)
-                titulo = titulo_el.get_text(strip=True) if titulo_el else ""
-                empresa = empresa_el.get_text(strip=True) if empresa_el else ""
-                local = local_el.get_text(strip=True) if local_el else "Brasil"
-                href = link_el.get("href", "") if link_el else ""
-                link = f"https://programathor.com.br{href}" if href.startswith("/") else href
-                if not titulo:
-                    continue
-                vagas.append(Vaga(
-                    id=f"programathor_{hash(link or titulo) % 1000000}",
-                    titulo=titulo, empresa=empresa,
-                    localizacao=local,
-                    modalidade=_normalizar_modalidade(local),
-                    salario="A combinar", descricao="",
-                    url=link, fonte="Programathor",
-                ))
+        page = Fetcher.get(url, stealthy_headers=True, impersonate='chrome124', timeout=15)
+        soup = BeautifulSoup(page.html, "html.parser")
+        cards = soup.find_all(class_=re.compile(r"job-opportunity|job-card|cell-list-developer"))
+        for card in cards[:limite]:
+            titulo_el = card.find(["h2", "h3", "h4"])
+            empresa_el = card.find(class_=re.compile(r"company|empresa"))
+            local_el = card.find(class_=re.compile(r"location|city|cidade"))
+            link_el = card.find("a", href=True)
+            titulo = titulo_el.get_text(strip=True) if titulo_el else ""
+            empresa = empresa_el.get_text(strip=True) if empresa_el else ""
+            local = local_el.get_text(strip=True) if local_el else "Brasil"
+            href = link_el.get("href", "") if link_el else ""
+            link = f"https://programathor.com.br{href}" if href.startswith("/") else href
+            if not titulo:
+                continue
+            vagas.append(Vaga(
+                id=f"programathor_{hash(link or titulo) % 1000000}",
+                titulo=titulo, empresa=empresa,
+                localizacao=local,
+                modalidade=_normalizar_modalidade(local),
+                salario="A combinar", descricao="",
+                url=link, fonte="Programathor",
+            ))
         if vagas:
             logger.info("programathor: %d vagas para '%s'", len(vagas), query)
     except Exception as e:
@@ -777,29 +753,26 @@ def _buscar_revelo(query: str, limite: int = JOBS_LIMITE_POR_FONTE) -> list[Vaga
     vagas: list[Vaga] = []
     try:
         url = f"https://www.revelo.com.br/vagas?q={quote_plus(query)}&remote=true"
-        with httpx.Client(timeout=15, headers=_HEADERS, follow_redirects=True) as client:
-            resp = client.get(url)
-            if resp.status_code != 200:
-                return []
-            soup = BeautifulSoup(resp.text, "html.parser")
-            cards = soup.find_all(class_=re.compile(r"job-card|opportunity|position"))
-            for card in cards[:limite]:
-                titulo_el = card.find(["h2", "h3"])
-                empresa_el = card.find(class_=re.compile(r"company"))
-                link_el = card.find("a", href=True)
-                titulo = titulo_el.get_text(strip=True) if titulo_el else ""
-                empresa = empresa_el.get_text(strip=True) if empresa_el else ""
-                href = link_el.get("href", "") if link_el else ""
-                link = f"https://www.revelo.com.br{href}" if href.startswith("/") else href
-                if not titulo:
-                    continue
-                vagas.append(Vaga(
-                    id=f"revelo_{hash(link or titulo) % 1000000}",
-                    titulo=titulo, empresa=empresa,
-                    localizacao="Brasil", modalidade="remoto",
-                    salario="A combinar", descricao="",
-                    url=link, fonte="Revelo",
-                ))
+        page = Fetcher.get(url, stealthy_headers=True, impersonate='chrome124', timeout=15)
+        soup = BeautifulSoup(page.html, "html.parser")
+        cards = soup.find_all(class_=re.compile(r"job-card|opportunity|position"))
+        for card in cards[:limite]:
+            titulo_el = card.find(["h2", "h3"])
+            empresa_el = card.find(class_=re.compile(r"company"))
+            link_el = card.find("a", href=True)
+            titulo = titulo_el.get_text(strip=True) if titulo_el else ""
+            empresa = empresa_el.get_text(strip=True) if empresa_el else ""
+            href = link_el.get("href", "") if link_el else ""
+            link = f"https://www.revelo.com.br{href}" if href.startswith("/") else href
+            if not titulo:
+                continue
+            vagas.append(Vaga(
+                id=f"revelo_{hash(link or titulo) % 1000000}",
+                titulo=titulo, empresa=empresa,
+                localizacao="Brasil", modalidade="remoto",
+                salario="A combinar", descricao="",
+                url=link, fonte="Revelo",
+            ))
         if vagas:
             logger.info("revelo: %d vagas para '%s'", len(vagas), query)
     except Exception as e:
@@ -831,64 +804,58 @@ def _ddg_uma_dork(dork: str, sites_alvo: list[str], limite: int, localizacao: st
     """Executa uma unica query DDG Lite e retorna vagas dos sites alvo."""
     vagas: list[Vaga] = []
     try:
-        with httpx.Client(timeout=22, headers=_HEADERS, follow_redirects=True) as client:
-            resp = client.get(
-                "https://lite.duckduckgo.com/lite/",
-                params={"q": dork, "kl": "br-pt"},
-            )
-            if resp.status_code != 200:
-                return []
+        ddg_url = f"https://lite.duckduckgo.com/lite/?{urlencode({'q': dork, 'kl': 'br-pt'})}"
+        page = Fetcher.get(ddg_url, stealthy_headers=True, impersonate='chrome124', timeout=22)
+        soup = BeautifulSoup(page.html, "html.parser")
 
-            soup = BeautifulSoup(resp.text, "html.parser")
+        # DDG Lite: links em <a class="result-link"> + snippets em <td class="result-snippet">
+        links = soup.find_all("a", class_="result-link", href=True)
+        if not links:
+            # Fallback: qualquer <a> com href externo
+            links = [a for a in soup.find_all("a", href=True)
+                     if a.get("href", "").startswith("http")]
 
-            # DDG Lite: links em <a class="result-link"> + snippets em <td class="result-snippet">
-            links = soup.find_all("a", class_="result-link", href=True)
-            if not links:
-                # Fallback: qualquer <a> com href externo
-                links = [a for a in soup.find_all("a", href=True)
-                         if a.get("href", "").startswith("http")]
+        snippets_els = soup.find_all("td", class_="result-snippet")
+        snippets = [el.get_text(" ", strip=True) for el in snippets_els]
 
-            snippets_els = soup.find_all("td", class_="result-snippet")
-            snippets = [el.get_text(" ", strip=True) for el in snippets_els]
+        vistas: set[str] = set()
+        for i, link_el in enumerate(links[:limite * 4]):
+            href = link_el.get("href", "")
 
-            vistas: set[str] = set()
-            for i, link_el in enumerate(links[:limite * 4]):
-                href = link_el.get("href", "")
-
-                # DDG às vezes usa redirect /l/?uddg=URL_ENCODED
-                if "duckduckgo.com/l/" in href or href.startswith("/l/"):
-                    m = re.search(r"uddg=([^&]+)", href)
-                    if m:
-                        from urllib.parse import unquote
-                        href = unquote(m.group(1))
-                    else:
-                        continue
-
-                if not href or "duckduckgo" in href or href in vistas:
-                    continue
-                if not any(s in href for s in sites_alvo):
+            # DDG às vezes usa redirect /l/?uddg=URL_ENCODED
+            if "duckduckgo.com/l/" in href or href.startswith("/l/"):
+                m = re.search(r"uddg=([^&]+)", href)
+                if m:
+                    from urllib.parse import unquote
+                    href = unquote(m.group(1))
+                else:
                     continue
 
-                vistas.add(href)
-                titulo = link_el.get_text(strip=True)
-                if not titulo or len(titulo) < 4:
-                    titulo = href.split("/")[-1].replace("-", " ").replace("_", " ").strip() or href
+            if not href or "duckduckgo" in href or href in vistas:
+                continue
+            if not any(s in href for s in sites_alvo):
+                continue
 
-                snippet = snippets[i] if i < len(snippets) else ""
-                fonte = next((s.split(".")[0].capitalize() for s in sites_alvo if s in href), "Dork")
+            vistas.add(href)
+            titulo = link_el.get_text(strip=True)
+            if not titulo or len(titulo) < 4:
+                titulo = href.split("/")[-1].replace("-", " ").replace("_", " ").strip() or href
 
-                vagas.append(Vaga(
-                    id=f"dork_{hash(href) % 10000000}",
-                    titulo=titulo, empresa="",
-                    localizacao=localizacao or "Brasil",
-                    modalidade=_normalizar_modalidade(snippet or localizacao),
-                    salario="A combinar",
-                    descricao=snippet[:400],
-                    requisitos=_extrair_requisitos(snippet),
-                    url=href, fonte=fonte,
-                ))
-                if len(vagas) >= limite:
-                    break
+            snippet = snippets[i] if i < len(snippets) else ""
+            fonte = next((s.split(".")[0].capitalize() for s in sites_alvo if s in href), "Dork")
+
+            vagas.append(Vaga(
+                id=f"dork_{hash(href) % 10000000}",
+                titulo=titulo, empresa="",
+                localizacao=localizacao or "Brasil",
+                modalidade=_normalizar_modalidade(snippet or localizacao),
+                salario="A combinar",
+                descricao=snippet[:400],
+                requisitos=_extrair_requisitos(snippet),
+                url=href, fonte=fonte,
+            ))
+            if len(vagas) >= limite:
+                break
 
     except Exception as e:
         logger.debug("dork query erro [%s]: %s", dork[:60], e)
@@ -969,32 +936,29 @@ def _buscar_inhire(query: str, limite: int = JOBS_LIMITE_POR_FONTE) -> list[Vaga
     vagas: list[Vaga] = []
     try:
         url = f"https://inhire.com.br/vagas?q={quote_plus(query)}"
-        with httpx.Client(timeout=15, headers=_HEADERS, follow_redirects=True) as client:
-            resp = client.get(url)
-            if resp.status_code != 200:
-                return []
-            soup = BeautifulSoup(resp.text, "html.parser")
-            cards = soup.find_all(class_=re.compile(r"job|vaga|opportunity|card"))
-            for card in cards[:limite]:
-                titulo_el = card.find(["h2", "h3", "h4"])
-                empresa_el = card.find(class_=re.compile(r"company|empresa"))
-                local_el = card.find(class_=re.compile(r"location|local"))
-                link_el = card.find("a", href=True)
-                titulo = titulo_el.get_text(strip=True) if titulo_el else ""
-                empresa = empresa_el.get_text(strip=True) if empresa_el else ""
-                local = local_el.get_text(strip=True) if local_el else "Brasil"
-                href = link_el.get("href", "") if link_el else ""
-                link = f"https://inhire.com.br{href}" if href.startswith("/") else href
-                if not titulo:
-                    continue
-                vagas.append(Vaga(
-                    id=f"inhire_{hash(link or titulo) % 1000000}",
-                    titulo=titulo, empresa=empresa,
-                    localizacao=local,
-                    modalidade=_normalizar_modalidade(local),
-                    salario="A combinar", descricao="",
-                    url=link, fonte="Inhire",
-                ))
+        page = Fetcher.get(url, stealthy_headers=True, impersonate='chrome124', timeout=15)
+        soup = BeautifulSoup(page.html, "html.parser")
+        cards = soup.find_all(class_=re.compile(r"job|vaga|opportunity|card"))
+        for card in cards[:limite]:
+            titulo_el = card.find(["h2", "h3", "h4"])
+            empresa_el = card.find(class_=re.compile(r"company|empresa"))
+            local_el = card.find(class_=re.compile(r"location|local"))
+            link_el = card.find("a", href=True)
+            titulo = titulo_el.get_text(strip=True) if titulo_el else ""
+            empresa = empresa_el.get_text(strip=True) if empresa_el else ""
+            local = local_el.get_text(strip=True) if local_el else "Brasil"
+            href = link_el.get("href", "") if link_el else ""
+            link = f"https://inhire.com.br{href}" if href.startswith("/") else href
+            if not titulo:
+                continue
+            vagas.append(Vaga(
+                id=f"inhire_{hash(link or titulo) % 1000000}",
+                titulo=titulo, empresa=empresa,
+                localizacao=local,
+                modalidade=_normalizar_modalidade(local),
+                salario="A combinar", descricao="",
+                url=link, fonte="Inhire",
+            ))
         if vagas:
             logger.info("inhire: %d vagas para '%s'", len(vagas), query)
     except Exception as e:

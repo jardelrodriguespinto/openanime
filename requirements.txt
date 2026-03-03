@@ -30,3 +30,5 @@ pydyf==0.10.0
 jinja2==3.1.4
 # Fase 5 — Auto-candidatura (opcional)
 playwright==1.44.0
+# Scrapling — scraping com anti-bot e TLS impersonation
+scrapling
