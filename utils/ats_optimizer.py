@@ -13,6 +13,8 @@ _STOPWORDS = {
     "na", "no", "nas", "nos", "a", "o", "as", "os", "um", "uma", "vagas",
     "vaga", "experiencia", "experiencias", "conhecimento", "desejavel", "diferencial",
     "area", "areas", "atividade", "atividades", "responsavel", "responsabilidades",
+    "desenvolvedor", "developer", "engenheiro", "software", "analista",
+    "senior", "pleno", "junior", "sr", "jr", "mid", "nivel",
 }
 
 _TECH_TERMS = [
@@ -36,7 +38,14 @@ def otimizar_para_vaga(
     """
     Gera curriculo ATS de forma deterministica, sem usar modelo generativo.
     """
+    contexto_vaga_especifica = _tem_contexto_vaga_especifica(
+        vaga_titulo=vaga_titulo,
+        vaga_empresa=vaga_empresa,
+        vaga_descricao=vaga_descricao,
+        vaga_requisitos=vaga_requisitos,
+    )
     keywords = _extrair_keywords_vaga(vaga_titulo, vaga_descricao, vaga_requisitos)
+    keywords_aderentes = _filtrar_keywords_aderentes_ao_perfil(perfil, keywords)
     habilidades = _priorizar_habilidades(perfil, keywords)
     experiencias = _formatar_experiencias(perfil.get("experiencias", []), keywords)
 
@@ -49,7 +58,13 @@ def otimizar_para_vaga(
         "portfolio": perfil.get("portfolio", ""),
         "localizacao": perfil.get("localizacao", ""),
         "cargo_atual": perfil.get("cargo_atual", ""),
-        "objetivo": _gerar_objetivo(perfil, vaga_titulo, vaga_empresa, keywords),
+        "objetivo": _gerar_objetivo(
+            perfil=perfil,
+            vaga_titulo=vaga_titulo,
+            vaga_empresa=vaga_empresa,
+            keywords=keywords_aderentes,
+            contexto_vaga_especifica=contexto_vaga_especifica,
+        ),
         "habilidades": habilidades or _habilidades_fallback(perfil),
         "experiencias": experiencias,
         "formacao": _formatar_formacao(perfil.get("formacao", [])),
@@ -59,11 +74,60 @@ def otimizar_para_vaga(
     logger.info(
         "ats_optimizer(local): vaga=%s | keywords=%d | habilidades=%d | experiencias=%d",
         vaga_titulo,
-        len(keywords),
+        len(keywords_aderentes),
         len(resultado["habilidades"]),
         len(resultado["experiencias"]),
     )
     return resultado
+
+
+def _tem_contexto_vaga_especifica(
+    vaga_titulo: str,
+    vaga_empresa: str,
+    vaga_descricao: str,
+    vaga_requisitos: list[str],
+) -> bool:
+    titulo = (vaga_titulo or "").strip().lower()
+    titulos_genericos = {
+        "desenvolvedor",
+        "developer",
+        "programador",
+        "engenheiro de software",
+        "software engineer",
+    }
+    if vaga_empresa and vaga_empresa.strip():
+        return True
+    if vaga_descricao and len(vaga_descricao.strip()) >= 80:
+        return True
+    if vaga_requisitos:
+        return True
+    if titulo and titulo not in titulos_genericos:
+        return True
+    return False
+
+
+def _normalizar_termo(termo: str) -> str:
+    txt = (termo or "").strip().lower()
+    txt = re.sub(r"[^\w+#.\-/ ]+", " ", txt)
+    txt = re.sub(r"\s+", " ", txt).strip()
+    return txt
+
+
+def _filtrar_keywords_aderentes_ao_perfil(perfil: dict, keywords: list[str]) -> list[str]:
+    skills = [str(h.get("nome", "") or "") for h in perfil.get("habilidades", [])]
+    skills_norm = [_normalizar_termo(s) for s in skills if s and _normalizar_termo(s)]
+    if not skills_norm:
+        return []
+
+    aderentes: list[str] = []
+    for kw in keywords:
+        kn = _normalizar_termo(kw)
+        if not kn:
+            continue
+        if any(kn == s or kn in s or s in kn for s in skills_norm):
+            aderentes.append(kw)
+
+    return _dedupe_preserve(aderentes)[:10]
 
 
 def _extrair_keywords_vaga(vaga_titulo: str, vaga_descricao: str, vaga_requisitos: list[str]) -> list[str]:
@@ -118,17 +182,32 @@ def _dedupe_preserve(items: list[str]) -> list[str]:
     return out
 
 
-def _gerar_objetivo(perfil: dict, vaga_titulo: str, vaga_empresa: str, keywords: list[str]) -> str:
+def _gerar_objetivo(
+    perfil: dict,
+    vaga_titulo: str,
+    vaga_empresa: str,
+    keywords: list[str],
+    contexto_vaga_especifica: bool,
+) -> str:
     nivel = str(perfil.get("nivel_senioridade", "") or "").strip().capitalize()
     cargo_base = str(perfil.get("cargo_atual", "") or "").strip() or (vaga_titulo or "Desenvolvedor")
+    objetivo_base = str(perfil.get("objetivo", "") or "").strip()
 
     skills = [h.get("nome", "") for h in perfil.get("habilidades", []) if h.get("nome")]
     skills_top = ", ".join(skills[:3]) if skills else "desenvolvimento de software"
     kw_top = ", ".join(keywords[:4]) if keywords else ""
 
     parte_nivel = f"{nivel} " if nivel else ""
-    parte_empresa = f" na {vaga_empresa}" if vaga_empresa else ""
+    parte_empresa = f" na empresa {vaga_empresa}" if vaga_empresa else ""
     parte_kw = f" com foco em {kw_top}" if kw_top else ""
+
+    if not contexto_vaga_especifica:
+        if objetivo_base:
+            return objetivo_base[:320]
+        return (
+            f"{parte_nivel}{cargo_base} com experiencia em {skills_top}. "
+            "Busco contribuir em projetos de tecnologia com foco em impacto e qualidade."
+        ).strip()
 
     return (
         f"{parte_nivel}{cargo_base} com experiencia em {skills_top}."

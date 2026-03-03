@@ -1,7 +1,6 @@
 import asyncio
 import html
 import logging
-import re
 
 from telegram import Message, Update
 from telegram.error import BadRequest, NetworkError, RetryAfter
@@ -16,6 +15,149 @@ logger = logging.getLogger(__name__)
 
 MAX_AUDIO_PREVIEW = 120
 MAX_TELEGRAM_RETRIES = 3
+MAX_TELEGRAM_MESSAGE_LEN = 4096
+MAX_TELEGRAM_FORMATTED_CHUNK_LEN = 3900
+_SPLIT_FLOOR_RATIO = 0.4
+
+
+def _find_split_index(text: str, hard_limit: int) -> int:
+    if len(text) <= hard_limit:
+        return len(text)
+
+    min_idx = int(hard_limit * _SPLIT_FLOOR_RATIO)
+    window = text[:hard_limit]
+    for sep in ("\n\n", "\n", ". ", " "):
+        idx = window.rfind(sep, min_idx)
+        if idx != -1:
+            return idx + len(sep)
+    return hard_limit
+
+
+def _split_text_chunks(text: str, max_len: int) -> list[str]:
+    base = (text or "").strip()
+    if not base:
+        return ["..."]
+
+    chunks: list[str] = []
+    remaining = base
+    while remaining:
+        if len(remaining) <= max_len:
+            chunks.append(remaining)
+            break
+
+        cut = _find_split_index(remaining, max_len)
+        part = remaining[:cut].rstrip()
+        if not part:
+            part = remaining[:max_len]
+            cut = len(part)
+
+        chunks.append(part)
+        remaining = remaining[cut:].lstrip()
+
+    return chunks
+
+
+def _prepare_response_chunks(response: str) -> list[tuple[str, str]]:
+    pending = _split_text_chunks(response, MAX_TELEGRAM_FORMATTED_CHUNK_LEN)
+    prepared: list[tuple[str, str]] = []
+
+    while pending:
+        plain_chunk = pending.pop(0)
+        formatted_chunk = formatar_telegram(plain_chunk)
+
+        if len(formatted_chunk) <= MAX_TELEGRAM_FORMATTED_CHUNK_LEN:
+            prepared.append((plain_chunk, formatted_chunk))
+            continue
+
+        if len(plain_chunk) <= 1:
+            safe_plain = html.escape(plain_chunk or ".", quote=False)
+            prepared.append((plain_chunk, safe_plain))
+            continue
+
+        split_at = _find_split_index(plain_chunk, max(1, len(plain_chunk) // 2))
+        left = plain_chunk[:split_at].rstrip()
+        right = plain_chunk[split_at:].lstrip()
+
+        if not left or not right:
+            split_at = max(1, len(plain_chunk) // 2)
+            left = plain_chunk[:split_at]
+            right = plain_chunk[split_at:]
+
+        pending.insert(0, right)
+        pending.insert(0, left)
+
+    return prepared
+
+
+async def _send_plain_text_chunks(update: Update, operation_prefix: str, text: str) -> bool:
+    if not update.message:
+        return False
+
+    chunks = _split_text_chunks(text, MAX_TELEGRAM_MESSAGE_LEN - 50)
+    sent = False
+    for idx, chunk in enumerate(chunks, start=1):
+        await _telegram_call_with_retry(
+            f"{operation_prefix}_{idx}",
+            lambda c=chunk: update.message.reply_text(c),
+        )
+        sent = True
+    return sent
+
+
+async def _send_response_chunks(
+    update: Update,
+    user_id: str,
+    chunks: list[tuple[str, str]],
+    start_index: int = 0,
+) -> bool:
+    if not update.message:
+        return False
+
+    for idx in range(start_index, len(chunks)):
+        plain_chunk, html_chunk = chunks[idx]
+        try:
+            await _telegram_call_with_retry(
+                f"reply_html_resposta_chunk_{idx + 1}",
+                lambda c=html_chunk: update.message.reply_html(c),
+            )
+        except BadRequest as e:
+            logger.warning("Falha reply_html chunk user=%s idx=%d: %s", user_id, idx + 1, e)
+            remaining_plain = "\n\n".join(c[0] for c in chunks[idx:])
+            try:
+                return await _send_plain_text_chunks(
+                    update,
+                    "reply_text_resposta_chunk_fallback",
+                    remaining_plain,
+                )
+            except Exception as plain_err:
+                logger.error(
+                    "Falha fallback reply_text chunk user=%s idx=%d: %s",
+                    user_id,
+                    idx + 1,
+                    plain_err,
+                    exc_info=True,
+                )
+                return False
+        except Exception as e:
+            logger.warning("Falha reply_html chunk user=%s idx=%d: %s", user_id, idx + 1, e)
+            remaining_plain = "\n\n".join(c[0] for c in chunks[idx:])
+            try:
+                return await _send_plain_text_chunks(
+                    update,
+                    "reply_text_resposta_chunk_fallback",
+                    remaining_plain,
+                )
+            except Exception as plain_err:
+                logger.error(
+                    "Falha fallback reply_text chunk user=%s idx=%d: %s",
+                    user_id,
+                    idx + 1,
+                    plain_err,
+                    exc_info=True,
+                )
+                return False
+
+    return True
 
 
 async def _telegram_call_with_retry(operation: str, call):
@@ -285,17 +427,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.error("executar_candidatura erro user=%s: %s", user_id, e, exc_info=True)
                 resp_cand = "Erro ao executar candidatura. Tenta manualmente!"
-            texto_fmt = formatar_telegram(resp_cand)
+            resp_chunks = _prepare_response_chunks(resp_cand)
+            texto_fmt = resp_chunks[0][1]
             try:
                 await _telegram_call_with_retry(
                     "edit_text_candidatura_resultado",
                     lambda: msg_exec.edit_text(texto_fmt, parse_mode="HTML"),
                 )
+                if len(resp_chunks) > 1:
+                    sent_extra = await _send_response_chunks(update, user_id, resp_chunks, start_index=1)
+                    if not sent_extra:
+                        logger.error("Falha ao enviar chunks de candidatura user=%s", user_id)
             except Exception:
-                await _telegram_call_with_retry(
-                    "reply_text_candidatura_resultado",
-                    lambda: update.message.reply_text(resp_cand),
-                )
+                await _send_response_chunks(update, user_id, resp_chunks, start_index=0)
                 await _safe_delete_message(msg_exec)
             return
         elif text_lower in _CANCELAR:
@@ -386,7 +530,8 @@ async def _processar_input(
     ]
     get_redis_history().set(user_id, history)
 
-    texto_formatado = formatar_telegram(response)
+    response_chunks = _prepare_response_chunks(response)
+    texto_formatado = response_chunks[0][1]
 
     # 1) Tenta editar a mensagem "Pensando..."
     edit_success = False
@@ -407,6 +552,10 @@ async def _processar_input(
     # Só apaga "Pensando..." se o edit falhou (fallback enviou nova mensagem)
     if not edit_success:
         await _safe_delete_message(msg_processando)
+    elif len(response_chunks) > 1:
+        sent_extra = await _send_response_chunks(update, user_id, response_chunks, start_index=1)
+        if not sent_extra:
+            logger.error("Falha ao enviar chunks adicionais user=%s", user_id)
 
     # Armazena candidatura pendente para confirmação posterior
     candidatura_pendente = resultado.get("candidatura_pendente")
@@ -434,28 +583,13 @@ async def _processar_input(
 
 async def _enviar_resposta_fallback(update: Update, user_id: str, response: str, texto_formatado: str) -> None:
     """Fallback: envia nova mensagem quando edit falha."""
-    sent = False
-    try:
-        await _telegram_call_with_retry(
-            "reply_html_resposta",
-            lambda: update.message.reply_html(texto_formatado),
-        )
-        sent = True
-        logger.info("Resposta enviada via reply_html: user=%s len=%d", user_id, len(response))
-    except BadRequest as e:
-        logger.warning("Falha reply_html (BadRequest) user=%s: %s", user_id, e)
-    except Exception as e:
-        logger.warning("Falha reply_html user=%s: %s", user_id, e)
-
-    if not sent:
-        try:
-            await _telegram_call_with_retry(
-                "reply_text_resposta",
-                lambda: update.message.reply_text(response),
-            )
-            logger.info("Resposta enviada via reply_text: user=%s len=%d", user_id, len(response))
-        except Exception as e:
-            logger.error("Falha total ao enviar resposta user=%s: %s", user_id, e, exc_info=True)
+    _ = texto_formatado  # Mantido na assinatura para compatibilidade com chamadas atuais.
+    chunks = _prepare_response_chunks(response)
+    sent = await _send_response_chunks(update, user_id, chunks, start_index=0)
+    if sent:
+        logger.info("Resposta enviada via fallback chunked: user=%s chunks=%d", user_id, len(chunks))
+    else:
+        logger.error("Falha total ao enviar resposta user=%s", user_id)
 
 
 async def handle_noticias(update: Update, context: ContextTypes.DEFAULT_TYPE):

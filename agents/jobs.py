@@ -283,23 +283,38 @@ def _modo_curriculo_ats(state: dict) -> dict:
         return {"response": "Seu perfil esta vazio ainda. Manda seu curriculo em PDF ou me conta sobre sua experiencia para eu gerar um curriculo personalizado!"}
 
     # Tenta detectar vaga especifica na mensagem antes de usar historico.
-    vaga_titulo = _extrair_titulo_vaga_mensagem(mensagem) or "desenvolvedor"
+    vaga_titulo_extraido = _extrair_titulo_vaga_mensagem(mensagem)
+    vaga_titulo = vaga_titulo_extraido or ""
     vaga_empresa = ""
     vaga_descricao = ""
     vaga_requisitos = []
 
-    # Tenta buscar ultima vaga visualizada
+    # So usa ultima vaga quando a mensagem realmente se refere a ela.
     try:
         neo4j = get_neo4j()
         ultima_vaga = neo4j.get_ultima_vaga_visualizada(user_id)
-        if ultima_vaga:
-            if vaga_titulo == "desenvolvedor":
+        if ultima_vaga and _deve_usar_ultima_vaga(mensagem, vaga_titulo_extraido):
+            if not vaga_titulo:
                 vaga_titulo = ultima_vaga.get("titulo", vaga_titulo)
             vaga_empresa = ultima_vaga.get("empresa", "")
             vaga_descricao = ultima_vaga.get("descricao", "")
             vaga_requisitos = ultima_vaga.get("requisitos", [])
     except Exception:
         pass
+
+    if not vaga_titulo:
+        vaga_titulo = (
+            (perfil.get("cargos_desejados") or [""])[0]
+            or perfil.get("cargo_atual")
+            or "Desenvolvedor de Software"
+        )
+
+    contexto_vaga = bool(
+        vaga_empresa.strip()
+        or (vaga_descricao or "").strip()
+        or vaga_requisitos
+        or vaga_titulo_extraido
+    )
 
     try:
         from utils.ats_optimizer import otimizar_para_vaga
@@ -315,9 +330,15 @@ def _modo_curriculo_ats(state: dict) -> dict:
 
         pdf_bytes = gerar_pdf_curriculo(dados_curriculo)
 
+        resposta = _mensagem_curriculo_gerado(
+            vaga_titulo=vaga_titulo,
+            vaga_empresa=vaga_empresa,
+            contexto_vaga=contexto_vaga,
+        )
+
         # Salva referencia no state para o handler enviar o PDF
         return {
-            "response": f"Curriculo ATS gerado para vaga de {vaga_titulo}! Otimizado com keywords da vaga e pronto para passar nos filtros automaticos.",
+            "response": resposta,
             "pdf_bytes": pdf_bytes,
             "pdf_filename": f"curriculo_ats_{user_id}.pdf",
         }
@@ -363,6 +384,43 @@ def _extrair_titulo_vaga_mensagem(mensagem: str) -> str:
     if len(titulo) < 3:
         return ""
     return titulo
+
+
+def _deve_usar_ultima_vaga(mensagem: str, vaga_titulo_extraido: str) -> bool:
+    """
+    Evita "alucinacao de contexto": nao reaproveita vaga antiga quando o usuario
+    so pediu um curriculo generico.
+    """
+    if vaga_titulo_extraido:
+        return False
+
+    txt = _sem_acento((mensagem or "").lower())
+    gatilhos = [
+        "essa vaga",
+        "essa oportunidade",
+        "aquela vaga",
+        "aquela oportunidade",
+        "ultima vaga",
+        "vaga que voce mostrou",
+        "vaga que me mostrou",
+        "essa posicao",
+        "essa posicao ai",
+    ]
+    return any(g in txt for g in gatilhos)
+
+
+def _mensagem_curriculo_gerado(vaga_titulo: str, vaga_empresa: str, contexto_vaga: bool) -> str:
+    if contexto_vaga:
+        alvo = f"{vaga_titulo} na {vaga_empresa}" if vaga_empresa else vaga_titulo
+        return (
+            f"Curriculo ATS gerado para {alvo}. "
+            "Usei apenas dados reais do seu perfil e ajustei a linguagem para os requisitos da vaga."
+        )
+
+    return (
+        "Curriculo ATS base gerado com os dados reais do seu perfil profissional. "
+        "Se quiser versao mais precisa para uma vaga especifica, me envie o link ou a descricao da vaga."
+    )
 
 
 def _modo_candidaturas(user_id: str) -> dict:
