@@ -282,8 +282,8 @@ def _modo_curriculo_ats(state: dict) -> dict:
     if not perfil.get("nome") and not perfil.get("habilidades"):
         return {"response": "Seu perfil esta vazio ainda. Manda seu curriculo em PDF ou me conta sobre sua experiencia para eu gerar um curriculo personalizado!"}
 
-    # Tenta detectar vaga especifica na mensagem ou usa generico
-    vaga_titulo = "desenvolvedor"
+    # Tenta detectar vaga especifica na mensagem antes de usar historico.
+    vaga_titulo = _extrair_titulo_vaga_mensagem(mensagem) or "desenvolvedor"
     vaga_empresa = ""
     vaga_descricao = ""
     vaga_requisitos = []
@@ -293,7 +293,8 @@ def _modo_curriculo_ats(state: dict) -> dict:
         neo4j = get_neo4j()
         ultima_vaga = neo4j.get_ultima_vaga_visualizada(user_id)
         if ultima_vaga:
-            vaga_titulo = ultima_vaga.get("titulo", vaga_titulo)
+            if vaga_titulo == "desenvolvedor":
+                vaga_titulo = ultima_vaga.get("titulo", vaga_titulo)
             vaga_empresa = ultima_vaga.get("empresa", "")
             vaga_descricao = ultima_vaga.get("descricao", "")
             vaga_requisitos = ultima_vaga.get("requisitos", [])
@@ -323,6 +324,45 @@ def _modo_curriculo_ats(state: dict) -> dict:
     except Exception as e:
         logger.error("jobs: erro ao gerar curriculo ATS: %s", e)
         return {"response": "Nao consegui gerar o PDF agora. Verifique se weasyprint esta instalado (pip install weasyprint)."}
+
+
+def _extrair_titulo_vaga_mensagem(mensagem: str) -> str:
+    """
+    Extrai um possivel titulo de vaga da mensagem do usuario sem LLM.
+    Ex: "gera curriculo ats para backend python pleno" -> "backend python pleno"
+    """
+    if not mensagem:
+        return ""
+
+    txt = _sem_acento(mensagem.lower())
+    txt = re.sub(r"[^\w\s+#/.-]", " ", txt)
+    txt = re.sub(r"\s+", " ", txt).strip()
+
+    patterns = [
+        r"(?:para|pra)\s+(?:vaga\s+de\s+|vaga\s+)?(.+)$",
+        r"(?:vaga\s+de|cargo\s+de|posicao\s+de)\s+(.+)$",
+    ]
+
+    extraido = ""
+    for pat in patterns:
+        m = re.search(pat, txt)
+        if m:
+            extraido = m.group(1).strip()
+            break
+
+    if not extraido:
+        return ""
+
+    stop = {
+        "curriculo", "curriculoats", "ats", "gera", "gerar", "monta", "montar",
+        "fazer", "faz", "meu", "me", "por", "favor", "hoje", "agora", "um", "uma",
+    }
+    tokens = [t for t in extraido.split() if t not in stop and len(t) > 1]
+    titulo = " ".join(tokens[:8]).strip()
+
+    if len(titulo) < 3:
+        return ""
+    return titulo
 
 
 def _modo_candidaturas(user_id: str) -> dict:

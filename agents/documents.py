@@ -3,31 +3,17 @@ Agente de documentos — processa PDFs recebidos e gera PDFs.
 """
 
 import asyncio
-import json
 import logging
 import os
-import re
 
 from ai.openrouter import openrouter
 from data.pdf_reader import detectar_tipo_documento, extrair_texto, truncar_para_contexto
 from graph.neo4j_client import get_neo4j
 from graph.weaviate_client import get_weaviate
 import prompts.documents as doc_prompt
+from utils.curriculo_parser import extrair_perfil_curriculo_local
 
 logger = logging.getLogger(__name__)
-
-
-def _parse_json_safe(raw: str) -> dict:
-    raw = (raw or "").strip()
-    start = raw.find("{")
-    end = raw.rfind("}") + 1
-    if start >= 0 and end > start:
-        try:
-            return json.loads(raw[start:end])
-        except Exception:
-            pass
-    return {}
-
 
 def documents_node(state: dict) -> dict:
     """No LangGraph do agente de documentos."""
@@ -61,13 +47,16 @@ def _modo_analise(state: dict, pdf_path: str) -> dict:
 
     tipo = detectar_tipo_documento(texto)
     texto_llm = truncar_para_contexto(texto, max_chars=10000)
-
-    messages = doc_prompt.build_analise_messages(texto_llm, tipo)
-    try:
-        analise = openrouter.converse(messages)
-    except Exception as e:
-        logger.error("documents: erro LLM analise: %s", e)
-        analise = f"Documento de {dados['paginas']} pagina(s) recebido. Tipo detectado: {tipo}. Nao consegui gerar analise detalhada agora."
+    if tipo == "curriculo":
+        perfil_local = extrair_perfil_curriculo_local(texto_llm)
+        analise = _resumo_curriculo_local(perfil_local, dados.get("paginas", 0))
+    else:
+        messages = doc_prompt.build_analise_messages(texto_llm, tipo)
+        try:
+            analise = openrouter.converse(messages)
+        except Exception as e:
+            logger.error("documents: erro LLM analise: %s", e)
+            analise = f"Documento de {dados['paginas']} pagina(s) recebido. Tipo detectado: {tipo}. Nao consegui gerar analise detalhada agora."
 
     # Armazena no Weaviate para buscas futuras
     nome_arquivo = os.path.basename(pdf_path).replace(".pdf", "")
@@ -85,6 +74,25 @@ def _modo_analise(state: dict, pdf_path: str) -> dict:
         pass
 
     return {"response": analise, "pdf_doc_id": doc_id}
+
+
+def _resumo_curriculo_local(perfil: dict, paginas: int) -> str:
+    """Resumo local de curriculo sem LLM."""
+    nome = perfil.get("nome") or "Nome nao identificado"
+    cargo = perfil.get("cargo_atual") or "Cargo nao identificado"
+    habs = [h.get("nome", "") for h in perfil.get("habilidades", []) if h.get("nome")]
+    exps = perfil.get("experiencias", []) or []
+    forms = perfil.get("formacao", []) or []
+
+    linhas = [
+        f"Curriculo recebido ({paginas} pagina(s)).",
+        f"Nome: {nome}",
+        f"Cargo atual: {cargo}",
+        f"Habilidades detectadas: {', '.join(habs[:8]) if habs else 'nenhuma'}",
+        f"Experiencias detectadas: {len(exps)}",
+        f"Formacoes detectadas: {len(forms)}",
+    ]
+    return "\n".join(linhas)
 
 
 def _modo_qa(state: dict) -> dict:
@@ -139,12 +147,23 @@ def _armazenar_documento(user_id: str, nome: str, tipo: str, texto: str, resumo:
 async def _extrair_curriculo_background(user_id: str, texto: str) -> None:
     """Extrai perfil profissional do curriculo em background."""
     try:
-        messages = doc_prompt.build_extracao_curriculo_messages(texto)
-        raw = await asyncio.to_thread(openrouter.orchestrate, messages)
-        dados = _parse_json_safe(raw)
-        if dados:
+        dados = await asyncio.to_thread(extrair_perfil_curriculo_local, texto)
+        if dados and (
+            dados.get("nome")
+            or dados.get("email")
+            or dados.get("habilidades")
+            or dados.get("experiencias")
+            or dados.get("formacao")
+        ):
             neo4j = get_neo4j()
             neo4j.salvar_perfil_profissional(user_id, dados)
-            logger.info("documents: perfil profissional extraido do curriculo user=%s", user_id)
+            logger.info(
+                "documents: perfil profissional extraido localmente user=%s habs=%d exp=%d",
+                user_id,
+                len(dados.get("habilidades", [])),
+                len(dados.get("experiencias", [])),
+            )
+        else:
+            logger.info("documents: extracao local de curriculo sem dados relevantes user=%s", user_id)
     except Exception as e:
         logger.debug("documents: extracao curriculo background erro: %s", e)

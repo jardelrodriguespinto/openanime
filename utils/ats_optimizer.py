@@ -1,142 +1,45 @@
 """
-Otimizador de curriculo para ATS — usa LLM para personalizar para vaga especifica.
+Otimizador de curriculo ATS local (sem LLM / sem API paga).
+Usa apenas dados reais do perfil + texto da vaga.
 """
 
-import json
 import logging
-
-from ai.openrouter import openrouter
+import re
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_ATS = """Voce e um especialista senior em recrutamento tech e curriculos ATS com 15 anos de experiencia.
-Seu objetivo e criar um curriculo que:
-1. Passe nos filtros automaticos ATS com pontuacao maxima
-2. Impressione o recrutador humano em 6 segundos de leitura
-3. Mostre impacto real e quantificavel do candidato
-
-=== REGRAS ATS OBRIGATORIAS ===
-- Layout de uma coluna — nunca use colunas paralelas
-- Keywords da vaga inseridas NATURALMENTE no texto (nao em lista solta)
-- Densidade de keywords: mencione cada keyword importante 2-3x no documento
-- Sem abreviacoes obscuras — escreva por extenso na primeira vez
-- Datas no formato MM/AAAA
-
-=== OBJETIVO PROFISSIONAL (3-4 linhas) ===
-Formato: [Nivel] [Cargo] com X anos de experiencia em [area principal].
-Especializado em [2-3 tecnologias/areas mais relevantes para a vaga].
-Busco [contribuicao especifica] na [empresa/setor se conhecido].
-Inclua 3-4 keywords da vaga de forma natural.
-
-=== BULLETS DE EXPERIENCIA (metodo CAR) ===
-Cada bullet = Contexto + Acao + Resultado
-- Sempre comece com VERBO DE ACAO FORTE no passado: Desenvolvi, Implementei, Reduzi, Aumentei, Liderei, Otimizei, Automatizei, Arquitetei, Migrei, Integrei
-- Quantifique SEMPRE que possivel: %, tempo, dinheiro, usuarios, deploys/dia
-- Exemplo ruim: "Trabalhei com APIs REST"
-- Exemplo bom: "Desenvolvi 12 endpoints REST com FastAPI reduzindo tempo de resposta em 40%"
-- Exemplo bom: "Migrei monolito legado para 8 microservicos diminuindo custo de infra em R$8k/mes"
-- Minimo 3, maximo 5 bullets por experiencia
-- Priorize bullets que usam keywords da vaga
-
-=== HABILIDADES ===
-- Ordene por relevancia para a vaga especifica
-- Agrupe: Linguagens | Frameworks | Infraestrutura | Dados | Ferramentas
-- Inclua nivel entre parenteses apenas para principais: Python (avancado), React (intermediario)
-- Maximo 18 habilidades
-
-=== NUNCA FACA (REGRAS ABSOLUTAS) ===
-- NUNCA invente experiencias, empresas, projetos, tecnologias ou conquistas que o candidato nao mencionou
-- NUNCA escreva bullets para experiencias sem descricao — deixe a lista de bullets vazia nesses casos
-- NUNCA infira ou suponha responsabilidades com base no cargo ou nivel — use apenas o que esta no campo descricao
-- NUNCA coloque porcentagens, numeros, metricas ou resultados que nao vieram do perfil
-- NUNCA coloque periodos de emprego sem dados reais
-
-Retorne APENAS JSON valido sem markdown:
-{
-  "objetivo": "texto corrido de 3-4 linhas com keywords da vaga",
-  "habilidades": ["Python (avancado)", "FastAPI", "PostgreSQL", "Docker", "..."],
-  "experiencias": [
-    {
-      "empresa": "Nome da Empresa",
-      "cargo": "Titulo exato do cargo",
-      "periodo": "MM/AAAA - MM/AAAA",
-      "bullets": [
-        "Desenvolvi X usando Y resultando em Z",
-        "Implementei A reduzindo B em C%",
-        "Liderei equipe de N pessoas para entregar X"
-      ]
-    }
-  ],
-  "keywords_usadas": ["keyword1", "keyword2", "keyword3"]
+_STOPWORDS = {
+    "de", "da", "do", "das", "dos", "e", "ou", "com", "para", "por", "em",
+    "na", "no", "nas", "nos", "a", "o", "as", "os", "um", "uma", "vagas",
+    "vaga", "experiencia", "experiencias", "conhecimento", "desejavel", "diferencial",
+    "area", "areas", "atividade", "atividades", "responsavel", "responsabilidades",
 }
-"""
+
+_TECH_TERMS = [
+    "python", "java", "javascript", "typescript", "node", "node.js", "react",
+    "angular", "vue", "next.js", "nestjs", "django", "flask", "fastapi",
+    "spring", "dotnet", ".net", "php", "go", "golang", "kotlin", "swift",
+    "sql", "postgresql", "mysql", "mongodb", "redis", "elasticsearch",
+    "aws", "azure", "gcp", "docker", "kubernetes", "terraform", "linux",
+    "git", "github", "gitlab", "rest", "graphql", "microservices", "ci/cd",
+    "jenkins", "rabbitmq", "kafka", "pandas", "numpy", "pytorch", "tensorflow",
+]
 
 
-def _parse_json_safe(raw: str) -> dict:
-    raw = (raw or "").strip()
-    # Remove possivel markdown code block
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    start = raw.find("{")
-    end = raw.rfind("}") + 1
-    if start >= 0 and end > start:
-        try:
-            return json.loads(raw[start:end])
-        except Exception:
-            pass
-    return {}
-
-
-def otimizar_para_vaga(perfil: dict, vaga_titulo: str, vaga_empresa: str,
-                       vaga_descricao: str, vaga_requisitos: list[str]) -> dict:
+def otimizar_para_vaga(
+    perfil: dict,
+    vaga_titulo: str,
+    vaga_empresa: str,
+    vaga_descricao: str,
+    vaga_requisitos: list[str],
+) -> dict:
     """
-    Usa LLM para personalizar o curriculo para a vaga especifica.
-    Retorna dict pronto para o template HTML.
+    Gera curriculo ATS de forma deterministica, sem usar modelo generativo.
     """
-    # Envia perfil completo para o LLM ter contexto rico
-    perfil_resumido = {
-        "nivel_senioridade": perfil.get("nivel_senioridade", ""),
-        "cargo_atual": perfil.get("cargo_atual", ""),
-        "habilidades": [
-            {"nome": h.get("nome", ""), "nivel": h.get("nivel", 0), "anos": h.get("anos_exp", 0)}
-            for h in perfil.get("habilidades", [])[:20]
-        ],
-        "experiencias": perfil.get("experiencias", [])[:5],
-        "formacao": perfil.get("formacao", []),
-        "idiomas": perfil.get("idiomas", []),
-        "pretensao_salarial": perfil.get("pretensao_salarial", ""),
-    }
+    keywords = _extrair_keywords_vaga(vaga_titulo, vaga_descricao, vaga_requisitos)
+    habilidades = _priorizar_habilidades(perfil, keywords)
+    experiencias = _formatar_experiencias(perfil.get("experiencias", []), keywords)
 
-    prompt_user = f"""PERFIL DO CANDIDATO:
-{json.dumps(perfil_resumido, ensure_ascii=False, indent=2)}
-
-VAGA ALVO:
-Titulo: {vaga_titulo}
-Empresa: {vaga_empresa or 'nao informada'}
-Requisitos: {', '.join(vaga_requisitos[:20]) if vaga_requisitos else 'nao informados'}
-Descricao: {vaga_descricao[:3000] if vaga_descricao else 'nao informada'}
-
-INSTRUCAO: Crie um curriculo ATS otimizado para esta vaga especifica.
-Se a descricao da vaga for escassa, use o titulo e requisitos para identificar keywords relevantes.
-CRITICO: Use APENAS os dados que existem no perfil. Para bullets de cada experiencia, reescreva o conteudo do campo "descricao" com formato CAR — nao invente informacoes que nao estejam la.
-Se uma experiencia nao tiver campo "descricao" preenchido, coloque apenas cargo + empresa + periodo com lista de bullets VAZIA.
-NUNCA crie bullets, projetos, numeros ou conquistas que o candidato nao mencionou."""
-
-    messages = [
-        {"role": "system", "content": SYSTEM_ATS},
-        {"role": "user", "content": prompt_user},
-    ]
-
-    try:
-        raw = openrouter.converse(messages)
-        otimizado = _parse_json_safe(raw)
-    except Exception as e:
-        logger.error("ats_optimizer: erro LLM: %s", e)
-        otimizado = {}
-
-    # Monta contexto completo para o template
     resultado = {
         "nome": perfil.get("nome", ""),
         "email": perfil.get("email", ""),
@@ -146,55 +49,200 @@ NUNCA crie bullets, projetos, numeros ou conquistas que o candidato nao menciono
         "portfolio": perfil.get("portfolio", ""),
         "localizacao": perfil.get("localizacao", ""),
         "cargo_atual": perfil.get("cargo_atual", ""),
-        "objetivo": otimizado.get("objetivo") or _gerar_objetivo_fallback(perfil, vaga_titulo),
-        "habilidades": otimizado.get("habilidades") or _habilidades_fallback(perfil),
-        "experiencias": _formatar_experiencias(otimizado.get("experiencias", []), perfil),
+        "objetivo": _gerar_objetivo(perfil, vaga_titulo, vaga_empresa, keywords),
+        "habilidades": habilidades or _habilidades_fallback(perfil),
+        "experiencias": experiencias,
         "formacao": _formatar_formacao(perfil.get("formacao", [])),
         "idiomas": perfil.get("idiomas", []),
     }
 
-    logger.info("ats_optimizer: curriculo otimizado para vaga=%s keywords=%d",
-                vaga_titulo, len(otimizado.get("keywords_usadas", [])))
+    logger.info(
+        "ats_optimizer(local): vaga=%s | keywords=%d | habilidades=%d | experiencias=%d",
+        vaga_titulo,
+        len(keywords),
+        len(resultado["habilidades"]),
+        len(resultado["experiencias"]),
+    )
     return resultado
 
 
-def _gerar_objetivo_fallback(perfil: dict, vaga_titulo: str) -> str:
-    nivel = perfil.get("nivel_senioridade", "").capitalize()
-    cargo = perfil.get("cargo_atual", "") or vaga_titulo
-    skills = [h.get("nome", "") for h in perfil.get("habilidades", [])[:3] if h.get("nome")]
-    skills_str = ", ".join(skills) if skills else "desenvolvimento de software"
-    return f"{nivel} {cargo} com experiencia em {skills_str}. Busco contribuir com solucoes de alto impacto alinhadas a vaga de {vaga_titulo}.".strip()
+def _extrair_keywords_vaga(vaga_titulo: str, vaga_descricao: str, vaga_requisitos: list[str]) -> list[str]:
+    texto = " ".join([
+        str(vaga_titulo or ""),
+        str(vaga_descricao or ""),
+        " ".join(vaga_requisitos or []),
+    ]).lower()
+
+    keywords: list[str] = []
+
+    # Primeiro: requisitos explicitos (menos ruído)
+    for req in vaga_requisitos or []:
+        for chunk in re.split(r"[,;/|]", str(req)):
+            term = chunk.strip().lower()
+            if _termo_valido(term):
+                keywords.append(term)
+
+    # Segundo: termos tecnicos conhecidos na descricao
+    for term in _TECH_TERMS:
+        if re.search(r"\b" + re.escape(term) + r"\b", texto):
+            keywords.append(term)
+
+    # Terceiro: tokens relevantes do titulo
+    for token in re.findall(r"[a-zA-Z0-9+#\.\-]{3,}", str(vaga_titulo or "").lower()):
+        if _termo_valido(token):
+            keywords.append(token)
+
+    return _dedupe_preserve(keywords)[:20]
 
 
-def _habilidades_fallback(perfil: dict) -> list:
-    return [h.get("nome", "") for h in perfil.get("habilidades", [])[:15] if h.get("nome")]
+def _termo_valido(termo: str) -> bool:
+    t = re.sub(r"\s+", " ", termo.strip().lower())
+    if len(t) < 2 or len(t) > 40:
+        return False
+    if t in _STOPWORDS:
+        return False
+    if re.fullmatch(r"\d+", t):
+        return False
+    return True
 
 
-def _formatar_experiencias(experiencias_otimizadas: list, perfil: dict) -> list:
-    """Usa experiencias otimizadas pelo LLM ou fallback para as do perfil."""
-    if experiencias_otimizadas:
-        return experiencias_otimizadas
+def _dedupe_preserve(items: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        key = item.strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(item.strip())
+    return out
 
-    # Fallback: converte experiencias brutas do perfil
+
+def _gerar_objetivo(perfil: dict, vaga_titulo: str, vaga_empresa: str, keywords: list[str]) -> str:
+    nivel = str(perfil.get("nivel_senioridade", "") or "").strip().capitalize()
+    cargo_base = str(perfil.get("cargo_atual", "") or "").strip() or (vaga_titulo or "Desenvolvedor")
+
+    skills = [h.get("nome", "") for h in perfil.get("habilidades", []) if h.get("nome")]
+    skills_top = ", ".join(skills[:3]) if skills else "desenvolvimento de software"
+    kw_top = ", ".join(keywords[:4]) if keywords else ""
+
+    parte_nivel = f"{nivel} " if nivel else ""
+    parte_empresa = f" na {vaga_empresa}" if vaga_empresa else ""
+    parte_kw = f" com foco em {kw_top}" if kw_top else ""
+
+    return (
+        f"{parte_nivel}{cargo_base} com experiencia em {skills_top}."
+        f" Busco atuar na vaga de {vaga_titulo or cargo_base}{parte_empresa}{parte_kw}."
+    ).strip()
+
+
+def _priorizar_habilidades(perfil: dict, keywords: list[str]) -> list[str]:
+    skills = perfil.get("habilidades", []) or []
+    if not skills:
+        return []
+
+    keywords_lower = [k.lower() for k in keywords]
+
+    ranked = []
+    for idx, item in enumerate(skills):
+        nome = str(item.get("nome", "") or "").strip()
+        if not nome:
+            continue
+        nome_lower = nome.lower()
+        nivel = int(item.get("nivel", 0) or 0)
+        score = nivel / 10.0
+
+        for kw in keywords_lower:
+            if not kw:
+                continue
+            if kw == nome_lower:
+                score += 4.0
+            elif kw in nome_lower or nome_lower in kw:
+                score += 2.0
+
+        ranked.append((score, idx, nome, nivel))
+
+    ranked.sort(key=lambda x: (-x[0], x[1]))
+
     resultado = []
-    for exp in perfil.get("experiencias", [])[:4]:
-        descricao = exp.get("descricao", "")
-        bullets = []
-        if descricao:
-            partes = [p.strip() for p in descricao.replace(";", ".").split(".") if len(p.strip()) > 20]
-            bullets = partes[:4] if partes else [descricao]
+    for pos, (_, _, nome, nivel) in enumerate(ranked[:18], 1):
+        # Coloca nivel so nas primeiras skills principais.
+        if pos <= 5 and nivel > 0:
+            nivel_txt = {
+                1: "basico",
+                2: "basico-medio",
+                3: "intermediario",
+                4: "avancado",
+                5: "especialista",
+            }.get(nivel, "")
+            resultado.append(f"{nome} ({nivel_txt})" if nivel_txt else nome)
+        else:
+            resultado.append(nome)
+    return resultado
+
+
+def _formatar_experiencias(experiencias: list[dict], keywords: list[str]) -> list[dict]:
+    resultado = []
+    for exp in experiencias[:5]:
+        empresa = str(exp.get("empresa", "") or "").strip()
+        cargo = str(exp.get("cargo", "") or "").strip()
+        inicio = str(exp.get("inicio", "") or "").strip()
+        fim = str(exp.get("fim", "") or "").strip()
+        descricao = str(exp.get("descricao", "") or "").strip()
+
+        if not empresa and not cargo and not descricao:
+            continue
+
+        bullets = _bullets_from_descricao(descricao, keywords) if descricao else []
         resultado.append({
-            "empresa": exp.get("empresa", ""),
-            "cargo": exp.get("cargo", ""),
-            "periodo": f"{exp.get('inicio', '')} - {exp.get('fim', 'Atual')}",
+            "empresa": empresa,
+            "cargo": cargo,
+            "periodo": _formatar_periodo(inicio, fim),
             "bullets": bullets,
         })
     return resultado
 
 
-def _formatar_formacao(formacao_list: list) -> list:
+def _formatar_periodo(inicio: str, fim: str) -> str:
+    ini = inicio.strip()
+    end = fim.strip()
+    if ini and end:
+        return f"{ini} - {end}"
+    if ini:
+        return f"{ini} - Atual"
+    return end
+
+
+def _bullets_from_descricao(descricao: str, keywords: list[str]) -> list[str]:
+    partes = re.split(r"[\n\r;]+|\.\s+", descricao)
+    sentencas = [p.strip(" .\t-•") for p in partes if len(p.strip()) >= 20]
+    if not sentencas:
+        return []
+
+    kws = [k.lower() for k in keywords]
+
+    def _score(frase: str) -> int:
+        fl = frase.lower()
+        return sum(1 for kw in kws if kw and kw in fl)
+
+    # Reordena priorizando frases que batem com keywords da vaga, sem reescrever texto.
+    ordenadas = sorted(enumerate(sentencas), key=lambda x: (-_score(x[1]), x[0]))
+    selecionadas = [s for _, s in ordenadas[:5]]
+    return selecionadas
+
+
+def _habilidades_fallback(perfil: dict) -> list[str]:
+    skills = []
+    for h in perfil.get("habilidades", [])[:15]:
+        nome = str(h.get("nome", "") or "").strip()
+        if nome:
+            skills.append(nome)
+    return skills
+
+
+def _formatar_formacao(formacao_list: list[dict]) -> list[dict]:
     resultado = []
-    for f in formacao_list[:3]:
+    for f in (formacao_list or [])[:3]:
         resultado.append({
             "curso": f.get("curso", ""),
             "instituicao": f.get("instituicao", ""),
