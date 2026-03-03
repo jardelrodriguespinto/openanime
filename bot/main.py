@@ -167,14 +167,15 @@ def _registrar_jobs(app):
 
     tz_br = pytz.timezone("America/Sao_Paulo")
 
-    # Coordinator que roda toda hora e despacha para cada usuario conforme prefs
+    # Coordinator que roda a cada minuto.
+    # Noticias disparam no hora:minuto exato; digest/episodios/vagas so no minuto 0.
     app.job_queue.run_repeating(
         coordinator_notificacoes,
-        interval=datetime.timedelta(hours=1),
-        first=datetime.time(hour=datetime.datetime.now(tz_br).hour, minute=0, tzinfo=tz_br),
+        interval=datetime.timedelta(minutes=1),
+        first=10,  # inicia 10s apos o bot subir
         name="coordinator_notificacoes",
     )
-    logger.info("Job agendado: coordinator_notificacoes (a cada hora)")
+    logger.info("Job agendado: coordinator_notificacoes (a cada minuto)")
 
     # Lancamentos culturais: toda sexta 12h (fixo, independe de prefs individuais)
     app.job_queue.run_daily(

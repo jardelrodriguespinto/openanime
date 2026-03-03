@@ -72,10 +72,73 @@ def _detectar_categorias_rss(query: str) -> list[str]:
     return list(dict.fromkeys(encontradas))
 
 
+def _agendar_notificacao_noticias(user_id: str, mensagem: str, agendamento: tuple) -> dict:
+    """Salva preferencia de notificacao de noticias no horario pedido."""
+    hora, minuto = agendamento
+    query = _extrair_query(mensagem)
+    cats = _detectar_categorias_rss(query)
+    topicos = cats if cats else ([query] if query != "noticias hoje" else ["geral"])
+
+    try:
+        neo4j = get_neo4j()
+        # Usa o dict flat retornado por get_preferencias_notificacao
+        prefs = neo4j.get_preferencias_notificacao(user_id) or {}
+        prefs["noticias_ativo"] = True
+        prefs["noticias_hora"] = hora
+        prefs["noticias_minuto"] = minuto
+        neo4j.salvar_preferencias_notificacao(user_id, prefs)
+        # Salva interesses para o coordinator usar na busca
+        neo4j.salvar_interesses_noticias(user_id, topicos)
+        logger.info("news: agendamento salvo user=%s hora=%02d:%02d topicos=%s", user_id, hora, minuto, topicos)
+        hora_fmt = f"{hora:02d}h{minuto:02d}" if minuto else f"{hora:02d}h"
+        topicos_str = ", ".join(topicos) if topicos else "geral"
+        return {
+            "response": (
+                f"Agendado! Vou te mandar notícias de <b>{topicos_str}</b> todo dia às <b>{hora_fmt}</b>. "
+                f"Para cancelar, é só dizer \"cancela notícias agendadas\"."
+            )
+        }
+    except Exception as e:
+        logger.error("news: erro ao agendar notificacao: %s", e)
+        return {"response": "Não consegui salvar o agendamento agora. Tenta de novo!"}
+
+
+def _detectar_agendamento(mensagem: str) -> tuple[int, int] | None:
+    """
+    Detecta pedido de agendamento de notificacao na mensagem.
+    Retorna (hora, minuto) ou None se nao for pedido de agendamento.
+    Ex: 'quero noticias as 18h20' -> (18, 20)
+        'me manda noticias todo dia as 9h' -> (9, 0)
+        'noticias de tech' -> None
+    """
+    msg = mensagem.lower()
+    # Palavras que indicam pedido de agendamento
+    palavras_agenda = {"as", "às", "todo", "toda", "diario", "diária", "diariamente",
+                       "todo dia", "toda manhã", "toda tarde", "toda noite",
+                       "agendar", "agende", "agenda", "receber", "quero receber",
+                       "me manda", "me envia", "notifica", "avisa"}
+    tem_agenda = any(p in msg for p in palavras_agenda)
+    if not tem_agenda:
+        return None
+    # Extrai horario: 18h20, 18:20, 18h, 9h30, 08h00
+    match = re.search(r"\b(\d{1,2})[h:](\d{2})?\b", msg)
+    if match:
+        hora = int(match.group(1))
+        minuto = int(match.group(2)) if match.group(2) else 0
+        if 0 <= hora <= 23 and 0 <= minuto <= 59:
+            return (hora, minuto)
+    return None
+
+
 def news_node(state: dict) -> dict:
     """No LangGraph do agente de noticias."""
     user_id = state.get("user_id", "")
     mensagem = state.get("raw_input", "")
+
+    # Detecta pedido de agendamento antes de buscar noticias
+    agendamento = _detectar_agendamento(mensagem)
+    if agendamento:
+        return _agendar_notificacao_noticias(user_id, mensagem, agendamento)
 
     query = _extrair_query(mensagem)
     cats_rss = _detectar_categorias_rss(query)

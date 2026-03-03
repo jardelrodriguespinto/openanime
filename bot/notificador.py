@@ -502,12 +502,16 @@ async def verificar_novos_episodios(context: CallbackContext) -> None:
 
 async def coordinator_notificacoes(context: CallbackContext) -> None:
     """
-    Roda a cada hora. Verifica quais usuarios querem notificacao nesta hora
+    Roda a cada minuto. Verifica quais usuarios querem notificacao agora
     e envia os tipos correspondentes (digest, episodios, vagas, noticias).
+    - Digest/episodios/vagas: disparam apenas no minuto 0 de cada hora (comportamento horario)
+    - Noticias: disparam no hora:minuto exato configurado pelo usuario
     """
     import pytz
-    hora_atual = datetime.datetime.now(pytz.timezone("America/Sao_Paulo")).hour
-    logger.info("Coordinator notificacoes: hora=%d", hora_atual)
+    agora = datetime.datetime.now(pytz.timezone("America/Sao_Paulo"))
+    hora_atual = agora.hour
+    minuto_atual = agora.minute
+    logger.debug("Coordinator notificacoes: hora=%02d minuto=%02d", hora_atual, minuto_atual)
 
     try:
         neo4j = get_neo4j()
@@ -515,8 +519,12 @@ async def coordinator_notificacoes(context: CallbackContext) -> None:
         logger.error("Coordinator: erro Neo4j: %s", e)
         return
 
-    # ── Digest (novidades anime/manga) ────────────────────────────────────────
-    ids_digest = neo4j.get_usuarios_por_hora_notificacao(hora_atual, "digest")
+    # ── Digest (novidades anime/manga) — dispara so no minuto 0 ──────────────
+    if minuto_atual != 0:
+        # Pula digest/episodios/vagas fora do minuto exato da hora
+        ids_digest = []
+    else:
+        ids_digest = neo4j.get_usuarios_por_hora_notificacao(hora_atual, "digest")
     if ids_digest:
         logger.info("Coordinator: digest para %d usuarios na hora %d", len(ids_digest), hora_atual)
         temporada, novidades_web, novidades_reddit = await asyncio.to_thread(_coletar_dados_diarios)
@@ -536,8 +544,8 @@ async def coordinator_notificacoes(context: CallbackContext) -> None:
             except Exception as e:
                 logger.warning("Coordinator: erro digest user=%s: %s", user_id, e)
 
-    # ── Episodios ─────────────────────────────────────────────────────────────
-    ids_ep = neo4j.get_usuarios_por_hora_notificacao(hora_atual, "episodios")
+    # ── Episodios — dispara so no minuto 0 ────────────────────────────────────
+    ids_ep = [] if minuto_atual != 0 else neo4j.get_usuarios_por_hora_notificacao(hora_atual, "episodios")
     if ids_ep:
         logger.info("Coordinator: episodios para %d usuarios na hora %d", len(ids_ep), hora_atual)
         # Reusar logica do verificar_novos_episodios mas so para esses usuarios
@@ -576,8 +584,8 @@ async def coordinator_notificacoes(context: CallbackContext) -> None:
             except Exception as e:
                 logger.warning("Coordinator: erro episodios user=%s: %s", user_id, e)
 
-    # ── Vagas ─────────────────────────────────────────────────────────────────
-    ids_vagas = neo4j.get_usuarios_por_hora_notificacao(hora_atual, "vagas")
+    # ── Vagas — dispara so no minuto 0 ────────────────────────────────────────
+    ids_vagas = [] if minuto_atual != 0 else neo4j.get_usuarios_por_hora_notificacao(hora_atual, "vagas")
     if ids_vagas:
         logger.info("Coordinator: vagas para %d usuarios na hora %d", len(ids_vagas), hora_atual)
         for user_id in ids_vagas:
@@ -595,10 +603,10 @@ async def coordinator_notificacoes(context: CallbackContext) -> None:
             except Exception as e:
                 logger.warning("Coordinator: erro vagas user=%s: %s", user_id, e)
 
-    # ── Noticias personalizadas ───────────────────────────────────────────────
-    ids_noticias = neo4j.get_usuarios_por_hora_notificacao(hora_atual, "noticias")
+    # ── Noticias personalizadas — hora:minuto exato ───────────────────────────
+    ids_noticias = neo4j.get_usuarios_noticias_agendadas(hora_atual, minuto_atual)
     if ids_noticias:
-        logger.info("Coordinator: noticias para %d usuarios na hora %d", len(ids_noticias), hora_atual)
+        logger.info("Coordinator: noticias para %d usuarios em %02d:%02d", len(ids_noticias), hora_atual, minuto_atual)
         for user_id in ids_noticias:
             try:
                 interesses = neo4j.get_interesses_noticias(user_id)

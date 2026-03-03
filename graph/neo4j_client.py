@@ -1514,7 +1514,8 @@ class Neo4jClient:
             coalesce(u.notif_vagas_ativo, false)           AS vagas_ativo,
             coalesce(u.notif_vagas_hora, 9)                AS vagas_hora,
             coalesce(u.notif_noticias_ativo, false)        AS noticias_ativo,
-            coalesce(u.notif_noticias_hora, 8)             AS noticias_hora
+            coalesce(u.notif_noticias_hora, 8)             AS noticias_hora,
+            coalesce(u.notif_noticias_minuto, 0)           AS noticias_minuto
         """
         with self.driver.session() as session:
             result = session.run(cypher, tid=telegram_id)
@@ -1524,7 +1525,7 @@ class Neo4jClient:
                     "digest_ativo": True, "digest_hora": 8,
                     "episodios_ativo": True, "episodios_hora": 20,
                     "vagas_ativo": False, "vagas_hora": 9,
-                    "noticias_ativo": False, "noticias_hora": 8,
+                    "noticias_ativo": False, "noticias_hora": 8, "noticias_minuto": 0,
                 }
             return dict(record)
 
@@ -1540,7 +1541,8 @@ class Neo4jClient:
             u.notif_vagas_ativo      = $vagas_ativo,
             u.notif_vagas_hora       = $vagas_hora,
             u.notif_noticias_ativo   = $noticias_ativo,
-            u.notif_noticias_hora    = $noticias_hora
+            u.notif_noticias_hora    = $noticias_hora,
+            u.notif_noticias_minuto  = $noticias_minuto
         """
         with self.driver.session() as session:
             session.run(
@@ -1554,6 +1556,7 @@ class Neo4jClient:
                 vagas_hora=int(prefs.get("vagas_hora", 9)),
                 noticias_ativo=prefs.get("noticias_ativo", False),
                 noticias_hora=int(prefs.get("noticias_hora", 8)),
+                noticias_minuto=int(prefs.get("noticias_minuto", 0)),
             )
 
     def get_usuarios_por_hora_notificacao(self, hora: int, tipo: str) -> list[str]:
@@ -1578,6 +1581,22 @@ class Neo4jClient:
                 default_ativo=defaults_ativo.get(tipo, False),
                 default_hora=defaults_hora.get(tipo, 8),
             )
+            return [r["tid"] for r in result if r["tid"]]
+
+    def get_usuarios_noticias_agendadas(self, hora: int, minuto: int) -> list[str]:
+        """
+        Retorna user_ids com noticias agendadas para hora:minuto exatos.
+        Usado pelo coordinator que roda a cada minuto.
+        """
+        cypher = """
+        MATCH (u:Usuario)
+        WHERE coalesce(u.notif_noticias_ativo, false) = true
+          AND coalesce(u.notif_noticias_hora, 8) = $hora
+          AND coalesce(u.notif_noticias_minuto, 0) = $minuto
+        RETURN u.telegram_id AS tid
+        """
+        with self.driver.session() as session:
+            result = session.run(cypher, hora=hora, minuto=minuto)
             return [r["tid"] for r in result if r["tid"]]
 
     # ─── Documentos ──────────────────────────────────────────────────────────
