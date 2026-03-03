@@ -1,5 +1,7 @@
 import asyncio
+import html
 import logging
+import re
 
 from telegram import Message, Update
 from telegram.error import BadRequest, NetworkError, RetryAfter
@@ -61,10 +63,11 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /start."""
     user = update.effective_user
     logger.info("/start: user_id=%s username=%s", user.id, user.username)
+    nome = html.escape(user.first_name or "")
     await _telegram_call_with_retry(
         "reply_html_start",
         lambda: update.message.reply_html(
-            f"Oi, <b>{user.first_name}</b>!\n\n"
+            f"Oi, <b>{nome}</b>!\n\n"
             "Sou seu assistente pessoal multiuso de anime, manga, manhwa, filmes, series, doramas, musica e livros.\n\n"
             "Pode me perguntar sobre qualquer coisa:\n"
             "- Recomendacoes personalizadas no seu estilo\n"
@@ -107,6 +110,7 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/curriculo_ats - gera curriculo ATS personalizado\n"
             "/perfil_pro - seu perfil profissional\n"
             "/candidaturas - pipeline de candidaturas\n"
+            "/notificacoes - configura horario e tipo de alertas\n"
             "/limpar - limpa o historico da conversa"
         ),
     )
@@ -550,7 +554,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         import os
         tg_file = await doc.get_file()
-        caminho = f"/tmp/{doc.file_unique_id}.pdf"
+        caminho = f"/tmp/{user_id}_{doc.file_unique_id}.pdf"
         await tg_file.download_to_drive(caminho)
 
         nome = doc.file_name or "documento.pdf"
@@ -561,6 +565,91 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "edit_text_pdf_erro",
             lambda: msg.edit_text("Erro ao processar o PDF. Tenta novamente!"),
         )
+
+
+async def handle_notificacoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Comando /notificacoes — exibe e permite configurar preferencias de notificacao.
+
+    Uso:
+      /notificacoes                     — mostra configuracao atual
+      /notificacoes digest 7            — ativa digest as 7h
+      /notificacoes digest off          — desativa digest
+      /notificacoes episodios 21        — alerta de episodios as 21h
+      /notificacoes vagas 9             — ativa alerta de vagas as 9h
+      /notificacoes noticias 8          — ativa noticias personalizadas as 8h
+      /notificacoes noticias off        — desativa noticias
+    """
+    from graph.neo4j_client import get_neo4j
+
+    user_id = str(update.effective_user.id)
+    args = context.args or []
+
+    try:
+        neo4j = get_neo4j()
+        prefs = neo4j.get_preferencias_notificacao(user_id)
+    except Exception as e:
+        logger.error("/notificacoes erro Neo4j: %s", e)
+        await update.message.reply_text("Erro ao carregar preferencias. Tenta de novo!")
+        return
+
+    TIPOS_VALIDOS = {"digest", "episodios", "vagas", "noticias"}
+    LABELS = {
+        "digest": "Digest de anime/manga",
+        "episodios": "Alertas de episodios",
+        "vagas": "Vagas de emprego",
+        "noticias": "Noticias personalizadas",
+    }
+
+    if len(args) >= 2:
+        tipo = args[0].lower()
+        valor = args[1].lower()
+        if tipo not in TIPOS_VALIDOS:
+            await update.message.reply_text(
+                f"Tipo invalido. Opcoes: {', '.join(TIPOS_VALIDOS)}"
+            )
+            return
+        if valor == "off":
+            prefs[f"{tipo}_ativo"] = False
+            msg_ok = f"{LABELS[tipo]} desativado."
+        else:
+            try:
+                hora = int(valor)
+                if not 0 <= hora <= 23:
+                    raise ValueError
+            except ValueError:
+                await update.message.reply_text(
+                    "Hora invalida. Use um numero de 0 a 23 ou 'off' para desativar."
+                )
+                return
+            prefs[f"{tipo}_ativo"] = True
+            prefs[f"{tipo}_hora"] = hora
+            msg_ok = f"{LABELS[tipo]} ativado para as {hora:02d}h (horario de Brasilia)."
+        try:
+            neo4j.salvar_preferencias_notificacao(user_id, prefs)
+            await update.message.reply_text(msg_ok)
+        except Exception as e:
+            logger.error("/notificacoes salvar erro: %s", e)
+            await update.message.reply_text("Erro ao salvar preferencias.")
+        return
+
+    # Exibe status atual
+    linhas = ["<b>Suas preferencias de notificacao:</b>\n"]
+    for tipo, label in LABELS.items():
+        ativo = prefs.get(f"{tipo}_ativo", False)
+        hora = prefs.get(f"{tipo}_hora", 0)
+        status = f"<b>{hora:02d}:00h</b>" if ativo else "desativado"
+        emoji = "✅" if ativo else "❌"
+        linhas.append(f"{emoji} <b>{label}</b>: {status}")
+    linhas.append(
+        "\n<i>Para alterar: /notificacoes [tipo] [hora|off]</i>\n"
+        "<i>Tipos: digest | episodios | vagas | noticias</i>\n"
+        "<i>Ex: /notificacoes digest 7</i>"
+    )
+    await _telegram_call_with_retry(
+        "reply_html_notificacoes",
+        lambda: update.message.reply_html("\n".join(linhas)),
+    )
 
 
 async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE):

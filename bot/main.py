@@ -20,6 +20,7 @@ from bot.handlers import (
     handle_maratona,
     handle_message,
     handle_noticias,
+    handle_notificacoes,
     handle_novidades,
     handle_perfil_pro,
     handle_start,
@@ -132,6 +133,7 @@ def main():
     app.add_handler(CommandHandler("curriculo_ats", handle_curriculo_ats))
     app.add_handler(CommandHandler("perfil_pro", handle_perfil_pro))
     app.add_handler(CommandHandler("candidaturas", handle_candidaturas))
+    app.add_handler(CommandHandler("notificacoes", handle_notificacoes))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_audio))
@@ -151,30 +153,30 @@ def main():
 
 
 def _registrar_jobs(app):
-    """Registra jobs agendados via JobQueue do python-telegram-bot."""
+    """
+    Registra jobs agendados via JobQueue do python-telegram-bot.
+
+    Estrategia: um coordinator roda toda hora e envia notificacoes apenas
+    para usuarios cujas preferencias batem com a hora atual.
+    Isso torna todos os horarios configuráveis por usuario.
+    """
     from bot.notificador import (
-        enviar_diario,
+        coordinator_notificacoes,
         verificar_lancamentos_culturais,
-        verificar_novos_episodios,
     )
 
     tz_br = pytz.timezone("America/Sao_Paulo")
 
-    app.job_queue.run_daily(
-        enviar_diario,
-        time=datetime.time(hour=8, minute=0, tzinfo=tz_br),
-        name="digest_diario",
+    # Coordinator que roda toda hora e despacha para cada usuario conforme prefs
+    app.job_queue.run_repeating(
+        coordinator_notificacoes,
+        interval=datetime.timedelta(hours=1),
+        first=datetime.time(hour=datetime.datetime.now(tz_br).hour, minute=0, tzinfo=tz_br),
+        name="coordinator_notificacoes",
     )
-    logger.info("Job agendado: digest_diario as 08:00 America/Sao_Paulo")
+    logger.info("Job agendado: coordinator_notificacoes (a cada hora)")
 
-    app.job_queue.run_daily(
-        verificar_novos_episodios,
-        time=datetime.time(hour=20, minute=0, tzinfo=tz_br),
-        name="alerta_episodios",
-    )
-    logger.info("Job agendado: alerta_episodios as 20:00 America/Sao_Paulo")
-
-    # Sexta-feira = weekday 4 (0=segunda ... 4=sexta)
+    # Lancamentos culturais: toda sexta 12h (fixo, independe de prefs individuais)
     app.job_queue.run_daily(
         verificar_lancamentos_culturais,
         time=datetime.time(hour=12, minute=0, tzinfo=tz_br),

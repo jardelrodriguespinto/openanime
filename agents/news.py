@@ -1,94 +1,75 @@
 """
 Agente de noticias — busca RSS + DDG, sintetiza com LLM.
-Suporta busca por nicho livre (futebol, saude, cripto, etc.)
+Suporta qualquer topico livre de forma dinamica.
 """
 
 import logging
 import re
 
 from ai.openrouter import openrouter
-from data.news import buscar_noticias, buscar_por_ddg
+from data.news import buscar_noticias, buscar_por_ddg, buscar_por_rss
 from graph.neo4j_client import get_neo4j
 import prompts.news as news_prompt
 
 logger = logging.getLogger(__name__)
 
-_CATEGORIAS_VALIDAS = {
-    "tech", "ia", "mercado", "games", "ciencia",
-    "brasil", "geral", "programacao", "startup",
-}
-
-_KEYWORDS_CATEGORIA: dict[str, list[str]] = {
-    "tech":       ["tech", "tecnologia", "software", "hardware", "apple", "google", "microsoft"],
-    "ia":         ["ia", "ai", "inteligencia artificial", "llm", "chatgpt", "machine learning", "openai"],
-    "mercado":    ["mercado", "economia", "financeiro", "bolsa", "dolar", "inflacao", "emprego"],
-    "games":      ["game", "jogo", "playstation", "xbox", "nintendo", "steam", "fps", "rpg"],
-    "ciencia":    ["ciencia", "pesquisa", "estudo", "descoberta", "fisica", "biologia", "espaco"],
-    "brasil":     ["brasil", "politica", "governo", "congresso", "stf", "eleicao", "brasilia", "lula", "bolsonaro"],
-    "programacao":["programacao", "codigo", "dev", "developer", "python", "javascript", "backend", "frontend"],
-    "startup":    ["startup", "unicornio", "venture", "funding", "seed", "serie a"],
-    "geral":      ["mundo", "internacional", "global", "geral", "noticias gerais", "tudo", "hoje"],
-}
-
-# Palavras de ruido que nao sao o topico em si
-_STOPWORDS_NICHO = {
+# Stopwords de comando — palavras que nao fazem parte do topico
+_STOPWORDS = {
     "noticias", "noticia", "novidades", "novidade", "me", "da", "de", "do",
     "das", "dos", "sobre", "hoje", "agora", "o", "a", "os", "as", "e",
     "em", "no", "na", "nos", "nas", "por", "para", "com", "sem", "tem",
     "quero", "quais", "qual", "que", "recente", "recentes", "ultimo",
     "ultimas", "ultimos", "novo", "novos", "nova", "novas", "top", "mais",
     "principais", "manda", "traz", "busca", "fala", "conta", "mim",
-    # verbos e expressoes de acao que nao sao topico
-    "aconteceu", "acontece", "rolou", "rola", "teve", "tem", "teve",
-    "houve", "sera", "vai", "vou", "estou", "esta", "estao", "sao",
-    "foi", "era", "faz", "fazendo", "quer", "gostei", "ouvi", "vi",
-    "preciso", "procuro", "queria",
+    "aconteceu", "acontece", "rolou", "rola", "teve", "houve", "sera",
+    "vai", "vou", "estou", "esta", "estao", "sao", "foi", "era", "faz",
+    "fazendo", "quer", "gostei", "ouvi", "vi", "preciso", "procuro",
+    "queria", "ver", "saber", "ouvir",
+}
+
+# Mapa de categorias RSS — so para suplementar DDG com fontes confiaveis
+_CATEGORIAS_RSS: dict[str, list[str]] = {
+    "tech":       ["tech", "tecnologia", "software", "hardware", "apple", "google", "microsoft"],
+    "ia":         ["ia", "ai", "inteligencia artificial", "llm", "chatgpt", "machine learning", "openai"],
+    "mercado":    ["mercado", "economia", "financeiro", "bolsa", "dolar", "inflacao", "emprego"],
+    "games":      ["game", "jogo", "playstation", "xbox", "nintendo", "steam"],
+    "ciencia":    ["ciencia", "pesquisa", "estudo", "descoberta", "fisica", "biologia", "espaco"],
+    "brasil":     ["brasil", "politica", "governo", "congresso", "stf", "eleicao", "brasilia", "lula", "bolsonaro"],
+    "programacao":["programacao", "codigo", "dev", "developer", "python", "javascript"],
+    "startup":    ["startup", "unicornio", "venture", "funding"],
+    "geral":      ["mundo", "internacional", "global", "geral", "tudo"],
 }
 
 
-def _detectar_categorias(mensagem: str) -> list[str]:
-    """Detecta categorias predefinidas na mensagem."""
-    msg = mensagem.lower()
-    encontradas = []
+def _extrair_query(mensagem: str) -> str:
+    """
+    Extrai query de busca limpa da mensagem do usuario.
+    Remove ruido de comando e mantem o topico real.
+    Ex: 'me da noticias do mercado de ti hoje' -> 'mercado ti'
+        'o que rolou no futebol' -> 'futebol'
+        'noticias' -> 'noticias hoje'  (fallback)
+    """
+    msg = mensagem.lower().strip()
+    msg = re.sub(r"[^\w\s]", " ", msg)
+    tokens = [t for t in msg.split() if t not in _STOPWORDS and len(t) > 1]
+    query = " ".join(tokens[:6]).strip()
+    return query if len(query) > 2 else "noticias hoje"
 
-    for cat, keywords in _KEYWORDS_CATEGORIA.items():
+
+def _detectar_categorias_rss(query: str) -> list[str]:
+    """
+    Detecta quais categorias RSS suplementam bem a query.
+    Retorna lista vazia se nenhuma categoria se aplica (so DDG).
+    """
+    q = query.lower()
+    encontradas = []
+    for cat, keywords in _CATEGORIAS_RSS.items():
         for kw in keywords:
-            # Word boundary para evitar falso positivo (ex: "ia" em "noticias")
             pattern = r"\b" + re.escape(kw) + r"\b"
-            if re.search(pattern, msg):
+            if re.search(pattern, q):
                 encontradas.append(cat)
                 break
-
-    return list(dict.fromkeys(encontradas)) or ["geral"]
-
-
-def _extrair_topico_nicho(mensagem: str, categorias: list[str]) -> str:
-    """
-    Extrai o topico de nicho da mensagem para busca DDG.
-    Retorna string vazia se a mensagem nao tem topico especifico alem das categorias.
-    Ex: 'noticias de futebol' -> 'futebol'
-        'noticias de seguranca da informacao' -> 'seguranca da informacao'
-        'noticias do brasil' -> '' (ja coberto por categoria)
-    """
-    msg = mensagem.lower()
-
-    # Remove pontuacao
-    msg = re.sub(r"[^\w\s]", " ", msg)
-
-    # Todas as keywords das categorias detectadas — sao o tema, nao nicho livre
-    keywords_cats: set[str] = set()
-    for cat in categorias:
-        for kw in _KEYWORDS_CATEGORIA.get(cat, []):
-            keywords_cats.update(kw.lower().split())
-
-    tokens = [
-        t for t in msg.split()
-        if t not in _STOPWORDS_NICHO and t not in keywords_cats and len(t) > 2
-    ]
-
-    topico = " ".join(tokens[:5]).strip()
-    # Considera nicho valido se sobrou algo alem do ruido
-    return topico if len(topico) > 3 else ""
+    return list(dict.fromkeys(encontradas))
 
 
 def news_node(state: dict) -> dict:
@@ -96,48 +77,54 @@ def news_node(state: dict) -> dict:
     user_id = state.get("user_id", "")
     mensagem = state.get("raw_input", "")
 
-    categorias = _detectar_categorias(mensagem)
-    topico_nicho = _extrair_topico_nicho(mensagem, categorias)
+    query = _extrair_query(mensagem)
+    cats_rss = _detectar_categorias_rss(query)
 
-    # Se apenas "geral" e sem nicho especifico, tenta interesses salvos no perfil
-    if categorias == ["geral"] and not topico_nicho and user_id:
+    # Se nenhuma categoria detectada E query e generica, tenta interesses do perfil
+    if not cats_rss and user_id and query in ("noticias hoje",):
         try:
             neo4j = get_neo4j()
             interesses = neo4j.get_interesses_noticias(user_id)
             if interesses:
-                categorias = interesses
+                cats_rss = interesses
+                # Reconstroi query a partir dos interesses salvos
+                query = " ".join(interesses[:3])
         except Exception as e:
             logger.debug("news: erro ao buscar interesses: %s", e)
 
-    # Salva categorias/nicho no perfil se especificados explicitamente
-    cats_para_salvar = categorias if categorias != ["geral"] else (
-        [topico_nicho] if topico_nicho else []
-    )
-    if cats_para_salvar and user_id:
+    # Salva topico no perfil se nao e query generica
+    if query != "noticias hoje" and user_id:
         try:
             neo4j = get_neo4j()
-            neo4j.salvar_interesses_noticias(user_id, cats_para_salvar)
+            neo4j.salvar_interesses_noticias(user_id, cats_rss or [query])
         except Exception as e:
             logger.debug("news: erro ao salvar interesses: %s", e)
 
-    logger.info("news: user=%s cats=%s nicho=%r", user_id, categorias, topico_nicho)
+    logger.info("news: user=%s query=%r cats_rss=%s", user_id, query, cats_rss)
 
-    # Busca principal via RSS das categorias
-    noticias = buscar_noticias(categorias, query_livre=mensagem, limite=8)
+    # DDG e a fonte primaria — dinamica, cobre qualquer topico
+    query_ddg = f"{query} noticias"
+    noticias_ddg = buscar_por_ddg(query_ddg, limite=6)
+    logger.info("news: DDG '%s' -> %d resultados", query_ddg, len(noticias_ddg))
 
-    # Se tem nicho livre, busca DDG especificamente para ele e prioriza
-    if topico_nicho:
-        query_ddg = f"{topico_nicho} noticias hoje"
-        ddg_nicho = buscar_por_ddg(query_ddg, limite=6)
-        if ddg_nicho:
-            # Nicho DDG vai na frente; RSS vai por tras como contexto
-            urls_ddg = {n["url"] for n in ddg_nicho}
-            rss_sem_dup = [n for n in noticias if n.get("url") not in urls_ddg]
-            noticias = ddg_nicho + rss_sem_dup
-            logger.info("news: nicho '%s' -> %d DDG + %d RSS", topico_nicho, len(ddg_nicho), len(rss_sem_dup))
+    # RSS como suplemento para categorias com feeds confiaveis
+    noticias_rss = []
+    if cats_rss:
+        noticias_rss = buscar_por_rss(cats_rss, limite=6)
+        logger.info("news: RSS cats=%s -> %d resultados", cats_rss, len(noticias_rss))
 
-    noticias = noticias[:10]
-    label_cats = [topico_nicho] if topico_nicho and categorias == ["geral"] else categorias
+    # Merge: DDG na frente (mais fresco), RSS como contexto sem duplicatas
+    urls_ddg = {n["url"] for n in noticias_ddg if n.get("url")}
+    rss_sem_dup = [n for n in noticias_rss if n.get("url") not in urls_ddg]
+    noticias = (noticias_ddg + rss_sem_dup)[:10]
+
+    # Fallback se ambos falharam
+    if not noticias:
+        cats_fallback = cats_rss or ["geral"]
+        noticias = buscar_por_rss(cats_fallback, limite=8)
+        logger.warning("news: DDG e RSS vazios, fallback RSS cats=%s -> %d", cats_fallback, len(noticias))
+
+    label_cats = cats_rss if cats_rss else [query]
     messages = news_prompt.build_messages(noticias, label_cats, query=mensagem)
 
     try:
@@ -154,5 +141,5 @@ def news_node(state: dict) -> dict:
         else:
             response = f"Nao consegui buscar noticias de {', '.join(label_cats)} agora. Tenta em instantes!"
 
-    logger.info("news: resposta gerada | user=%s cats=%s nicho=%r", user_id, categorias, topico_nicho)
+    logger.info("news: resposta gerada | user=%s query=%r cats=%s", user_id, query, cats_rss)
     return {"response": response}

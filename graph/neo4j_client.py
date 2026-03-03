@@ -1497,6 +1497,89 @@ class Neo4jClient:
         with self.driver.session() as session:
             session.run(cypher, tid=telegram_id, categorias=categorias)
 
+    # ─── Preferencias de notificacao ─────────────────────────────────────────
+
+    def get_preferencias_notificacao(self, telegram_id: str) -> dict:
+        """
+        Retorna preferencias de notificacao do usuario.
+        Defaults: digest ativo 8h, episodios ativo 20h, vagas/noticias desativados.
+        """
+        cypher = """
+        MATCH (u:Usuario {telegram_id: $tid})
+        RETURN
+            coalesce(u.notif_digest_ativo, true)           AS digest_ativo,
+            coalesce(u.notif_digest_hora, 8)               AS digest_hora,
+            coalesce(u.notif_episodios_ativo, true)        AS episodios_ativo,
+            coalesce(u.notif_episodios_hora, 20)           AS episodios_hora,
+            coalesce(u.notif_vagas_ativo, false)           AS vagas_ativo,
+            coalesce(u.notif_vagas_hora, 9)                AS vagas_hora,
+            coalesce(u.notif_noticias_ativo, false)        AS noticias_ativo,
+            coalesce(u.notif_noticias_hora, 8)             AS noticias_hora
+        """
+        with self.driver.session() as session:
+            result = session.run(cypher, tid=telegram_id)
+            record = result.single()
+            if not record:
+                return {
+                    "digest_ativo": True, "digest_hora": 8,
+                    "episodios_ativo": True, "episodios_hora": 20,
+                    "vagas_ativo": False, "vagas_hora": 9,
+                    "noticias_ativo": False, "noticias_hora": 8,
+                }
+            return dict(record)
+
+    def salvar_preferencias_notificacao(self, telegram_id: str, prefs: dict) -> None:
+        """Salva preferencias de notificacao do usuario."""
+        cypher = """
+        MERGE (u:Usuario {telegram_id: $tid})
+        SET
+            u.notif_digest_ativo     = $digest_ativo,
+            u.notif_digest_hora      = $digest_hora,
+            u.notif_episodios_ativo  = $episodios_ativo,
+            u.notif_episodios_hora   = $episodios_hora,
+            u.notif_vagas_ativo      = $vagas_ativo,
+            u.notif_vagas_hora       = $vagas_hora,
+            u.notif_noticias_ativo   = $noticias_ativo,
+            u.notif_noticias_hora    = $noticias_hora
+        """
+        with self.driver.session() as session:
+            session.run(
+                cypher,
+                tid=telegram_id,
+                digest_ativo=prefs.get("digest_ativo", True),
+                digest_hora=int(prefs.get("digest_hora", 8)),
+                episodios_ativo=prefs.get("episodios_ativo", True),
+                episodios_hora=int(prefs.get("episodios_hora", 20)),
+                vagas_ativo=prefs.get("vagas_ativo", False),
+                vagas_hora=int(prefs.get("vagas_hora", 9)),
+                noticias_ativo=prefs.get("noticias_ativo", False),
+                noticias_hora=int(prefs.get("noticias_hora", 8)),
+            )
+
+    def get_usuarios_por_hora_notificacao(self, hora: int, tipo: str) -> list[str]:
+        """
+        Retorna user_ids que devem receber notificacao do tipo/hora especificado.
+        tipo: 'digest' | 'episodios' | 'vagas' | 'noticias'
+        """
+        campo_ativo = f"notif_{tipo}_ativo"
+        campo_hora = f"notif_{tipo}_hora"
+        cypher = f"""
+        MATCH (u:Usuario)
+        WHERE coalesce(u.{campo_ativo}, $default_ativo) = true
+          AND coalesce(u.{campo_hora}, $default_hora) = $hora
+        RETURN u.telegram_id AS tid
+        """
+        defaults_ativo = {"digest": True, "episodios": True, "vagas": False, "noticias": False}
+        defaults_hora = {"digest": 8, "episodios": 20, "vagas": 9, "noticias": 8}
+        with self.driver.session() as session:
+            result = session.run(
+                cypher,
+                hora=hora,
+                default_ativo=defaults_ativo.get(tipo, False),
+                default_hora=defaults_hora.get(tipo, 8),
+            )
+            return [r["tid"] for r in result if r["tid"]]
+
     # ─── Documentos ──────────────────────────────────────────────────────────
 
     def registrar_documento(self, telegram_id: str, doc_id: str, nome: str, tipo: str) -> None:

@@ -500,6 +500,129 @@ async def verificar_novos_episodios(context: CallbackContext) -> None:
     logger.info("Notificador episodios: concluido - enviados=%d", enviados)
 
 
+async def coordinator_notificacoes(context: CallbackContext) -> None:
+    """
+    Roda a cada hora. Verifica quais usuarios querem notificacao nesta hora
+    e envia os tipos correspondentes (digest, episodios, vagas, noticias).
+    """
+    import pytz
+    hora_atual = datetime.datetime.now(pytz.timezone("America/Sao_Paulo")).hour
+    logger.info("Coordinator notificacoes: hora=%d", hora_atual)
+
+    try:
+        neo4j = get_neo4j()
+    except Exception as e:
+        logger.error("Coordinator: erro Neo4j: %s", e)
+        return
+
+    # ── Digest (novidades anime/manga) ────────────────────────────────────────
+    ids_digest = neo4j.get_usuarios_por_hora_notificacao(hora_atual, "digest")
+    if ids_digest:
+        logger.info("Coordinator: digest para %d usuarios na hora %d", len(ids_digest), hora_atual)
+        temporada, novidades_web, novidades_reddit = await asyncio.to_thread(_coletar_dados_diarios)
+        tvmaze_cache: dict[str, list[dict]] = {}
+        for user_id in ids_digest:
+            try:
+                await _enviar_digest_usuario(
+                    context=context,
+                    neo4j=neo4j,
+                    user_id=user_id,
+                    temporada=temporada,
+                    novidades_web=novidades_web,
+                    novidades_reddit=novidades_reddit,
+                    tvmaze_cache=tvmaze_cache,
+                )
+                logger.info("Coordinator: digest enviado user=%s", user_id)
+            except Exception as e:
+                logger.warning("Coordinator: erro digest user=%s: %s", user_id, e)
+
+    # ── Episodios ─────────────────────────────────────────────────────────────
+    ids_ep = neo4j.get_usuarios_por_hora_notificacao(hora_atual, "episodios")
+    if ids_ep:
+        logger.info("Coordinator: episodios para %d usuarios na hora %d", len(ids_ep), hora_atual)
+        # Reusar logica do verificar_novos_episodios mas so para esses usuarios
+        tvmaze_cache_ep: dict[str, list[dict]] = {}
+        for user_id in ids_ep:
+            try:
+                titulos = neo4j.get_progresso_ativo(user_id)
+                if not titulos:
+                    continue
+                alertas = []
+                seen = set()
+                for titulo in titulos[:6]:
+                    if titulo not in tvmaze_cache_ep:
+                        try:
+                            from data.tvmaze import tvmaze
+                            tvmaze_cache_ep[titulo] = tvmaze.get_upcoming_episodes(query=titulo, days=2, limit=1)
+                        except Exception:
+                            tvmaze_cache_ep[titulo] = []
+                    for ep in tvmaze_cache_ep[titulo]:
+                        key = f"{ep.get('show_name')}|{ep.get('airdate')}|{ep.get('season')}|{ep.get('episode')}"
+                        if key not in seen:
+                            seen.add(key)
+                            alertas.append(ep)
+                if not alertas:
+                    continue
+                alertas.sort(key=lambda x: x.get("airdate") or "")
+                linhas = ["<b>Episodios chegando (proximos 2 dias):</b>\n"]
+                for ep in alertas[:4]:
+                    show = ep.get("show_name", "?")
+                    airdate = ep.get("airdate", "?")
+                    season = ep.get("season")
+                    episode = ep.get("episode")
+                    ep_label = f" S{season:02d}E{episode:02d}" if season and episode else ""
+                    linhas.append(f"- <b>{_escape_html(show)}</b>{ep_label} · {_escape_html(airdate)}")
+                await context.bot.send_message(chat_id=user_id, text="\n".join(linhas), parse_mode="HTML")
+            except Exception as e:
+                logger.warning("Coordinator: erro episodios user=%s: %s", user_id, e)
+
+    # ── Vagas ─────────────────────────────────────────────────────────────────
+    ids_vagas = neo4j.get_usuarios_por_hora_notificacao(hora_atual, "vagas")
+    if ids_vagas:
+        logger.info("Coordinator: vagas para %d usuarios na hora %d", len(ids_vagas), hora_atual)
+        for user_id in ids_vagas:
+            try:
+                from agents.jobs import jobs_node
+                state = {"user_id": user_id, "raw_input": "vagas para mim hoje", "intent": "vagas"}
+                resultado = await asyncio.to_thread(jobs_node, state)
+                texto_vagas = resultado.get("response", "")
+                if texto_vagas:
+                    await context.bot.send_message(
+                        chat_id=user_id,
+                        text=f"<b>Vagas do dia para voce:</b>\n\n{texto_vagas}",
+                        parse_mode="HTML",
+                    )
+            except Exception as e:
+                logger.warning("Coordinator: erro vagas user=%s: %s", user_id, e)
+
+    # ── Noticias personalizadas ───────────────────────────────────────────────
+    ids_noticias = neo4j.get_usuarios_por_hora_notificacao(hora_atual, "noticias")
+    if ids_noticias:
+        logger.info("Coordinator: noticias para %d usuarios na hora %d", len(ids_noticias), hora_atual)
+        for user_id in ids_noticias:
+            try:
+                interesses = neo4j.get_interesses_noticias(user_id)
+                query = " ".join(interesses[:3]) if interesses else "noticias hoje"
+                from data.news import buscar_por_ddg
+                noticias = await asyncio.to_thread(buscar_por_ddg, f"{query} noticias", 5)
+                if not noticias:
+                    continue
+                linhas = [f"<b>Noticias de {', '.join(interesses[:3]) if interesses else 'hoje'}:</b>\n"]
+                for n in noticias[:5]:
+                    titulo = _escape_html(n.get("titulo", ""))
+                    url = n.get("url", "")
+                    safe_link = _format_html_link(titulo, url) if url else titulo
+                    linhas.append(f"- {safe_link}")
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text="\n".join(linhas),
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+            except Exception as e:
+                logger.warning("Coordinator: erro noticias user=%s: %s", user_id, e)
+
+
 async def verificar_lancamentos_culturais(context: CallbackContext) -> None:
     """
     Job semanal (sexta 12h) - notifica usuarios sobre novos lancamentos de artistas
