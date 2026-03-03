@@ -52,6 +52,7 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("neo4j").setLevel(logging.WARNING)
+logging.getLogger("neo4j.notifications").setLevel(logging.ERROR)
 logging.getLogger("apscheduler").setLevel(logging.INFO)
 
 logger = logging.getLogger(__name__)
@@ -189,4 +190,3 @@ def _registrar_jobs(app):
 
 if __name__ == "__main__":
     main()
-

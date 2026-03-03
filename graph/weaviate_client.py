@@ -1,5 +1,6 @@
-import os
 import logging
+import os
+
 import weaviate
 
 logger = logging.getLogger(__name__)
@@ -20,19 +21,19 @@ DOCUMENT_SCHEMA = {
         }
     },
     "properties": [
-        {"name": "user_id",     "dataType": ["text"], "moduleConfig": {"text2vec-openai": {"skip": True}}},
-        {"name": "doc_id",      "dataType": ["text"], "moduleConfig": {"text2vec-openai": {"skip": True}}},
-        {"name": "nome",        "dataType": ["text"], "moduleConfig": {"text2vec-openai": {"skip": True}}},
-        {"name": "tipo",        "dataType": ["text"], "moduleConfig": {"text2vec-openai": {"skip": True}}},
-        {"name": "conteudo",    "dataType": ["text"]},
-        {"name": "resumo",      "dataType": ["text"], "moduleConfig": {"text2vec-openai": {"skip": True}}},
+        {"name": "user_id", "dataType": ["text"], "moduleConfig": {"text2vec-openai": {"skip": True}}},
+        {"name": "doc_id", "dataType": ["text"], "moduleConfig": {"text2vec-openai": {"skip": True}}},
+        {"name": "nome", "dataType": ["text"], "moduleConfig": {"text2vec-openai": {"skip": True}}},
+        {"name": "tipo", "dataType": ["text"], "moduleConfig": {"text2vec-openai": {"skip": True}}},
+        {"name": "conteudo", "dataType": ["text"]},
+        {"name": "resumo", "dataType": ["text"], "moduleConfig": {"text2vec-openai": {"skip": True}}},
         {"name": "data_upload", "dataType": ["text"], "moduleConfig": {"text2vec-openai": {"skip": True}}},
     ],
 }
 
 ANIME_SCHEMA = {
     "class": ANIME_CLASS,
-    "description": "Anime com embedding da sinopse para busca semântica",
+    "description": "Anime com embedding da sinopse para busca semantica",
     "vectorizer": "text2vec-openai",
     "moduleConfig": {
         "text2vec-openai": {
@@ -55,7 +56,7 @@ ANIME_SCHEMA = {
 
 REVIEW_SCHEMA = {
     "class": REVIEW_CLASS,
-    "description": "Reviews e discussões de anime",
+    "description": "Reviews e discussoes de anime",
     "vectorizer": "text2vec-openai",
     "moduleConfig": {
         "text2vec-openai": {
@@ -74,22 +75,34 @@ REVIEW_SCHEMA = {
 
 
 class WeaviateClient:
-    """Conexão e busca semântica no Weaviate."""
+    """Conexao e busca semantica no Weaviate."""
 
     def __init__(self):
         url = os.getenv("WEAVIATE_URL", "http://weaviate:8080")
         self.client = weaviate.Client(url)
         logger.info("WeaviateClient conectado a %s", url)
 
+    @staticmethod
+    def _log_weaviate_error(context: str, exc: Exception):
+        logger.error("Weaviate erro em %s: %s", context, exc)
+
     def setup_schema(self):
-        """Cria schema se não existir."""
-        existing = {c["class"] for c in self.client.schema.get().get("classes", [])}
+        """Cria schema se nao existir."""
+        try:
+            existing = {c["class"] for c in self.client.schema.get().get("classes", [])}
+        except Exception as exc:
+            self._log_weaviate_error("schema.get", exc)
+            return
+
         for schema in [ANIME_SCHEMA, REVIEW_SCHEMA, DOCUMENT_SCHEMA]:
-            if schema["class"] not in existing:
+            if schema["class"] in existing:
+                logger.debug("Weaviate: classe %s ja existe", schema["class"])
+                continue
+            try:
                 self.client.schema.create_class(schema)
                 logger.info("Weaviate: classe %s criada", schema["class"])
-            else:
-                logger.debug("Weaviate: classe %s já existe", schema["class"])
+            except Exception as exc:
+                self._log_weaviate_error(f"schema.create_class:{schema['class']}", exc)
 
     def upsert_anime(self, anime: dict):
         """Insere ou atualiza anime no Weaviate."""
@@ -105,28 +118,29 @@ class WeaviateClient:
             "nota": anime.get("nota_mal", 0.0),
         }
 
-        # Verifica se já existe — precisa pedir _additional para ter o uuid
-        result = (
-            self.client.query
-            .get(ANIME_CLASS, ["anime_id"])
-            .with_where({"path": ["anime_id"], "operator": "Equal", "valueText": anime_id})
-            .with_additional(["id"])
-            .with_limit(1)
-            .do()
-        )
-        existing = result.get("data", {}).get("Get", {}).get(ANIME_CLASS, [])
+        try:
+            result = (
+                self.client.query
+                .get(ANIME_CLASS, ["anime_id"])
+                .with_where({"path": ["anime_id"], "operator": "Equal", "valueText": anime_id})
+                .with_additional(["id"])
+                .with_limit(1)
+                .do()
+            )
+            existing = result.get("data", {}).get("Get", {}).get(ANIME_CLASS, [])
 
-        if existing:
-            uuid = existing[0].get("_additional", {}).get("id")
-            if uuid:
-                self.client.data_object.update(data, ANIME_CLASS, uuid)
-                logger.debug("Weaviate: anime atualizado id=%s", anime_id)
-            else:
+            if existing:
+                uuid = existing[0].get("_additional", {}).get("id")
+                if uuid:
+                    self.client.data_object.update(data, ANIME_CLASS, uuid)
+                    logger.debug("Weaviate: anime atualizado id=%s", anime_id)
+                    return
                 logger.warning("Weaviate: anime existe mas sem uuid, recriando id=%s", anime_id)
-                self.client.data_object.create(data, ANIME_CLASS)
-        else:
+
             self.client.data_object.create(data, ANIME_CLASS)
             logger.debug("Weaviate: anime inserido titulo=%s", data["titulo"])
+        except Exception as exc:
+            self._log_weaviate_error("upsert_anime", exc)
 
     def upsert_midia(self, payload: dict):
         """Insere ou atualiza qualquer midia (filme, serie, dorama) no Weaviate."""
@@ -138,25 +152,28 @@ class WeaviateClient:
         limit: int = 5,
         generos_preferidos: list[str] | None = None,
     ) -> list[dict]:
-        """Busca animes por similaridade semântica, com boost opcional por gêneros favoritos."""
-        logger.info("Weaviate busca semântica: query='%s' limit=%d", query, limit)
+        """Busca animes por similaridade semantica, com boost opcional por generos favoritos."""
+        logger.info("Weaviate busca semantica: query='%s' limit=%d", query, limit)
 
-        # Se tiver gêneros preferidos, combina query + gêneros para melhor resultado
         concepts = [query]
         if generos_preferidos:
             concepts.append(" ".join(generos_preferidos[:3]))
 
-        result = (
-            self.client.query
-            .get(ANIME_CLASS, ["titulo", "synopsis", "generos", "temas", "ano", "nota"])
-            .with_near_text({"concepts": concepts})
-            .with_limit(limit)
-            .with_additional(["certainty"])
-            .do()
-        )
-        items = result.get("data", {}).get("Get", {}).get(ANIME_CLASS, []) or []
-        logger.info("Weaviate: %d resultados para '%s'", len(items), query)
-        return items
+        try:
+            result = (
+                self.client.query
+                .get(ANIME_CLASS, ["titulo", "synopsis", "generos", "temas", "ano", "nota"])
+                .with_near_text({"concepts": concepts})
+                .with_limit(limit)
+                .with_additional(["certainty"])
+                .do()
+            )
+            items = result.get("data", {}).get("Get", {}).get(ANIME_CLASS, []) or []
+            logger.info("Weaviate: %d resultados para '%s'", len(items), query)
+            return items
+        except Exception as exc:
+            self._log_weaviate_error("busca_semantica", exc)
+            return []
 
     def inserir_review(self, anime_id: str, texto: str, fonte: str, sentimento: str = ""):
         """Insere review de anime."""
@@ -166,23 +183,31 @@ class WeaviateClient:
             "fonte": fonte,
             "sentimento": sentimento,
         }
-        self.client.data_object.create(data, REVIEW_CLASS)
-        logger.debug("Weaviate: review inserida anime_id=%s fonte=%s", anime_id, fonte)
+        try:
+            self.client.data_object.create(data, REVIEW_CLASS)
+            logger.debug("Weaviate: review inserida anime_id=%s fonte=%s", anime_id, fonte)
+        except Exception as exc:
+            self._log_weaviate_error("inserir_review", exc)
 
     def busca_reviews(self, query: str, limit: int = 5) -> list[dict]:
         """Busca reviews por similaridade."""
-        result = (
-            self.client.query
-            .get(REVIEW_CLASS, ["anime_id", "texto", "fonte", "sentimento"])
-            .with_near_text({"concepts": [query]})
-            .with_limit(limit)
-            .do()
-        )
-        return result.get("data", {}).get("Get", {}).get(REVIEW_CLASS, [])
+        try:
+            result = (
+                self.client.query
+                .get(REVIEW_CLASS, ["anime_id", "texto", "fonte", "sentimento"])
+                .with_near_text({"concepts": [query]})
+                .with_limit(limit)
+                .do()
+            )
+            return result.get("data", {}).get("Get", {}).get(REVIEW_CLASS, [])
+        except Exception as exc:
+            self._log_weaviate_error("busca_reviews", exc)
+            return []
 
     def upsert_documento(self, doc: dict) -> None:
         """Insere ou atualiza documento do usuario no Weaviate."""
         from datetime import datetime
+
         doc_id = str(doc.get("doc_id", ""))
         data = {
             "user_id": str(doc.get("user_id", "")),
@@ -194,51 +219,63 @@ class WeaviateClient:
             "data_upload": datetime.utcnow().isoformat(),
         }
 
-        result = (
-            self.client.query
-            .get(DOCUMENT_CLASS, ["doc_id"])
-            .with_where({"path": ["doc_id"], "operator": "Equal", "valueText": doc_id})
-            .with_additional(["id"])
-            .with_limit(1)
-            .do()
-        )
-        existing = result.get("data", {}).get("Get", {}).get(DOCUMENT_CLASS, [])
+        try:
+            result = (
+                self.client.query
+                .get(DOCUMENT_CLASS, ["doc_id"])
+                .with_where({"path": ["doc_id"], "operator": "Equal", "valueText": doc_id})
+                .with_additional(["id"])
+                .with_limit(1)
+                .do()
+            )
+            existing = result.get("data", {}).get("Get", {}).get(DOCUMENT_CLASS, [])
 
-        if existing:
-            uuid = existing[0].get("_additional", {}).get("id")
-            if uuid:
-                self.client.data_object.update(data, DOCUMENT_CLASS, uuid)
-                return
-        self.client.data_object.create(data, DOCUMENT_CLASS)
-        logger.debug("Weaviate: documento inserido doc_id=%s", doc_id)
+            if existing:
+                uuid = existing[0].get("_additional", {}).get("id")
+                if uuid:
+                    self.client.data_object.update(data, DOCUMENT_CLASS, uuid)
+                    return
+
+            self.client.data_object.create(data, DOCUMENT_CLASS)
+            logger.debug("Weaviate: documento inserido doc_id=%s", doc_id)
+        except Exception as exc:
+            self._log_weaviate_error("upsert_documento", exc)
 
     def busca_documento(self, user_id: str, query: str, limit: int = 3) -> list[dict]:
         """Busca documentos do usuario por similaridade semantica."""
-        result = (
-            self.client.query
-            .get(DOCUMENT_CLASS, ["user_id", "doc_id", "nome", "tipo", "conteudo", "resumo"])
-            .with_near_text({"concepts": [query]})
-            .with_where({"path": ["user_id"], "operator": "Equal", "valueText": str(user_id)})
-            .with_limit(limit)
-            .do()
-        )
-        return result.get("data", {}).get("Get", {}).get(DOCUMENT_CLASS, []) or []
+        try:
+            result = (
+                self.client.query
+                .get(DOCUMENT_CLASS, ["user_id", "doc_id", "nome", "tipo", "conteudo", "resumo"])
+                .with_near_text({"concepts": [query]})
+                .with_where({"path": ["user_id"], "operator": "Equal", "valueText": str(user_id)})
+                .with_limit(limit)
+                .do()
+            )
+            return result.get("data", {}).get("Get", {}).get(DOCUMENT_CLASS, []) or []
+        except Exception as exc:
+            self._log_weaviate_error("busca_documento", exc)
+            return []
 
     def total_animes(self) -> int:
-        result = (
-            self.client.query
-            .aggregate(ANIME_CLASS)
-            .with_meta_count()
-            .do()
-        )
-        count = (
-            result.get("data", {})
-            .get("Aggregate", {})
-            .get(ANIME_CLASS, [{}])[0]
-            .get("meta", {})
-            .get("count", 0)
-        )
-        return count
+        try:
+            result = (
+                self.client.query
+                .aggregate(ANIME_CLASS)
+                .with_meta_count()
+                .do()
+            )
+            count = (
+                result.get("data", {})
+                .get("Aggregate", {})
+                .get(ANIME_CLASS, [{}])[0]
+                .get("meta", {})
+                .get("count", 0)
+            )
+            return count
+        except Exception as exc:
+            self._log_weaviate_error("total_animes", exc)
+            return 0
 
 
 # Singleton

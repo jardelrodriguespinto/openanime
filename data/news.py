@@ -8,8 +8,8 @@ import urllib.parse
 from datetime import datetime, timezone
 
 import feedparser
+import httpx
 from bs4 import BeautifulSoup
-from scrapling import Fetcher, DynamicFetcher
 
 logger = logging.getLogger(__name__)
 
@@ -202,15 +202,16 @@ def buscar_por_google_news(query: str, limite: int = 8) -> list[dict]:
 
 def buscar_por_playwright(query: str, limite: int = 5) -> list[dict]:
     """
-    Fallback com DynamicFetcher (Scrapling/Playwright): scrapa Google News quando feedparser falha.
+    Fallback via HTML: scrapa Google News quando feedparser falha.
     Mais lento mas mais robusto para queries exoticas.
     """
     try:
         q_enc = urllib.parse.quote(query)
         search_url = f"https://news.google.com/search?q={q_enc}&hl=pt-BR&gl=BR&ceid=BR:pt-419"
 
-        page = DynamicFetcher.get(search_url, timeout=20000)
-        soup = BeautifulSoup(page.html, "html.parser")
+        resp = httpx.get(search_url, headers=_HTTP_HEADERS, timeout=20, follow_redirects=True)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
         resultados = []
         vistos: set[str] = set()
 
@@ -241,11 +242,11 @@ def buscar_por_playwright(query: str, limite: int = 5) -> list[dict]:
             if len(resultados) >= limite:
                 break
 
-        logger.info("news DynamicFetcher: '%s' -> %d resultados", query, len(resultados))
+        logger.info("news HTML fallback: '%s' -> %d resultados", query, len(resultados))
         return resultados
 
     except Exception as e:
-        logger.warning("news DynamicFetcher erro: %s", e)
+        logger.warning("news HTML fallback erro: %s", e)
         return []
 
 
@@ -256,14 +257,14 @@ def buscar_por_ddg(query: str, limite: int = 5) -> list[dict]:
     """
     resultados: list[dict] = []
     try:
-        page = Fetcher.post(
+        resp = httpx.post(
             "https://lite.duckduckgo.com/lite/",
             data={"q": query},
-            stealthy_headers=True,
-            impersonate='chrome124',
+            headers=_HTTP_HEADERS,
             timeout=20,
         )
-        soup = BeautifulSoup(page.html, "html.parser")
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
         seen: set[str] = set()
 
         for a in soup.find_all("a", href=True):

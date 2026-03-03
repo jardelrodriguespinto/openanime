@@ -14,7 +14,31 @@ from urllib.parse import quote_plus, urlencode
 import feedparser
 import httpx
 from bs4 import BeautifulSoup
-from scrapling import Fetcher
+try:
+    from scrapling import Fetcher
+except Exception:
+    class _FetcherResponse:
+        def __init__(self, html: str):
+            self.html = html
+
+    class Fetcher:
+        """Fallback minimo compatível com a API usada no projeto."""
+
+        @staticmethod
+        def get(url: str, **kwargs):
+            timeout = kwargs.get("timeout", 15)
+            headers = kwargs.get("headers") or _HEADERS
+            resp = httpx.get(url, headers=headers, timeout=timeout, follow_redirects=True)
+            resp.raise_for_status()
+            return _FetcherResponse(resp.text)
+
+        @staticmethod
+        def post(url: str, data=None, **kwargs):
+            timeout = kwargs.get("timeout", 15)
+            headers = kwargs.get("headers") or _HEADERS
+            resp = httpx.post(url, data=data, headers=headers, timeout=timeout, follow_redirects=True)
+            resp.raise_for_status()
+            return _FetcherResponse(resp.text)
 
 logger = logging.getLogger(__name__)
 
