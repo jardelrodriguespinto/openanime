@@ -603,8 +603,8 @@ async def coordinator_notificacoes(context: CallbackContext) -> None:
             try:
                 interesses = neo4j.get_interesses_noticias(user_id)
                 query = " ".join(interesses[:3]) if interesses else "noticias hoje"
-                from data.news import buscar_por_ddg
-                noticias = await asyncio.to_thread(buscar_por_ddg, f"{query} noticias", 5)
+                from data.news import buscar_por_google_news
+                noticias = await asyncio.to_thread(buscar_por_google_news, query, 5)
                 if not noticias:
                     continue
                 linhas = [f"<b>Noticias de {', '.join(interesses[:3]) if interesses else 'hoje'}:</b>\n"]

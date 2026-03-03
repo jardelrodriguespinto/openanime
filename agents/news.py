@@ -7,7 +7,7 @@ import logging
 import re
 
 from ai.openrouter import openrouter
-from data.news import buscar_noticias, buscar_por_ddg, buscar_por_rss
+from data.news import buscar_noticias, buscar_por_ddg, buscar_por_google_news, buscar_por_rss
 from graph.neo4j_client import get_neo4j
 import prompts.news as news_prompt
 
@@ -102,10 +102,14 @@ def news_node(state: dict) -> dict:
 
     logger.info("news: user=%s query=%r cats_rss=%s", user_id, query, cats_rss)
 
-    # DDG e a fonte primaria — dinamica, cobre qualquer topico
-    query_ddg = f"{query} noticias"
-    noticias_ddg = buscar_por_ddg(query_ddg, limite=6)
-    logger.info("news: DDG '%s' -> %d resultados", query_ddg, len(noticias_ddg))
+    # Google News e a fonte primaria — retorna artigos reais, nao portais
+    noticias_gn = buscar_por_google_news(query, limite=7)
+    logger.info("news: GoogleNews '%s' -> %d resultados", query, len(noticias_gn))
+
+    # Fallback para DDG se Google News nao retornou nada
+    if not noticias_gn:
+        noticias_gn = buscar_por_ddg(f"{query} noticias", limite=6)
+        logger.info("news: DDG fallback '%s' -> %d resultados", query, len(noticias_gn))
 
     # RSS como suplemento para categorias com feeds confiaveis
     noticias_rss = []
@@ -113,16 +117,16 @@ def news_node(state: dict) -> dict:
         noticias_rss = buscar_por_rss(cats_rss, limite=6)
         logger.info("news: RSS cats=%s -> %d resultados", cats_rss, len(noticias_rss))
 
-    # Merge: DDG na frente (mais fresco), RSS como contexto sem duplicatas
-    urls_ddg = {n["url"] for n in noticias_ddg if n.get("url")}
-    rss_sem_dup = [n for n in noticias_rss if n.get("url") not in urls_ddg]
-    noticias = (noticias_ddg + rss_sem_dup)[:10]
+    # Merge: Google News na frente (mais fresco), RSS como contexto sem duplicatas
+    urls_gn = {n["url"] for n in noticias_gn if n.get("url")}
+    rss_sem_dup = [n for n in noticias_rss if n.get("url") not in urls_gn]
+    noticias = (noticias_gn + rss_sem_dup)[:10]
 
-    # Fallback se ambos falharam
+    # Fallback se ambas fontes falharam
     if not noticias:
         cats_fallback = cats_rss or ["geral"]
         noticias = buscar_por_rss(cats_fallback, limite=8)
-        logger.warning("news: DDG e RSS vazios, fallback RSS cats=%s -> %d", cats_fallback, len(noticias))
+        logger.warning("news: Google News e RSS vazios, fallback RSS cats=%s -> %d", cats_fallback, len(noticias))
 
     label_cats = cats_rss if cats_rss else [query]
     messages = news_prompt.build_messages(noticias, label_cats, query=mensagem)
