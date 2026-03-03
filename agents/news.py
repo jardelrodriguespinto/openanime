@@ -37,7 +37,10 @@ def _detectar_categorias(mensagem: str) -> list[str]:
 
     for cat, keywords in _KEYWORDS_CATEGORIA.items():
         for kw in keywords:
-            if kw in msg:
+            # Usa word boundary para evitar falso positivo
+            # ex: "ia" nao deve casar em "noticias" ou "politica"
+            pattern = r"\b" + re.escape(kw) + r"\b"
+            if re.search(pattern, msg):
                 encontradas.append(cat)
                 break
 
