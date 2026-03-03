@@ -603,6 +603,28 @@ async def coordinator_notificacoes(context: CallbackContext) -> None:
             except Exception as e:
                 logger.warning("Coordinator: erro vagas user=%s: %s", user_id, e)
 
+    # ── Lembretes — dispara em hora:minuto exato ──────────────────────────────
+    try:
+        import pytz as _pytz
+        agora_iso = datetime.datetime.now(_pytz.timezone("America/Sao_Paulo")).strftime("%Y-%m-%dT%H:%M:%S")
+        lembretes_disparar = neo4j.get_lembretes_para_disparar(agora_iso)
+        for lem in lembretes_disparar:
+            uid = lem.get("user_id")
+            texto = lem.get("texto", "Lembrete!")
+            lid = lem.get("id")
+            try:
+                await context.bot.send_message(
+                    chat_id=uid,
+                    text=f"⏰ <b>Lembrete:</b> {_escape_html(texto)}",
+                    parse_mode="HTML",
+                )
+                neo4j.marcar_lembrete_disparado(lid)
+                logger.info("Coordinator: lembrete disparado user=%s id=%s", uid, lid)
+            except Exception as e:
+                logger.warning("Coordinator: erro lembrete user=%s: %s", uid, e)
+    except Exception as e:
+        logger.warning("Coordinator: erro ao verificar lembretes: %s", e)
+
     # ── Noticias personalizadas — hora:minuto exato ───────────────────────────
     ids_noticias = neo4j.get_usuarios_noticias_agendadas(hora_atual, minuto_atual)
     if ids_noticias:

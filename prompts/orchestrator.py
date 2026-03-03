@@ -13,6 +13,12 @@ Classifique a mensagem em UMA dessas categorias:
 - vaga: buscar vagas de emprego, oportunidades de trabalho, recomendação de vagas
 - curriculo_ats: gerar currículo ATS, montar currículo, personalizar currículo para vaga específica
 - candidatura: se candidatar a vaga, candidatura automática, minhas candidaturas, pipeline de vagas
+- lembrete: criar lembrete, me lembra de X às Y horas, cancelar lembrete, meus lembretes
+- financas: registrar gasto, gastei X reais, quanto gastei, resumo mensal, finanças pessoais
+- ranking: meu top 10, melhores que assisti, ranking por gênero/ano/tipo, ranking pessoal
+- treino: registrei treino, fiz supino X séries, PR pessoal, progressão de carga, meus treinos
+- estudos: criar flashcard, revisar flashcards, resumir texto, meu progresso de estudos
+- anotacoes: anota isso, minhas notas, busca nas notas, salva nota, mini Obsidian, ideias anotadas
 
 Exemplos:
 "me recomenda algo parecido com solo leveling" → recomendacao
@@ -98,8 +104,28 @@ Exemplos:
 "minhas candidaturas" → candidatura
 "onde me candidatei?" → candidatura
 "status das minhas candidaturas" → candidatura
+"me lembra de tomar remédio às 22h" → lembrete
+"cria um lembrete para amanhã às 9h" → lembrete
+"cancela meu lembrete" → lembrete
+"meus lembretes ativos" → lembrete
+"gastei 50 reais no ifood" → financas
+"quanto gastei esse mês?" → financas
+"resumo mensal de gastos" → financas
+"meu top 10 de todos os tempos" → ranking
+"melhores animes que assisti em 2023" → ranking
+"ranking por gênero shonen" → ranking
+"fiz supino 3x12 com 60kg" → treino
+"como tá minha progressão no agachamento?" → treino
+"meu PR no supino" → treino
+"cria um flashcard sobre POO" → estudos
+"quero revisar meus flashcards" → estudos
+"resume esse texto pra mim" → estudos
+"anota que preciso estudar LangGraph" → anotacoes
+"minhas notas sobre python" → anotacoes
+"busca nas notas sobre trabalho" → anotacoes
+"salva essa ideia: ..." → anotacoes
 
-Responda APENAS com uma palavra: conversa, recomendacao, analise, busca, perfil, maratona, noticias, documento, perfil_pro, vaga, curriculo_ats ou candidatura.
+Responda APENAS com uma palavra: conversa, recomendacao, analise, busca, perfil, maratona, noticias, documento, perfil_pro, vaga, curriculo_ats, candidatura, lembrete, financas, ranking, treino, estudos ou anotacoes.
 Sem explicação, sem pontuação, sem aspas.
 """
 

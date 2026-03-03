@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 VALID_INTENTS = {
     "conversa", "recomendacao", "analise", "busca", "perfil", "maratona",
     "noticias", "documento", "perfil_pro", "vaga", "curriculo_ats", "candidatura",
+    "lembrete", "financas", "ranking", "treino", "estudos", "anotacoes",
 }
 
 
@@ -79,6 +80,12 @@ def build_graph() -> StateGraph:
     from agents.profile_pro import profile_pro_node
     from agents.jobs import jobs_node
     from agents.apply import apply_node
+    from agents.lembrete import lembrete_node
+    from agents.financas import financas_node
+    from agents.ranking import ranking_node
+    from agents.treino import treino_node
+    from agents.estudos import estudos_node
+    from agents.anotacoes import anotacoes_node
 
     graph = StateGraph(State)
 
@@ -95,6 +102,12 @@ def build_graph() -> StateGraph:
     graph.add_node("vaga", jobs_node)
     graph.add_node("curriculo_ats", jobs_node)
     graph.add_node("candidatura", apply_node)
+    graph.add_node("lembrete", lembrete_node)
+    graph.add_node("financas", financas_node)
+    graph.add_node("ranking", ranking_node)
+    graph.add_node("treino", treino_node)
+    graph.add_node("estudos", estudos_node)
+    graph.add_node("anotacoes", anotacoes_node)
     graph.add_node("responder", responder_node)
 
     graph.set_entry_point("orchestrator")
@@ -114,12 +127,19 @@ def build_graph() -> StateGraph:
             "vaga":         "vaga",
             "curriculo_ats": "curriculo_ats",
             "candidatura":  "candidatura",
+            "lembrete":     "lembrete",
+            "financas":     "financas",
+            "ranking":      "ranking",
+            "treino":       "treino",
+            "estudos":      "estudos",
+            "anotacoes":    "anotacoes",
         },
     )
 
     all_nodes = [
         "conversa", "recomendacao", "analise", "busca", "perfil", "maratona",
         "noticias", "documento", "perfil_pro", "vaga", "curriculo_ats", "candidatura",
+        "lembrete", "financas", "ranking", "treino", "estudos", "anotacoes",
     ]
     for node in all_nodes:
         graph.add_edge(node, "responder")

@@ -39,6 +39,17 @@ class Neo4jClient:
             "CREATE INDEX IF NOT EXISTS FOR (a:Anime) ON (a.titulo)",
             "CREATE INDEX IF NOT EXISTS FOR (a:Anime) ON (a.titulo_key)",
             "CREATE INDEX IF NOT EXISTS FOR (a:Anime) ON (a.tipo)",
+            # novos agentes
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (l:Lembrete) REQUIRE l.id IS UNIQUE",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (g:Gasto) REQUIRE g.id IS UNIQUE",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (tr:Treino) REQUIRE tr.id IS UNIQUE",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (fc:Flashcard) REQUIRE fc.id IS UNIQUE",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (n:Nota) REQUIRE n.id IS UNIQUE",
+            "CREATE INDEX IF NOT EXISTS FOR (l:Lembrete) ON (l.disparado)",
+            "CREATE INDEX IF NOT EXISTS FOR (l:Lembrete) ON (l.datetime_disparo)",
+            "CREATE INDEX IF NOT EXISTS FOR (g:Gasto) ON (g.data)",
+            "CREATE INDEX IF NOT EXISTS FOR (tr:Treino) ON (tr.exercicio)",
+            "CREATE INDEX IF NOT EXISTS FOR (fc:Flashcard) ON (fc.proximo_review)",
         ]
         with self.driver.session() as session:
             for cypher in statements:
@@ -1865,6 +1876,403 @@ class Neo4jClient:
             result = session.run(cypher, tid=telegram_id)
             record = result.single()
             return record["total"] if record else 0
+
+    # ─── Lembretes ────────────────────────────────────────────────────────────
+
+    def criar_lembrete(
+        self, telegram_id: str, texto: str, datetime_iso: str, recorrente: bool = False
+    ) -> str:
+        import uuid
+        lembrete_id = str(uuid.uuid4())
+        cypher = """
+        MERGE (u:Usuario {telegram_id: $tid})
+        CREATE (l:Lembrete {
+            id: $lid, texto: $texto,
+            datetime_disparo: $dt, recorrente: $rec,
+            disparado: false, data_criacao: datetime()
+        })
+        CREATE (u)-[:TEM_LEMBRETE]->(l)
+        RETURN l.id AS id
+        """
+        with self.driver.session() as session:
+            session.run(cypher, tid=telegram_id, lid=lembrete_id, texto=texto, dt=datetime_iso, rec=recorrente)
+        return lembrete_id
+
+    def listar_lembretes(self, telegram_id: str) -> list[dict]:
+        cypher = """
+        MATCH (u:Usuario {telegram_id: $tid})-[:TEM_LEMBRETE]->(l:Lembrete)
+        WHERE l.disparado = false
+        RETURN l.id AS id, l.texto AS texto, l.datetime_disparo AS datetime_disparo,
+               l.recorrente AS recorrente
+        ORDER BY l.datetime_disparo ASC
+        LIMIT 20
+        """
+        with self.driver.session() as session:
+            return [dict(r) for r in session.run(cypher, tid=telegram_id)]
+
+    def get_lembretes_para_disparar(self, agora_iso: str) -> list[dict]:
+        """Retorna lembretes de todos os usuarios que devem disparar agora."""
+        cypher = """
+        MATCH (u:Usuario)-[:TEM_LEMBRETE]->(l:Lembrete)
+        WHERE l.disparado = false AND l.datetime_disparo <= $agora
+        RETURN u.telegram_id AS user_id, l.id AS id, l.texto AS texto,
+               l.recorrente AS recorrente, l.datetime_disparo AS datetime_disparo
+        ORDER BY l.datetime_disparo ASC
+        LIMIT 50
+        """
+        with self.driver.session() as session:
+            return [dict(r) for r in session.run(cypher, agora=agora_iso)]
+
+    def marcar_lembrete_disparado(self, lembrete_id: str) -> None:
+        cypher = """
+        MATCH (l:Lembrete {id: $lid})
+        SET l.disparado = true, l.data_disparo = datetime()
+        """
+        with self.driver.session() as session:
+            session.run(cypher, lid=lembrete_id)
+
+    def deletar_lembrete(self, telegram_id: str, lembrete_id: str) -> bool:
+        cypher = """
+        MATCH (u:Usuario {telegram_id: $tid})-[:TEM_LEMBRETE]->(l:Lembrete {id: $lid})
+        DETACH DELETE l
+        RETURN count(l) AS deletados
+        """
+        with self.driver.session() as session:
+            result = session.run(cypher, tid=telegram_id, lid=lembrete_id)
+            record = result.single()
+            return bool(record and record["deletados"] > 0)
+
+    # ─── Financas ─────────────────────────────────────────────────────────────
+
+    def registrar_gasto(
+        self, telegram_id: str, valor: float, categoria: str, descricao: str, data_iso: str
+    ) -> str:
+        import uuid
+        gasto_id = str(uuid.uuid4())
+        cypher = """
+        MERGE (u:Usuario {telegram_id: $tid})
+        CREATE (g:Gasto {
+            id: $gid, valor: $valor, categoria: $categoria,
+            descricao: $descricao, data: $data, data_criacao: datetime()
+        })
+        CREATE (u)-[:TEM_GASTO]->(g)
+        RETURN g.id AS id
+        """
+        with self.driver.session() as session:
+            session.run(cypher, tid=telegram_id, gid=gasto_id, valor=valor,
+                        categoria=categoria, descricao=descricao, data=data_iso)
+        return gasto_id
+
+    def get_gastos(self, telegram_id: str, mes: int | None = None, ano: int | None = None) -> list[dict]:
+        filtro = ""
+        if mes and ano:
+            filtro = f"AND g.data STARTS WITH '{ano:04d}-{mes:02d}'"
+        elif ano:
+            filtro = f"AND g.data STARTS WITH '{ano:04d}'"
+        cypher = f"""
+        MATCH (u:Usuario {{telegram_id: $tid}})-[:TEM_GASTO]->(g:Gasto)
+        WHERE 1=1 {filtro}
+        RETURN g.id AS id, g.valor AS valor, g.categoria AS categoria,
+               g.descricao AS descricao, g.data AS data
+        ORDER BY g.data DESC
+        LIMIT 100
+        """
+        with self.driver.session() as session:
+            return [dict(r) for r in session.run(cypher, tid=telegram_id)]
+
+    def resumo_gastos(self, telegram_id: str, mes: int, ano: int) -> dict:
+        gastos = self.get_gastos(telegram_id, mes, ano)
+        total = sum(g["valor"] for g in gastos)
+        por_cat: dict[str, float] = {}
+        for g in gastos:
+            cat = g.get("categoria", "outros")
+            por_cat[cat] = por_cat.get(cat, 0.0) + g["valor"]
+        return {"total": total, "por_categoria": por_cat, "gastos": gastos, "mes": mes, "ano": ano}
+
+    def deletar_gasto(self, telegram_id: str, gasto_id: str) -> bool:
+        cypher = """
+        MATCH (u:Usuario {telegram_id: $tid})-[:TEM_GASTO]->(g:Gasto {id: $gid})
+        DETACH DELETE g
+        RETURN count(g) AS deletados
+        """
+        with self.driver.session() as session:
+            result = session.run(cypher, tid=telegram_id, gid=gasto_id)
+            record = result.single()
+            return bool(record and record["deletados"] > 0)
+
+    # ─── Treino ───────────────────────────────────────────────────────────────
+
+    def registrar_treino(
+        self, telegram_id: str, exercicio: str, series: int | None, reps: int | None,
+        peso_kg: float | None, data_iso: str, observacao: str = ""
+    ) -> str:
+        import uuid
+        treino_id = str(uuid.uuid4())
+        cypher = """
+        MERGE (u:Usuario {telegram_id: $tid})
+        CREATE (t:Treino {
+            id: $tid2, exercicio: $exercicio, series: $series, reps: $reps,
+            peso_kg: $peso, data: $data, observacao: $obs, data_criacao: datetime()
+        })
+        CREATE (u)-[:FEZ_TREINO]->(t)
+        RETURN t.id AS id
+        """
+        with self.driver.session() as session:
+            session.run(cypher, tid=telegram_id, tid2=treino_id, exercicio=exercicio,
+                        series=series, reps=reps, peso=peso_kg, data=data_iso, obs=observacao)
+        return treino_id
+
+    def get_treinos(self, telegram_id: str, exercicio: str | None = None, limit: int = 20) -> list[dict]:
+        filtro = "AND toLower(t.exercicio) CONTAINS toLower($ex)" if exercicio else ""
+        cypher = f"""
+        MATCH (u:Usuario {{telegram_id: $tid}})-[:FEZ_TREINO]->(t:Treino)
+        WHERE 1=1 {filtro}
+        RETURN t.id AS id, t.exercicio AS exercicio, t.series AS series, t.reps AS reps,
+               t.peso_kg AS peso_kg, t.data AS data, t.observacao AS observacao
+        ORDER BY t.data DESC
+        LIMIT $limit
+        """
+        with self.driver.session() as session:
+            return [dict(r) for r in session.run(cypher, tid=telegram_id, ex=exercicio or "", limit=limit)]
+
+    def get_pr_pessoal(self, telegram_id: str, exercicio: str) -> dict | None:
+        cypher = """
+        MATCH (u:Usuario {telegram_id: $tid})-[:FEZ_TREINO]->(t:Treino)
+        WHERE toLower(t.exercicio) CONTAINS toLower($ex) AND t.peso_kg IS NOT NULL
+        RETURN t.exercicio AS exercicio, t.peso_kg AS peso_kg,
+               t.series AS series, t.reps AS reps, t.data AS data
+        ORDER BY t.peso_kg DESC
+        LIMIT 1
+        """
+        with self.driver.session() as session:
+            record = session.run(cypher, tid=telegram_id, ex=exercicio).single()
+            return dict(record) if record else None
+
+    def get_progressao_treino(self, telegram_id: str, exercicio: str) -> list[dict]:
+        cypher = """
+        MATCH (u:Usuario {telegram_id: $tid})-[:FEZ_TREINO]->(t:Treino)
+        WHERE toLower(t.exercicio) CONTAINS toLower($ex)
+        RETURN t.data AS data, t.peso_kg AS peso_kg, t.series AS series, t.reps AS reps
+        ORDER BY t.data ASC
+        LIMIT 30
+        """
+        with self.driver.session() as session:
+            return [dict(r) for r in session.run(cypher, tid=telegram_id, ex=exercicio)]
+
+    # ─── Flashcards (Estudos) ─────────────────────────────────────────────────
+
+    def criar_flashcard(
+        self, telegram_id: str, frente: str, verso: str, topico: str
+    ) -> str:
+        import uuid
+        from datetime import date
+        fc_id = str(uuid.uuid4())
+        proximo = date.today().isoformat()
+        cypher = """
+        MERGE (u:Usuario {telegram_id: $tid})
+        CREATE (f:Flashcard {
+            id: $fid, frente: $frente, verso: $verso, topico: $topico,
+            nivel: 0, proximo_review: $pr, data_criacao: datetime()
+        })
+        CREATE (u)-[:TEM_FLASHCARD]->(f)
+        RETURN f.id AS id
+        """
+        with self.driver.session() as session:
+            session.run(cypher, tid=telegram_id, fid=fc_id, frente=frente,
+                        verso=verso, topico=topico, pr=proximo)
+        return fc_id
+
+    def get_flashcards_para_revisar(self, telegram_id: str, limit: int = 10) -> list[dict]:
+        from datetime import date
+        hoje = date.today().isoformat()
+        cypher = """
+        MATCH (u:Usuario {telegram_id: $tid})-[:TEM_FLASHCARD]->(f:Flashcard)
+        WHERE f.proximo_review <= $hoje AND f.nivel < 6
+        RETURN f.id AS id, f.frente AS frente, f.verso AS verso,
+               f.topico AS topico, f.nivel AS nivel
+        ORDER BY f.proximo_review ASC
+        LIMIT $limit
+        """
+        with self.driver.session() as session:
+            return [dict(r) for r in session.run(cypher, tid=telegram_id, hoje=hoje, limit=limit)]
+
+    def atualizar_flashcard_revisao(self, flashcard_id: str, acertou: bool) -> None:
+        """Atualiza nivel e proximo_review baseado em revisao espacada simples."""
+        from datetime import date, timedelta
+        _intervalos = {0: 1, 1: 3, 2: 7, 3: 14, 4: 30, 5: 90}
+        cypher_get = "MATCH (f:Flashcard {id: $fid}) RETURN f.nivel AS nivel"
+        with self.driver.session() as session:
+            r = session.run(cypher_get, fid=flashcard_id).single()
+            nivel_atual = r["nivel"] if r else 0
+            if acertou:
+                nivel_novo = min(nivel_atual + 1, 5)
+            else:
+                nivel_novo = max(nivel_atual - 1, 0)
+            dias = _intervalos.get(nivel_novo, 1)
+            proximo = (date.today() + timedelta(days=dias)).isoformat()
+            session.run(
+                "MATCH (f:Flashcard {id: $fid}) SET f.nivel = $nv, f.proximo_review = $pr",
+                fid=flashcard_id, nv=nivel_novo, pr=proximo
+            )
+
+    def listar_flashcards(self, telegram_id: str, topico: str | None = None) -> list[dict]:
+        filtro = "AND toLower(f.topico) CONTAINS toLower($topico)" if topico else ""
+        cypher = f"""
+        MATCH (u:Usuario {{telegram_id: $tid}})-[:TEM_FLASHCARD]->(f:Flashcard)
+        WHERE 1=1 {filtro}
+        RETURN f.id AS id, f.frente AS frente, f.verso AS verso,
+               f.topico AS topico, f.nivel AS nivel, f.proximo_review AS proximo_review
+        ORDER BY f.topico, f.nivel
+        LIMIT 50
+        """
+        with self.driver.session() as session:
+            return [dict(r) for r in session.run(cypher, tid=telegram_id, topico=topico or "")]
+
+    def get_progresso_estudos(self, telegram_id: str) -> dict:
+        cypher = """
+        MATCH (u:Usuario {telegram_id: $tid})-[:TEM_FLASHCARD]->(f:Flashcard)
+        RETURN count(f) AS total,
+               sum(CASE WHEN f.nivel >= 4 THEN 1 ELSE 0 END) AS dominados,
+               collect(DISTINCT f.topico) AS topicos
+        """
+        with self.driver.session() as session:
+            r = session.run(cypher, tid=telegram_id).single()
+            return dict(r) if r else {"total": 0, "dominados": 0, "topicos": []}
+
+    # ─── Notas (mini Obsidian) ────────────────────────────────────────────────
+
+    def criar_nota(
+        self, telegram_id: str, titulo: str, conteudo: str, tags: list[str]
+    ) -> str:
+        import uuid
+        nota_id = str(uuid.uuid4())
+        cypher = """
+        MERGE (u:Usuario {telegram_id: $tid})
+        CREATE (n:Nota {
+            id: $nid, titulo: $titulo, conteudo: $conteudo,
+            tags: $tags, data_criacao: datetime(), data_update: datetime()
+        })
+        CREATE (u)-[:TEM_NOTA]->(n)
+        RETURN n.id AS id
+        """
+        with self.driver.session() as session:
+            session.run(cypher, tid=telegram_id, nid=nota_id, titulo=titulo,
+                        conteudo=conteudo, tags=tags)
+        return nota_id
+
+    def buscar_notas(self, telegram_id: str, query: str) -> list[dict]:
+        q = query.lower()
+        cypher = """
+        MATCH (u:Usuario {telegram_id: $tid})-[:TEM_NOTA]->(n:Nota)
+        WHERE toLower(n.titulo) CONTAINS $q OR toLower(n.conteudo) CONTAINS $q
+           OR any(t IN n.tags WHERE toLower(t) CONTAINS $q)
+        RETURN n.id AS id, n.titulo AS titulo,
+               left(n.conteudo, 200) AS preview, n.tags AS tags, n.data_update AS data_update
+        ORDER BY n.data_update DESC
+        LIMIT 10
+        """
+        with self.driver.session() as session:
+            return [dict(r) for r in session.run(cypher, tid=telegram_id, q=q)]
+
+    def get_nota(self, telegram_id: str, nota_id: str | None = None, titulo: str | None = None) -> dict | None:
+        if nota_id:
+            cypher = """
+            MATCH (u:Usuario {telegram_id: $tid})-[:TEM_NOTA]->(n:Nota {id: $nid})
+            RETURN n.id AS id, n.titulo AS titulo, n.conteudo AS conteudo,
+                   n.tags AS tags, n.data_criacao AS data_criacao, n.data_update AS data_update
+            """
+            with self.driver.session() as session:
+                r = session.run(cypher, tid=telegram_id, nid=nota_id).single()
+                return dict(r) if r else None
+        if titulo:
+            cypher = """
+            MATCH (u:Usuario {telegram_id: $tid})-[:TEM_NOTA]->(n:Nota)
+            WHERE toLower(n.titulo) CONTAINS toLower($titulo)
+            RETURN n.id AS id, n.titulo AS titulo, n.conteudo AS conteudo,
+                   n.tags AS tags, n.data_criacao AS data_criacao, n.data_update AS data_update
+            ORDER BY n.data_update DESC
+            LIMIT 1
+            """
+            with self.driver.session() as session:
+                r = session.run(cypher, tid=telegram_id, titulo=titulo).single()
+                return dict(r) if r else None
+        return None
+
+    def listar_notas(self, telegram_id: str, tag: str | None = None, limit: int = 20) -> list[dict]:
+        filtro = "AND any(t IN n.tags WHERE toLower(t) CONTAINS toLower($tag))" if tag else ""
+        cypher = f"""
+        MATCH (u:Usuario {{telegram_id: $tid}})-[:TEM_NOTA]->(n:Nota)
+        WHERE 1=1 {filtro}
+        RETURN n.id AS id, n.titulo AS titulo, n.tags AS tags,
+               left(n.conteudo, 100) AS preview, n.data_update AS data_update
+        ORDER BY n.data_update DESC
+        LIMIT $limit
+        """
+        with self.driver.session() as session:
+            return [dict(r) for r in session.run(cypher, tid=telegram_id, tag=tag or "", limit=limit)]
+
+    def editar_nota(
+        self, telegram_id: str, nota_id: str,
+        titulo: str | None = None, conteudo: str | None = None, tags: list[str] | None = None
+    ) -> bool:
+        sets = ["n.data_update = datetime()"]
+        params: dict = {"tid": telegram_id, "nid": nota_id}
+        if titulo is not None:
+            sets.append("n.titulo = $titulo")
+            params["titulo"] = titulo
+        if conteudo is not None:
+            sets.append("n.conteudo = $conteudo")
+            params["conteudo"] = conteudo
+        if tags is not None:
+            sets.append("n.tags = $tags")
+            params["tags"] = tags
+        cypher = f"""
+        MATCH (u:Usuario {{telegram_id: $tid}})-[:TEM_NOTA]->(n:Nota {{id: $nid}})
+        SET {', '.join(sets)}
+        RETURN count(n) AS ok
+        """
+        with self.driver.session() as session:
+            r = session.run(cypher, **params).single()
+            return bool(r and r["ok"] > 0)
+
+    def deletar_nota(self, telegram_id: str, nota_id: str) -> bool:
+        cypher = """
+        MATCH (u:Usuario {telegram_id: $tid})-[:TEM_NOTA]->(n:Nota {id: $nid})
+        DETACH DELETE n
+        RETURN count(n) AS deletados
+        """
+        with self.driver.session() as session:
+            r = session.run(cypher, tid=telegram_id, nid=nota_id).single()
+            return bool(r and r["deletados"] > 0)
+
+    # ─── Ranking pessoal (usa ASSISTIU existente) ─────────────────────────────
+
+    def get_ranking_filtrado(
+        self, telegram_id: str, genero: str | None = None, ano: int | None = None,
+        tipo: str | None = None, limit: int = 10
+    ) -> list[dict]:
+        filtros = []
+        params: dict = {"tid": telegram_id, "limit": limit}
+        if genero:
+            filtros.append("ANY(g IN [(a)-[:TEM_GENERO]->(gn:Genero) | gn.nome] WHERE toLower(g) CONTAINS toLower($genero))")
+            params["genero"] = genero
+        if ano:
+            filtros.append("a.ano = $ano")
+            params["ano"] = ano
+        if tipo:
+            filtros.append("toLower(a.tipo) = toLower($tipo)")
+            params["tipo"] = tipo
+        where_extra = " AND " + " AND ".join(filtros) if filtros else ""
+        cypher = f"""
+        MATCH (u:Usuario {{telegram_id: $tid}})-[r:ASSISTIU]->(a:Anime)
+        WHERE r.nota IS NOT NULL {where_extra}
+        RETURN a.titulo AS titulo, r.nota AS nota, a.ano AS ano,
+               a.tipo AS tipo, a.episodios AS episodios
+        ORDER BY r.nota DESC, a.nota_mal DESC
+        LIMIT $limit
+        """
+        with self.driver.session() as session:
+            return [dict(rec) for rec in session.run(cypher, **params)]
 
 
 _client: Neo4jClient | None = None
