@@ -34,6 +34,7 @@ def otimizar_para_vaga(
     vaga_empresa: str,
     vaga_descricao: str,
     vaga_requisitos: list[str],
+    preferencias: dict | None = None,
 ) -> dict:
     """
     Gera curriculo ATS de forma deterministica, sem usar modelo generativo.
@@ -73,6 +74,7 @@ def otimizar_para_vaga(
         "formacao": _formatar_formacao(_dedup_formacao(perfil.get("formacao", []))),
         "idiomas": _dedup_idiomas(perfil.get("idiomas", [])),
     }
+    _aplicar_preferencias_curriculo(resultado, preferencias or {})
 
     logger.info(
         "ats_optimizer(local): vaga=%s | keywords=%d | habilidades=%d | experiencias=%d",
@@ -82,6 +84,38 @@ def otimizar_para_vaga(
         len(resultado["experiencias"]),
     )
     return resultado
+
+
+def _aplicar_preferencias_curriculo(resultado: dict, preferencias: dict) -> None:
+    if not preferencias:
+        return
+
+    if preferencias.get("incluir_objetivo") is False:
+        resultado["objetivo"] = ""
+
+    if preferencias.get("incluir_formacao") is False:
+        resultado["formacao"] = []
+
+    if preferencias.get("incluir_idiomas") is False:
+        resultado["idiomas"] = []
+
+    max_habilidades = preferencias.get("max_habilidades")
+    if isinstance(max_habilidades, int) and max_habilidades > 0:
+        resultado["habilidades"] = (resultado.get("habilidades") or [])[:max_habilidades]
+
+    max_experiencias = preferencias.get("max_experiencias")
+    if isinstance(max_experiencias, int) and max_experiencias > 0:
+        resultado["experiencias"] = (resultado.get("experiencias") or [])[:max_experiencias]
+
+    max_bullets = preferencias.get("max_bullets_por_experiencia")
+    if isinstance(max_bullets, int) and max_bullets > 0:
+        for exp in resultado.get("experiencias", []) or []:
+            exp["bullets"] = (exp.get("bullets") or [])[:max_bullets]
+
+    if preferencias.get("experiencia_primeiro"):
+        # O template ja mostra experiencia antes de formacao/idiomas.
+        # Mantemos o flag para evolucoes futuras sem quebrar contrato.
+        pass
 
 
 def _tem_contexto_vaga_especifica(

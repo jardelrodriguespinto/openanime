@@ -282,6 +282,16 @@ def _modo_curriculo_ats(state: dict) -> dict:
     if not perfil.get("nome") and not perfil.get("habilidades"):
         return {"response": "Seu perfil esta vazio ainda. Manda seu curriculo em PDF ou me conta sobre sua experiencia para eu gerar um curriculo personalizado!"}
 
+    preferencias_curriculo = _extrair_preferencias_curriculo(mensagem)
+    if _pediu_formato_sem_detalhar(mensagem, preferencias_curriculo):
+        return {
+            "response": (
+                "Posso gerar no formato que voce quiser. Me diga como quer, por exemplo: "
+                "\"sem resumo\", \"mais compacto (1 pagina)\", \"foco em projetos\", "
+                "\"remover idiomas\" ou \"priorizar experiencia antes de habilidades\"."
+            )
+        }
+
     # Tenta detectar vaga especifica na mensagem antes de usar historico.
     vaga_titulo_extraido = _extrair_titulo_vaga_mensagem(mensagem)
     vaga_titulo = vaga_titulo_extraido or ""
@@ -326,6 +336,7 @@ def _modo_curriculo_ats(state: dict) -> dict:
             vaga_empresa=vaga_empresa,
             vaga_descricao=vaga_descricao,
             vaga_requisitos=vaga_requisitos,
+            preferencias=preferencias_curriculo,
         )
 
         pdf_bytes = gerar_pdf_curriculo(dados_curriculo)
@@ -423,6 +434,57 @@ def _mensagem_curriculo_gerado(vaga_titulo: str, vaga_empresa: str, contexto_vag
     )
 
 
+def _extrair_preferencias_curriculo(mensagem: str) -> dict:
+    """Extrai preferencias de formato do curriculo a partir da mensagem do usuario."""
+    txt = _sem_acento((mensagem or "").lower())
+    prefs: dict = {}
+
+    if any(k in txt for k in ["sem resumo", "sem objetivo", "sem perfil profissional"]):
+        prefs["incluir_objetivo"] = False
+    elif any(k in txt for k in ["com resumo", "com objetivo", "inclui resumo"]):
+        prefs["incluir_objetivo"] = True
+
+    if any(k in txt for k in ["sem idiomas", "remover idiomas", "tira idiomas"]):
+        prefs["incluir_idiomas"] = False
+
+    if any(k in txt for k in ["sem formacao", "remover formacao", "tira formacao"]):
+        prefs["incluir_formacao"] = False
+
+    if any(k in txt for k in ["experiencia primeiro", "prioriza experiencia"]):
+        prefs["experiencia_primeiro"] = True
+
+    if any(k in txt for k in ["compacto", "1 pagina", "uma pagina", "enxuto", "resumido"]):
+        prefs["max_habilidades"] = 10
+        prefs["max_experiencias"] = 3
+        prefs["max_bullets_por_experiencia"] = 3
+
+    m_hab = re.search(r"(?:max(?:imo)?\s+)?(\d{1,2})\s+habilidades", txt)
+    if m_hab:
+        prefs["max_habilidades"] = max(4, min(int(m_hab.group(1)), 30))
+
+    m_exp = re.search(r"(?:max(?:imo)?\s+)?(\d{1,2})\s+experiencias?", txt)
+    if m_exp:
+        prefs["max_experiencias"] = max(1, min(int(m_exp.group(1)), 10))
+
+    m_bul = re.search(r"(?:max(?:imo)?\s+)?(\d{1,2})\s+(?:bullets|itens)", txt)
+    if m_bul:
+        prefs["max_bullets_por_experiencia"] = max(1, min(int(m_bul.group(1)), 8))
+
+    return prefs
+
+
+def _pediu_formato_sem_detalhar(mensagem: str, prefs: dict) -> bool:
+    txt = _sem_acento((mensagem or "").lower())
+    gatilhos = [
+        "do meu jeito",
+        "da minha forma",
+        "como eu sugerir",
+        "no formato que eu quiser",
+        "quero escolher o formato",
+    ]
+    return any(g in txt for g in gatilhos) and not prefs
+
+
 def _modo_candidaturas(user_id: str) -> dict:
     """Mostra pipeline de candidaturas."""
     try:
@@ -438,17 +500,17 @@ def _modo_candidaturas(user_id: str) -> dict:
     em_andamento = [c for c in candidaturas if c.get("status") in ("candidatado", "visualizado", "entrevista")]
     finalizadas = [c for c in candidaturas if c.get("status") in ("oferta", "recusado")]
 
-    linhas = ["<b>Suas candidaturas:</b>\n"]
+    linhas = ["Suas candidaturas:\n"]
 
     if em_andamento:
-        linhas.append("<b>Em andamento:</b>")
+        linhas.append("Em andamento:")
         status_emoji = {"candidatado": "🟡", "visualizado": "🔵", "entrevista": "🟢"}
         for c in em_andamento[:8]:
             emoji = status_emoji.get(c.get("status", ""), "⚪")
             linhas.append(f"{emoji} {c.get('titulo', '?')} — {c.get('empresa', '?')} ({c.get('data', '?')})")
 
     if finalizadas:
-        linhas.append("\n<b>Finalizadas:</b>")
+        linhas.append("\nFinalizadas:")
         for c in finalizadas[:5]:
             emoji = "✅" if c.get("status") == "oferta" else "❌"
             linhas.append(f"{emoji} {c.get('titulo', '?')} — {c.get('empresa', '?')}")

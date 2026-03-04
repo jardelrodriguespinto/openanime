@@ -1,6 +1,7 @@
 import asyncio
 import html
 import logging
+import unicodedata
 
 from telegram import Message, Update
 from telegram.error import BadRequest, NetworkError, RetryAfter
@@ -209,7 +210,7 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _telegram_call_with_retry(
         "reply_html_start",
         lambda: update.message.reply_html(
-            f"Oi, <b>{nome}</b>!\n\n"
+            f"Oi, {nome}!\n\n"
             "Sou seu assistente pessoal multiuso de anime, manga, manhwa, filmes, series, doramas, musica e livros.\n\n"
             "Pode me perguntar sobre qualquer coisa:\n"
             "- Recomendacoes personalizadas no seu estilo\n"
@@ -228,7 +229,7 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _telegram_call_with_retry(
         "reply_html_help",
         lambda: update.message.reply_html(
-            "<b>Como usar:</b>\n\n"
+            "Como usar:\n\n"
             "Fale naturalmente. Exemplos:\n\n"
             "- \"Me recomenda algo como Solo Leveling\"\n"
             "- \"Analisa o Attack on Titan pra mim\"\n"
@@ -240,7 +241,7 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "- \"Me candidata nessa vaga\"\n"
             "- Envie um PDF para analise automatica\n"
             "- Envie audio de voz e eu transcrevo para responder\n\n"
-            "<b>Comandos:</b>\n"
+            "Comandos:\n"
             "/start - inicio\n"
             "/help - ajuda\n"
             "/historico - seu historico de midia\n"
@@ -334,7 +335,7 @@ def _formatar_stats(stats: dict) -> str:
     if not stats:
         return "Nenhuma estatistica ainda. Registra o que voce assistiu!"
 
-    linhas = ["<b>Suas stats:</b>\n"]
+    linhas = ["Suas stats:\n"]
 
     total_assistidos = stats.get("total_assistidos", 0)
     total_dropados = stats.get("total_dropados", 0)
@@ -344,16 +345,16 @@ def _formatar_stats(stats: dict) -> str:
     top_generos = stats.get("top_generos", [])
     top_estudios = stats.get("top_estudios", [])
 
-    linhas.append(f"Assistidos: <b>{total_assistidos}</b>")
-    linhas.append(f"Em progresso: <b>{total_progresso}</b>")
-    linhas.append(f"Dropados: <b>{total_dropados}</b>")
+    linhas.append(f"Assistidos: {total_assistidos}")
+    linhas.append(f"Em progresso: {total_progresso}")
+    linhas.append(f"Dropados: {total_dropados}")
     if media_notas is not None:
-        linhas.append(f"Nota media: <b>{media_notas}/10</b>")
-    linhas.append(f"Taxa de drop: <b>{drop_rate}%</b>")
+        linhas.append(f"Nota media: {media_notas}/10")
+    linhas.append(f"Taxa de drop: {drop_rate}%")
     if top_generos:
-        linhas.append(f"\nGeneros favoritos: <b>{', '.join(top_generos)}</b>")
+        linhas.append(f"\nGeneros favoritos: {', '.join(top_generos)}")
     if top_estudios:
-        linhas.append(f"Studios favoritos: <b>{', '.join(top_estudios)}</b>")
+        linhas.append(f"Studios favoritos: {', '.join(top_estudios)}")
 
     return "\n".join(linhas)
 
@@ -391,7 +392,13 @@ async def handle_limpar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 _CONFIRMAR = {"sim", "sim!", "confirmo", "ok", "yes", "yeah", "claro", "pode", "bora"}
-_CANCELAR = {"nao", "não", "nã", "nã!", "cancelar", "cancel", "no", "nope", "desistir"}
+_CANCELAR = {"nao", "cancelar", "cancel", "no", "nope", "desistir"}
+
+
+def _normalizar_texto(texto: str) -> str:
+    base = (texto or "").lower().strip().rstrip("!")
+    sem_acentos = unicodedata.normalize("NFD", base)
+    return "".join(ch for ch in sem_acentos if unicodedata.category(ch) != "Mn")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -402,14 +409,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = str(user.id)
     text = update.message.text.strip()
-    text_lower = text.lower().strip().rstrip("!")
+    text_norm = _normalizar_texto(text)
 
     logger.info("Mensagem recebida: user_id=%s len=%d preview='%s'", user_id, len(text), text[:50])
 
-    # --- Fluxo de confirmação de candidatura ---
+    # --- Fluxo de confirmacao de candidatura ---
     cand_pendente = get_redis_history().get_data(f"cand_pendente:{user_id}")
     if cand_pendente:
-        if text_lower in _CONFIRMAR:
+        if text_norm in _CONFIRMAR:
             get_redis_history().delete_data(f"cand_pendente:{user_id}")
             msg_exec = await _telegram_call_with_retry(
                 "reply_text_candidatura_exec",
@@ -442,7 +449,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await _send_response_chunks(update, user_id, resp_chunks, start_index=0)
                 await _safe_delete_message(msg_exec)
             return
-        elif text_lower in _CANCELAR:
+        elif text_norm in _CANCELAR:
             get_redis_history().delete_data(f"cand_pendente:{user_id}")
             await _telegram_call_with_retry(
                 "reply_text_candidatura_cancelada",
@@ -549,7 +556,7 @@ async def _processar_input(
         logger.warning("Falha edit_text user=%s: %s", user_id, e)
         await _enviar_resposta_fallback(update, user_id, response, texto_formatado)
 
-    # Só apaga "Pensando..." se o edit falhou (fallback enviou nova mensagem)
+    # So apaga "Pensando..." se o edit falhou (fallback enviou nova mensagem)
     if not edit_success:
         await _safe_delete_message(msg_processando)
     elif len(response_chunks) > 1:
@@ -557,7 +564,7 @@ async def _processar_input(
         if not sent_extra:
             logger.error("Falha ao enviar chunks adicionais user=%s", user_id)
 
-    # Armazena candidatura pendente para confirmação posterior
+    # Armazena candidatura pendente para confirmacao posterior
     candidatura_pendente = resultado.get("candidatura_pendente")
     if candidatura_pendente:
         get_redis_history().set_data(f"cand_pendente:{user_id}", candidatura_pendente, ttl=3600)
@@ -703,16 +710,16 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_notificacoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Comando /notificacoes — exibe e permite configurar preferencias de notificacao.
+    Comando /notificacoes - exibe e permite configurar preferencias de notificacao.
 
     Uso:
-      /notificacoes                     — mostra configuracao atual
-      /notificacoes digest 7            — ativa digest as 7h
-      /notificacoes digest off          — desativa digest
-      /notificacoes episodios 21        — alerta de episodios as 21h
-      /notificacoes vagas 9             — ativa alerta de vagas as 9h
-      /notificacoes noticias 8          — ativa noticias personalizadas as 8h
-      /notificacoes noticias off        — desativa noticias
+      /notificacoes
+      /notificacoes digest 7
+      /notificacoes digest off
+      /notificacoes episodios 21
+      /notificacoes vagas 9
+      /notificacoes noticias 8
+      /notificacoes noticias off
     """
     from graph.neo4j_client import get_neo4j
 
@@ -739,8 +746,9 @@ async def handle_notificacoes(update: Update, context: ContextTypes.DEFAULT_TYPE
         tipo = args[0].lower()
         valor = args[1].lower()
         if tipo not in TIPOS_VALIDOS:
+            opcoes = ", ".join(sorted(TIPOS_VALIDOS))
             await update.message.reply_text(
-                f"Tipo invalido. Opcoes: {', '.join(TIPOS_VALIDOS)}"
+                f"Tipo invalido. Opcoes: {opcoes}"
             )
             return
         if valor == "off":
@@ -767,24 +775,23 @@ async def handle_notificacoes(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text("Erro ao salvar preferencias.")
         return
 
-    # Exibe status atual
-    linhas = ["<b>Suas preferencias de notificacao:</b>\n"]
+    linhas = ["Suas preferencias de notificacao:\n"]
     for tipo, label in LABELS.items():
         ativo = prefs.get(f"{tipo}_ativo", False)
         hora = prefs.get(f"{tipo}_hora", 0)
-        status = f"<b>{hora:02d}:00h</b>" if ativo else "desativado"
-        emoji = "✅" if ativo else "❌"
-        linhas.append(f"{emoji} <b>{label}</b>: {status}")
+        status = f"{hora:02d}:00h" if ativo else "desativado"
+        flag = "[ON]" if ativo else "[OFF]"
+        linhas.append(f"{flag} {label}: {status}")
+
     linhas.append(
-        "\n<i>Para alterar: /notificacoes [tipo] [hora|off]</i>\n"
-        "<i>Tipos: digest | episodios | vagas | noticias</i>\n"
-        "<i>Ex: /notificacoes digest 7</i>"
+        "\nPara alterar: /notificacoes [tipo] [hora|off]\n"
+        "Tipos: digest | episodios | vagas | noticias\n"
+        "Ex: /notificacoes digest 7"
     )
     await _telegram_call_with_retry(
-        "reply_html_notificacoes",
-        lambda: update.message.reply_html("\n".join(linhas)),
+        "reply_text_notificacoes",
+        lambda: update.message.reply_text("\n".join(linhas)),
     )
-
 
 async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Handler de erros globais do bot."""
@@ -792,3 +799,4 @@ async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE):
         logger.warning("Telegram NetworkError (transitorio): %s", context.error)
         return
     logger.error("Erro global no bot: %s", context.error, exc_info=context.error)
+

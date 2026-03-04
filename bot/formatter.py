@@ -9,6 +9,9 @@ def formatar_telegram(texto: str) -> str:
     if not texto:
         return "..."
 
+    # Remove tags de negrito vindas de respostas antigas para nao exibir markup cru.
+    texto = re.sub(r"</?(?:b|strong)\b[^>]*>", "", texto, flags=re.IGNORECASE)
+
     link_placeholders = {}
     url_placeholders = {}
     link_counter = [0]
@@ -57,10 +60,10 @@ def formatar_telegram(texto: str) -> str:
     for key, original in placeholders.items():
         if original.startswith("**"):
             inner = original[2:-2].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            texto = texto.replace(key, f"<b>{inner}</b>")
+            texto = texto.replace(key, inner)
         elif original.startswith("*"):
             inner = original[1:-1].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            texto = texto.replace(key, f"<b>{inner}</b>")
+            texto = texto.replace(key, inner)
         elif original.startswith("_"):
             inner = original[1:-1].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
             texto = texto.replace(key, f"<i>{inner}</i>")
@@ -110,10 +113,10 @@ def _sanitize_placeholder_artifacts(texto: str) -> str:
 
 def formatar_historico(assistidos: list, dropados: list, progresso: list | None = None) -> str:
     """Formata historico do usuario."""
-    linhas = ["<b>Seu historico:</b>"]
+    linhas = ["Seu historico:"]
 
     if assistidos:
-        linhas.append("\n<b>Assistidos:</b>")
+        linhas.append("\nAssistidos:")
         for item in sorted(assistidos, key=lambda x: x.get("nota", 0) or 0, reverse=True):
             nota = item.get("nota")
             nota_str = f" - {nota}/10" if nota is not None else ""
@@ -121,7 +124,7 @@ def formatar_historico(assistidos: list, dropados: list, progresso: list | None 
 
     progresso = progresso or []
     if progresso:
-        linhas.append("\n<b>Em progresso:</b>")
+        linhas.append("\nEm progresso:")
         for item in progresso[:10]:
             partes = []
             if item.get("episodio"):
@@ -134,7 +137,7 @@ def formatar_historico(assistidos: list, dropados: list, progresso: list | None 
             linhas.append(f"  - {item['titulo']}{detalhe}")
 
     if dropados:
-        linhas.append("\n<b>Dropados:</b>")
+        linhas.append("\nDropados:")
         for item in dropados:
             ep = item.get("episodio")
             ep_str = f" (parei no ep {ep})" if ep else ""

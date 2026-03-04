@@ -1,4 +1,4 @@
-﻿
+
 import logging
 import os
 import re
@@ -1888,7 +1888,7 @@ class Neo4jClient:
         MERGE (u:Usuario {telegram_id: $tid})
         CREATE (l:Lembrete {
             id: $lid, texto: $texto,
-            datetime_disparo: $dt, recorrente: $rec,
+            datetime_disparo: datetime($dt), recorrente: $rec,
             disparado: false, data_criacao: datetime()
         })
         CREATE (u)-[:TEM_LEMBRETE]->(l)
@@ -1902,9 +1902,9 @@ class Neo4jClient:
         cypher = """
         MATCH (u:Usuario {telegram_id: $tid})-[:TEM_LEMBRETE]->(l:Lembrete)
         WHERE l.disparado = false
-        RETURN l.id AS id, l.texto AS texto, l.datetime_disparo AS datetime_disparo,
+        RETURN l.id AS id, l.texto AS texto, toString(datetime(l.datetime_disparo)) AS datetime_disparo,
                l.recorrente AS recorrente
-        ORDER BY l.datetime_disparo ASC
+        ORDER BY datetime(l.datetime_disparo) ASC
         LIMIT 20
         """
         with self.driver.session() as session:
@@ -1914,10 +1914,10 @@ class Neo4jClient:
         """Retorna lembretes de todos os usuarios que devem disparar agora."""
         cypher = """
         MATCH (u:Usuario)-[:TEM_LEMBRETE]->(l:Lembrete)
-        WHERE l.disparado = false AND l.datetime_disparo <= $agora
+        WHERE l.disparado = false AND datetime(l.datetime_disparo) <= datetime($agora)
         RETURN u.telegram_id AS user_id, l.id AS id, l.texto AS texto,
-               l.recorrente AS recorrente, l.datetime_disparo AS datetime_disparo
-        ORDER BY l.datetime_disparo ASC
+               l.recorrente AS recorrente, toString(datetime(l.datetime_disparo)) AS datetime_disparo
+        ORDER BY datetime(l.datetime_disparo) ASC
         LIMIT 50
         """
         with self.driver.session() as session:

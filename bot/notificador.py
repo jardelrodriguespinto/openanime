@@ -12,6 +12,7 @@ import html
 from urllib.parse import urlparse
 
 import httpx
+import pytz
 from bs4 import BeautifulSoup
 from telegram.ext import CallbackContext
 
@@ -26,6 +27,7 @@ from graph.neo4j_client import get_neo4j
 import prompts.notificador as notif_prompt
 
 logger = logging.getLogger(__name__)
+_TZ_BR = pytz.timezone("America/Sao_Paulo")
 
 _DDG_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -120,7 +122,7 @@ def _buscar_novidades_ddg(query: str, max_results: int = 6) -> list[dict]:
 
 def _coletar_dados_diarios() -> tuple[list, list, list]:
     """Coleta temporada atual, novidades web e Reddit."""
-    hoje_date = datetime.date.today()
+    hoje_date = datetime.datetime.now(_TZ_BR).date()
     hoje = hoje_date.strftime("%d/%m/%Y")
     ano_atual = hoje_date.year
 
@@ -361,7 +363,6 @@ async def _enviar_digest_usuario(
     await context.bot.send_message(
         chat_id=user_id,
         text=texto,
-        parse_mode="HTML",
     )
     return True
 
@@ -477,19 +478,18 @@ async def verificar_novos_episodios(context: CallbackContext) -> None:
                 continue
 
             alertas.sort(key=lambda x: x.get("airdate") or "")
-            linhas = ["<b>Episodios chegando (proximos 2 dias):</b>\n"]
+            linhas = ["Episodios chegando (proximos 2 dias):\n"]
             for ep in alertas[:4]:
                 show = ep.get("show_name", "?")
                 airdate = ep.get("airdate", "?")
                 season = ep.get("season")
                 episode = ep.get("episode")
                 ep_label = f" S{season:02d}E{episode:02d}" if season and episode else ""
-                linhas.append(f"- <b>{_escape_html(show)}</b>{ep_label} · {_escape_html(airdate)}")
+                linhas.append(f"- {show}{ep_label} | {airdate}")
 
             await context.bot.send_message(
                 chat_id=user_id,
                 text="\n".join(linhas),
-                parse_mode="HTML",
             )
             enviados += 1
             logger.info("Notificador episodios: alerta enviado para user=%s", user_id)
@@ -507,8 +507,7 @@ async def coordinator_notificacoes(context: CallbackContext) -> None:
     - Digest/episodios/vagas: disparam apenas no minuto 0 de cada hora (comportamento horario)
     - Noticias: disparam no hora:minuto exato configurado pelo usuario
     """
-    import pytz
-    agora = datetime.datetime.now(pytz.timezone("America/Sao_Paulo"))
+    agora = datetime.datetime.now(_TZ_BR)
     hora_atual = agora.hour
     minuto_atual = agora.minute
     logger.debug("Coordinator notificacoes: hora=%02d minuto=%02d", hora_atual, minuto_atual)
@@ -572,15 +571,15 @@ async def coordinator_notificacoes(context: CallbackContext) -> None:
                 if not alertas:
                     continue
                 alertas.sort(key=lambda x: x.get("airdate") or "")
-                linhas = ["<b>Episodios chegando (proximos 2 dias):</b>\n"]
+                linhas = ["Episodios chegando (proximos 2 dias):\n"]
                 for ep in alertas[:4]:
                     show = ep.get("show_name", "?")
                     airdate = ep.get("airdate", "?")
                     season = ep.get("season")
                     episode = ep.get("episode")
                     ep_label = f" S{season:02d}E{episode:02d}" if season and episode else ""
-                    linhas.append(f"- <b>{_escape_html(show)}</b>{ep_label} · {_escape_html(airdate)}")
-                await context.bot.send_message(chat_id=user_id, text="\n".join(linhas), parse_mode="HTML")
+                    linhas.append(f"- {show}{ep_label} | {airdate}")
+                await context.bot.send_message(chat_id=user_id, text="\n".join(linhas))
             except Exception as e:
                 logger.warning("Coordinator: erro episodios user=%s: %s", user_id, e)
 
@@ -597,16 +596,14 @@ async def coordinator_notificacoes(context: CallbackContext) -> None:
                 if texto_vagas:
                     await context.bot.send_message(
                         chat_id=user_id,
-                        text=f"<b>Vagas do dia para voce:</b>\n\n{texto_vagas}",
-                        parse_mode="HTML",
+                        text=f"Vagas do dia para voce:\n\n{texto_vagas}",
                     )
             except Exception as e:
                 logger.warning("Coordinator: erro vagas user=%s: %s", user_id, e)
 
     # ── Lembretes — dispara em hora:minuto exato ──────────────────────────────
     try:
-        import pytz as _pytz
-        agora_iso = datetime.datetime.now(_pytz.timezone("America/Sao_Paulo")).strftime("%Y-%m-%dT%H:%M:%S")
+        agora_iso = datetime.datetime.now(_TZ_BR).isoformat(timespec="seconds")
         lembretes_disparar = neo4j.get_lembretes_para_disparar(agora_iso)
         for lem in lembretes_disparar:
             uid = lem.get("user_id")
@@ -615,8 +612,7 @@ async def coordinator_notificacoes(context: CallbackContext) -> None:
             try:
                 await context.bot.send_message(
                     chat_id=uid,
-                    text=f"⏰ <b>Lembrete:</b> {_escape_html(texto)}",
-                    parse_mode="HTML",
+                    text=f"Lembrete: {texto}",
                 )
                 neo4j.marcar_lembrete_disparado(lid)
                 logger.info("Coordinator: lembrete disparado user=%s id=%s", uid, lid)
@@ -637,16 +633,14 @@ async def coordinator_notificacoes(context: CallbackContext) -> None:
                 noticias = await asyncio.to_thread(buscar_por_google_news, query, 5)
                 if not noticias:
                     continue
-                linhas = [f"<b>Noticias de {', '.join(interesses[:3]) if interesses else 'hoje'}:</b>\n"]
+                linhas = [f"Noticias de {', '.join(interesses[:3]) if interesses else 'hoje'}:\n"]
                 for n in noticias[:5]:
-                    titulo = _escape_html(n.get("titulo", ""))
+                    titulo = n.get("titulo", "")
                     url = n.get("url", "")
-                    safe_link = _format_html_link(titulo, url) if url else titulo
-                    linhas.append(f"- {safe_link}")
+                    linhas.append(f"- {titulo} - {url}" if url else f"- {titulo}")
                 await context.bot.send_message(
                     chat_id=user_id,
                     text="\n".join(linhas),
-                    parse_mode="HTML",
                     disable_web_page_preview=True,
                 )
             except Exception as e:
@@ -681,7 +675,7 @@ async def verificar_lancamentos_culturais(context: CallbackContext) -> None:
     mb_cache: dict[str, list[dict]] = {}
     ol_cache: dict[str, list[dict]] = {}
     enviados = 0
-    ano_atual = datetime.date.today().year
+    ano_atual = datetime.datetime.now(_TZ_BR).year
 
     for usuario in usuarios:
         user_id = usuario.get("telegram_id")
@@ -707,13 +701,9 @@ async def verificar_lancamentos_culturais(context: CallbackContext) -> None:
                 titulo = lc.get("titulo", "?")
                 data = lc.get("data", "")
                 tipo = lc.get("subtipo", "album")
-                safe_artist = _escape_html(artista)
-                safe_titulo = _escape_html(titulo)
-                safe_tipo = _escape_html(tipo)
-                safe_data = _escape_html(data) if data else ""
                 linhas.append(
-                    f"🎵 <b>{safe_artist}</b> - {safe_titulo} ({safe_tipo})"
-                    f"{' · ' + safe_data if safe_data else ''}"
+                    f"?? {artista} - {titulo} ({tipo})"
+                    f"{' | ' + data if data else ''}"
                 )
 
         # Busca tambem por DDG para turnês e shows ao vivo
@@ -728,9 +718,7 @@ async def verificar_lancamentos_culturais(context: CallbackContext) -> None:
                         title = r.get("title", "")
                         href = r.get("href", "")
                         if any(k in title.lower() for k in ["tour", "turne", "show", "concert", "live"]):
-                            safe_artist = _escape_html(artista)
-                            safe_link = _format_html_link(title, href, max_len=80)
-                            linhas.append(f"🎤 <b>{safe_artist}</b>: {safe_link}")
+                            linhas.append(f"?? {artista}: {title} - {href}" if href else f"?? {artista}: {title}")
                             achou = True
                             break
                     if achou:
@@ -751,21 +739,17 @@ async def verificar_lancamentos_culturais(context: CallbackContext) -> None:
             for livro in livros[:1]:
                 titulo = livro.get("titulo", "?")
                 ano = livro.get("ano", "")
-                safe_autor = _escape_html(autor)
-                safe_titulo = _escape_html(titulo)
-                safe_ano = _escape_html(str(ano)) if ano else ""
-                linhas.append(f"📚 <b>{safe_autor}</b> - {safe_titulo}{' (' + safe_ano + ')' if safe_ano else ''}")
+                linhas.append(f"?? {autor} - {titulo}{' (' + str(ano) + ')' if ano else ''}")
 
         if not linhas:
             continue
 
         try:
-            header = "<b>Novidades dos seus artistas e autores favoritos esta semana:</b>\n"
+            header = "Novidades dos seus artistas e autores favoritos esta semana:\n"
             texto = header + "\n".join(linhas[:10])
             await context.bot.send_message(
                 chat_id=user_id,
                 text=texto,
-                parse_mode="HTML",
                 disable_web_page_preview=True,
             )
             enviados += 1

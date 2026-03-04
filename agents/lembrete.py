@@ -1,6 +1,9 @@
-"""Agente de lembretes — cria, lista e cancela lembretes com hora:minuto exato."""
+"""Agente de lembretes - cria, lista e cancela lembretes com hora:minuto exato."""
 import json
 import logging
+from datetime import datetime
+
+import pytz
 
 from agents.orchestrator import State
 from ai.openrouter import openrouter
@@ -8,6 +11,8 @@ from graph.neo4j_client import get_neo4j
 import prompts.lembrete as lembrete_prompt
 
 logger = logging.getLogger(__name__)
+
+_TZ_BR = pytz.timezone("America/Sao_Paulo")
 
 
 def lembrete_node(state: State) -> dict:
@@ -29,7 +34,7 @@ def lembrete_node(state: State) -> dict:
         data = _parse_json(raw)
     except Exception as e:
         logger.error("lembrete: erro LLM: %s", e)
-        return {"response": "Não consegui processar o lembrete. Tenta de novo!"}
+        return {"response": "Nao consegui processar o lembrete. Tenta de novo!"}
 
     action = data.get("action", "conversa")
     mensagem = data.get("mensagem", "")
@@ -42,27 +47,33 @@ def lembrete_node(state: State) -> dict:
 
     try:
         if action == "criar_lembrete" and texto and datetime_disparo:
-            lid = neo4j.criar_lembrete(user_id, texto, datetime_disparo, recorrente)
-            # Formata para exibição
+            datetime_disparo = _normalizar_datetime_sao_paulo(datetime_disparo)
+            neo4j.criar_lembrete(user_id, texto, datetime_disparo, recorrente)
             try:
-                from datetime import datetime
                 dt = datetime.fromisoformat(datetime_disparo)
-                hora_fmt = dt.strftime("%d/%m/%Y às %H:%M")
+                if dt.tzinfo is None:
+                    dt = _TZ_BR.localize(dt)
+                else:
+                    dt = dt.astimezone(_TZ_BR)
+                hora_fmt = dt.strftime("%d/%m/%Y as %H:%M")
             except Exception:
                 hora_fmt = datetime_disparo
             rec_txt = " (recorrente, todo dia)" if recorrente else ""
-            mensagem = f"Lembrete criado! Vou te avisar em <b>{hora_fmt}</b>{rec_txt}:\n\"{texto}\""
+            mensagem = f"Lembrete criado! Vou te avisar em {hora_fmt}{rec_txt}:\n\"{texto}\""
 
         elif action == "listar_lembretes":
             if not lembretes:
-                mensagem = "Você não tem lembretes ativos."
+                mensagem = "Voce nao tem lembretes ativos."
             else:
-                linhas = ["<b>Seus lembretes:</b>"]
+                linhas = ["Seus lembretes:"]
                 for l in lembretes[:10]:
                     try:
-                        from datetime import datetime
-                        dt = datetime.fromisoformat(l["datetime_disparo"])
-                        hora_fmt = dt.strftime("%d/%m às %H:%M")
+                        dt = datetime.fromisoformat(str(l.get("datetime_disparo", "")))
+                        if dt.tzinfo is None:
+                            dt = _TZ_BR.localize(dt)
+                        else:
+                            dt = dt.astimezone(_TZ_BR)
+                        hora_fmt = dt.strftime("%d/%m as %H:%M")
                     except Exception:
                         hora_fmt = l.get("datetime_disparo", "?")
                     rec = " 🔁" if l.get("recorrente") else ""
@@ -70,10 +81,9 @@ def lembrete_node(state: State) -> dict:
                 mensagem = "\n".join(linhas)
 
         elif action == "cancelar_lembrete" and lembrete_id:
-            # Aceita id curto (6 chars) ou completo
             lid_full = next((l["id"] for l in lembretes if l["id"].startswith(lembrete_id)), lembrete_id)
             ok = neo4j.deletar_lembrete(user_id, lid_full)
-            mensagem = "Lembrete cancelado!" if ok else "Não encontrei esse lembrete."
+            mensagem = "Lembrete cancelado!" if ok else "Nao encontrei esse lembrete."
 
         elif action == "cancelar_todos":
             for l in lembretes:
@@ -81,7 +91,7 @@ def lembrete_node(state: State) -> dict:
             mensagem = f"{len(lembretes)} lembrete(s) cancelado(s)."
 
         elif not mensagem:
-            mensagem = "O que você quer lembrar? Me diz o texto e a hora!"
+            mensagem = "O que voce quer lembrar? Me diz o texto e a hora!"
 
     except Exception as e:
         logger.error("lembrete: erro ao executar action=%s: %s", action, e)
@@ -100,3 +110,16 @@ def _parse_json(raw: str) -> dict:
         except Exception:
             pass
     return {"action": "conversa", "mensagem": raw}
+
+
+def _normalizar_datetime_sao_paulo(datetime_iso: str) -> str:
+    """
+    Normaliza datetime para horario de Sao Paulo e retorna ISO sem timezone,
+    mantendo compatibilidade com armazenamento atual no Neo4j.
+    """
+    dt = datetime.fromisoformat(datetime_iso)
+    if dt.tzinfo is None:
+        dt = _TZ_BR.localize(dt)
+    else:
+        dt = dt.astimezone(_TZ_BR)
+    return dt.isoformat(timespec="seconds")
