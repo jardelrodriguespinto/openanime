@@ -90,14 +90,42 @@ def _aplicar_preferencias_curriculo(resultado: dict, preferencias: dict) -> None
     if not preferencias:
         return
 
+    # Atalhos de secoes.
+    if preferencias.get("somente_habilidades"):
+        resultado["experiencias"] = []
+        resultado["formacao"] = []
+        resultado["idiomas"] = []
+
+    if preferencias.get("somente_experiencias"):
+        resultado["habilidades"] = []
+        resultado["formacao"] = []
+        resultado["idiomas"] = []
+
     if preferencias.get("incluir_objetivo") is False:
         resultado["objetivo"] = ""
+
+    if preferencias.get("incluir_habilidades") is False:
+        resultado["habilidades"] = []
+
+    if preferencias.get("incluir_experiencias") is False:
+        resultado["experiencias"] = []
 
     if preferencias.get("incluir_formacao") is False:
         resultado["formacao"] = []
 
     if preferencias.get("incluir_idiomas") is False:
         resultado["idiomas"] = []
+
+    foco_palavras = preferencias.get("foco_palavras") or []
+    if foco_palavras:
+        resultado["habilidades"] = _ordenar_habilidades_por_foco(
+            resultado.get("habilidades", []),
+            foco_palavras,
+        )
+        _ordenar_bullets_experiencia_por_foco(
+            resultado.get("experiencias", []),
+            foco_palavras,
+        )
 
     max_habilidades = preferencias.get("max_habilidades")
     if isinstance(max_habilidades, int) and max_habilidades > 0:
@@ -112,10 +140,62 @@ def _aplicar_preferencias_curriculo(resultado: dict, preferencias: dict) -> None
         for exp in resultado.get("experiencias", []) or []:
             exp["bullets"] = (exp.get("bullets") or [])[:max_bullets]
 
+    max_formacao = preferencias.get("max_formacao")
+    if isinstance(max_formacao, int) and max_formacao >= 0:
+        resultado["formacao"] = (resultado.get("formacao") or [])[:max_formacao]
+
+    max_idiomas = preferencias.get("max_idiomas")
+    if isinstance(max_idiomas, int) and max_idiomas >= 0:
+        resultado["idiomas"] = (resultado.get("idiomas") or [])[:max_idiomas]
+
     if preferencias.get("experiencia_primeiro"):
-        # O template ja mostra experiencia antes de formacao/idiomas.
-        # Mantemos o flag para evolucoes futuras sem quebrar contrato.
-        pass
+        resultado["experiencia_primeiro"] = True
+
+
+def _normalizar_foco(txt: str) -> str:
+    base = str(txt or "").lower().strip()
+    base = re.sub(r"[^a-z0-9+#/._\-\s]", " ", base)
+    return re.sub(r"\s+", " ", base).strip()
+
+
+def _score_foco(texto: str, foco_palavras: list[str]) -> int:
+    alvo = _normalizar_foco(texto)
+    if not alvo:
+        return 0
+    score = 0
+    for foco in foco_palavras:
+        f = _normalizar_foco(foco)
+        if not f:
+            continue
+        if f == alvo:
+            score += 3
+        elif f in alvo or alvo in f:
+            score += 2
+        elif any(tok == f for tok in alvo.split()):
+            score += 1
+    return score
+
+
+def _ordenar_habilidades_por_foco(habilidades: list[str], foco_palavras: list[str]) -> list[str]:
+    if not habilidades or not foco_palavras:
+        return habilidades
+    ranked = []
+    for idx, skill in enumerate(habilidades):
+        ranked.append((_score_foco(skill, foco_palavras), idx, skill))
+    ranked.sort(key=lambda x: (-x[0], x[1]))
+    return [item[2] for item in ranked]
+
+
+def _ordenar_bullets_experiencia_por_foco(experiencias: list[dict], foco_palavras: list[str]) -> None:
+    if not experiencias or not foco_palavras:
+        return
+    for exp in experiencias:
+        bullets = exp.get("bullets") or []
+        ranked = []
+        for idx, b in enumerate(bullets):
+            ranked.append((_score_foco(b, foco_palavras), idx, b))
+        ranked.sort(key=lambda x: (-x[0], x[1]))
+        exp["bullets"] = [item[2] for item in ranked]
 
 
 def _tem_contexto_vaga_especifica(

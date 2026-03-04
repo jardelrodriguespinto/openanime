@@ -1,4 +1,4 @@
-﻿import datetime
+import datetime
 import logging
 import logging.handlers
 import os
@@ -11,6 +11,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, fil
 from bot.handlers import (
     handle_audio,
     handle_candidaturas,
+    handle_comandos,
     handle_curriculo_ats,
     handle_document,
     handle_error,
@@ -124,6 +125,8 @@ def main():
 
     app.add_handler(CommandHandler("start", handle_start))
     app.add_handler(CommandHandler("help", handle_help))
+    app.add_handler(CommandHandler("comandos", handle_comandos))
+    app.add_handler(CommandHandler("ajuda", handle_comandos))
     app.add_handler(CommandHandler("historico", handle_historico))
     app.add_handler(CommandHandler("stats", handle_stats))
     app.add_handler(CommandHandler("maratona", handle_maratona))

@@ -5,6 +5,7 @@ Agente de vagas — busca, recomendacao personalizada e geracao de curriculo ATS
 import logging
 import re
 import unicodedata
+import difflib
 
 from ai.openrouter import openrouter
 from data.jobs import Vaga, buscar_vagas, gerar_variantes
@@ -17,6 +18,34 @@ logger = logging.getLogger(__name__)
 def _sem_acento(texto: str) -> str:
     """Remove acentos para comparacao case-insensitive robusta."""
     return unicodedata.normalize("NFD", texto).encode("ascii", "ignore").decode().lower()
+
+
+def _normalizar_ruido(texto: str) -> str:
+    base = _sem_acento(texto or "")
+    # "curriloooo" -> "currilo"
+    base = re.sub(r"(.)\1{2,}", r"\1", base)
+    base = re.sub(r"[^a-z0-9\s+#/._-]", " ", base)
+    base = re.sub(r"\s+", " ", base).strip()
+    return base
+
+
+def _eh_pedido_curriculo(texto: str) -> bool:
+    norm = _normalizar_ruido(texto or "")
+    if not norm:
+        return False
+
+    if any(kw in norm for kw in _KEYWORDS_CURRICULO_ATS):
+        return True
+
+    tokens = norm.split()
+    alvos = {"curriculo", "curriculoats", "cv"}
+    for tok in tokens:
+        if tok in alvos:
+            return True
+        if any(difflib.SequenceMatcher(None, tok, alvo).ratio() >= 0.78 for alvo in ("curriculo", "curriculoats")):
+            return True
+
+    return False
 
 
 _KEYWORDS_CURRICULO_ATS = [
@@ -184,10 +213,10 @@ def jobs_node(state: dict) -> dict:
         return _modo_curriculo_ats(state)
 
     # Normaliza acentos para matching robusto ("currículo" == "curriculo")
-    msg_norm = _sem_acento(mensagem)
+    msg_norm = _normalizar_ruido(mensagem)
 
     # Modo curriculo ATS
-    if any(kw in msg_norm for kw in _KEYWORDS_CURRICULO_ATS):
+    if _eh_pedido_curriculo(mensagem):
         return _modo_curriculo_ats(state)
 
     # Modo candidaturas (historico)
@@ -283,7 +312,7 @@ def _modo_curriculo_ats(state: dict) -> dict:
         return {"response": "Seu perfil esta vazio ainda. Manda seu curriculo em PDF ou me conta sobre sua experiencia para eu gerar um curriculo personalizado!"}
 
     preferencias_curriculo = _extrair_preferencias_curriculo(mensagem)
-    if _pediu_formato_sem_detalhar(mensagem, preferencias_curriculo):
+    if _pediu_formato_sem_detalhar(mensagem, preferencias_curriculo) or _pediu_ajuste_generico_sem_detalhar(mensagem, preferencias_curriculo):
         return {
             "response": (
                 "Posso gerar no formato que voce quiser. Me diga como quer, por exemplo: "
@@ -346,6 +375,9 @@ def _modo_curriculo_ats(state: dict) -> dict:
             vaga_empresa=vaga_empresa,
             contexto_vaga=contexto_vaga,
         )
+        resumo_prefs = _resumo_preferencias(preferencias_curriculo)
+        if resumo_prefs:
+            resposta = f"{resposta}\n\nAjustes aplicados: {resumo_prefs}."
 
         # Salva referencia no state para o handler enviar o PDF
         return {
@@ -436,7 +468,7 @@ def _mensagem_curriculo_gerado(vaga_titulo: str, vaga_empresa: str, contexto_vag
 
 def _extrair_preferencias_curriculo(mensagem: str) -> dict:
     """Extrai preferencias de formato do curriculo a partir da mensagem do usuario."""
-    txt = _sem_acento((mensagem or "").lower())
+    txt = _normalizar_ruido((mensagem or "").lower())
     prefs: dict = {}
 
     if any(k in txt for k in ["sem resumo", "sem objetivo", "sem perfil profissional"]):
@@ -450,13 +482,51 @@ def _extrair_preferencias_curriculo(mensagem: str) -> dict:
     if any(k in txt for k in ["sem formacao", "remover formacao", "tira formacao"]):
         prefs["incluir_formacao"] = False
 
+    if any(k in txt for k in ["sem habilidades", "remover habilidades", "tira habilidades"]):
+        prefs["incluir_habilidades"] = False
+
+    if any(k in txt for k in ["sem experiencia", "sem experiencias", "remover experiencias", "tira experiencias"]):
+        prefs["incluir_experiencias"] = False
+
+    if any(k in txt for k in ["somente habilidades", "so habilidades", "apenas habilidades"]):
+        prefs["somente_habilidades"] = True
+
+    if any(k in txt for k in ["somente experiencias", "so experiencias", "apenas experiencias"]):
+        prefs["somente_experiencias"] = True
+
     if any(k in txt for k in ["experiencia primeiro", "prioriza experiencia"]):
         prefs["experiencia_primeiro"] = True
+
+    if any(k in txt for k in ["foco em projetos", "foco em projeto", "foco em experiencia", "foco em experiencias"]):
+        prefs["experiencia_primeiro"] = True
+        prefs.setdefault("max_habilidades", 10)
+        prefs.setdefault("max_experiencias", 5)
 
     if any(k in txt for k in ["compacto", "1 pagina", "uma pagina", "enxuto", "resumido"]):
         prefs["max_habilidades"] = 10
         prefs["max_experiencias"] = 3
         prefs["max_bullets_por_experiencia"] = 3
+        prefs["max_formacao"] = 2
+        prefs["max_idiomas"] = 2
+
+    if any(k in txt for k in ["detalhado", "completo", "2 paginas", "duas paginas"]):
+        prefs.setdefault("max_habilidades", 18)
+        prefs.setdefault("max_experiencias", 5)
+        prefs.setdefault("max_bullets_por_experiencia", 5)
+
+    m_pag = re.search(r"\b([12])\s+paginas?\b", txt)
+    if m_pag:
+        paginas = int(m_pag.group(1))
+        if paginas <= 1:
+            prefs["max_habilidades"] = 10
+            prefs["max_experiencias"] = 3
+            prefs["max_bullets_por_experiencia"] = 3
+            prefs["max_formacao"] = 2
+            prefs["max_idiomas"] = 2
+        else:
+            prefs.setdefault("max_habilidades", 18)
+            prefs.setdefault("max_experiencias", 5)
+            prefs.setdefault("max_bullets_por_experiencia", 5)
 
     m_hab = re.search(r"(?:max(?:imo)?\s+)?(\d{1,2})\s+habilidades", txt)
     if m_hab:
@@ -470,11 +540,23 @@ def _extrair_preferencias_curriculo(mensagem: str) -> dict:
     if m_bul:
         prefs["max_bullets_por_experiencia"] = max(1, min(int(m_bul.group(1)), 8))
 
+    m_form = re.search(r"(?:max(?:imo)?\s+)?(\d{1,2})\s+formac", txt)
+    if m_form:
+        prefs["max_formacao"] = max(0, min(int(m_form.group(1)), 5))
+
+    m_idi = re.search(r"(?:max(?:imo)?\s+)?(\d{1,2})\s+idiomas", txt)
+    if m_idi:
+        prefs["max_idiomas"] = max(0, min(int(m_idi.group(1)), 6))
+
+    focos = _extrair_foco_palavras(txt)
+    if focos:
+        prefs["foco_palavras"] = focos
+
     return prefs
 
 
 def _pediu_formato_sem_detalhar(mensagem: str, prefs: dict) -> bool:
-    txt = _sem_acento((mensagem or "").lower())
+    txt = _normalizar_ruido((mensagem or "").lower())
     gatilhos = [
         "do meu jeito",
         "da minha forma",
@@ -483,6 +565,84 @@ def _pediu_formato_sem_detalhar(mensagem: str, prefs: dict) -> bool:
         "quero escolher o formato",
     ]
     return any(g in txt for g in gatilhos) and not prefs
+
+
+def _pediu_ajuste_generico_sem_detalhar(mensagem: str, prefs: dict) -> bool:
+    txt = _normalizar_ruido((mensagem or "").lower())
+    gatilhos = [
+        "ajusta isso",
+        "ajuste isso",
+        "nao ajusta",
+        "nao ficou bom",
+        "deixa melhor",
+        "faz melhor",
+        "quero diferente",
+        "do jeito que eu quero",
+    ]
+    return any(g in txt for g in gatilhos) and not prefs
+
+
+def _extrair_foco_palavras(txt: str) -> list[str]:
+    focos: list[str] = []
+    stop = {
+        "foco", "em", "de", "da", "do", "para", "pra", "mais", "menos",
+        "curriculo", "curriculoats", "vaga", "vagas", "experiencia", "experiencias",
+        "max", "min", "minimo", "maximo", "pagina", "paginas",
+        "idioma", "idiomas", "habilidade", "habilidades", "bullets", "itens",
+        "formacao", "formacoes",
+    }
+
+    for m in re.finditer(r"foco em ([a-z0-9+#/._\-\s]{2,80})", txt):
+        trecho = m.group(1)
+        trecho = re.split(r"[,;:.]|\b(?:com|sem|mas|porem|max|min|minimo|maximo)\b", trecho)[0]
+        tokens = [t for t in trecho.split() if len(t) > 2 and t not in stop]
+        for t in tokens[:6]:
+            if re.fullmatch(r"\d+", t):
+                continue
+            if t not in focos:
+                focos.append(t)
+
+    return focos[:8]
+
+
+def _resumo_preferencias(prefs: dict) -> str:
+    if not prefs:
+        return ""
+
+    itens: list[str] = []
+    if prefs.get("incluir_objetivo") is False:
+        itens.append("sem resumo")
+    if prefs.get("incluir_formacao") is False:
+        itens.append("sem formacao")
+    if prefs.get("incluir_idiomas") is False:
+        itens.append("sem idiomas")
+    if prefs.get("incluir_habilidades") is False:
+        itens.append("sem habilidades")
+    if prefs.get("incluir_experiencias") is False:
+        itens.append("sem experiencias")
+    if prefs.get("somente_habilidades"):
+        itens.append("somente habilidades")
+    if prefs.get("somente_experiencias"):
+        itens.append("somente experiencias")
+    if prefs.get("experiencia_primeiro"):
+        itens.append("experiencia antes de habilidades")
+
+    if isinstance(prefs.get("max_habilidades"), int):
+        itens.append(f"max {prefs['max_habilidades']} habilidades")
+    if isinstance(prefs.get("max_experiencias"), int):
+        itens.append(f"max {prefs['max_experiencias']} experiencias")
+    if isinstance(prefs.get("max_bullets_por_experiencia"), int):
+        itens.append(f"max {prefs['max_bullets_por_experiencia']} bullets por experiencia")
+    if isinstance(prefs.get("max_formacao"), int):
+        itens.append(f"max {prefs['max_formacao']} formacoes")
+    if isinstance(prefs.get("max_idiomas"), int):
+        itens.append(f"max {prefs['max_idiomas']} idiomas")
+
+    focos = prefs.get("foco_palavras") or []
+    if focos:
+        itens.append(f"foco em {', '.join(focos[:4])}")
+
+    return ", ".join(itens[:8])
 
 
 def _modo_candidaturas(user_id: str) -> dict:

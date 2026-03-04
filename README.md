@@ -230,6 +230,8 @@ Comandos disponíveis:
 |---|---|
 | `/start` | Boas-vindas |
 | `/help` | Exemplos de uso |
+| `/comandos` | Lista completa de comandos |
+| `/ajuda` | Alias de ajuda |
 | `/historico` | Sua watchlist/readlist |
 | `/stats` | Estatísticas do seu perfil |
 | `/maratona <franquia>` | Watch order completo |

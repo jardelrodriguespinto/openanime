@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import operator
+import re
+import unicodedata
 from typing import TypedDict, Annotated
 
 from langgraph.graph import StateGraph, END
@@ -15,6 +17,58 @@ VALID_INTENTS = {
     "noticias", "documento", "perfil_pro", "vaga", "curriculo_ats", "candidatura",
     "lembrete", "financas", "ranking", "treino", "estudos", "anotacoes",
 }
+
+
+def _normalizar_para_match(texto: str) -> str:
+    base = (texto or "").lower().strip()
+    base = unicodedata.normalize("NFD", base)
+    base = "".join(ch for ch in base if unicodedata.category(ch) != "Mn")
+    base = re.sub(r"(.)\1{2,}", r"\1", base)
+    base = re.sub(r"[^a-z0-9\s/_-]", " ", base)
+    base = re.sub(r"\s+", " ", base).strip()
+    return base
+
+
+def _history_tem_termo(history: list, termos: set[str]) -> bool:
+    for msg in history[-6:]:
+        texto = _normalizar_para_match(msg.get("content", ""))
+        if any(t in texto for t in termos):
+            return True
+    return False
+
+
+def _heuristica_intent(user_message: str, history: list) -> str | None:
+    norm = _normalizar_para_match(user_message)
+    if not norm:
+        return None
+
+    compacto = norm.replace(" ", "")
+
+    termos_notas = {
+        "anota", "anotacao", "anotacoes", "obsidian",
+        "crianota", "listarnotas", "buscarnotas", "vernota", "editarnota", "deletarnota",
+    }
+    termos_estudos = {"flashcard", "flashcards", "revisar", "revisao", "leetcode", "two pointer", "listarflashcards", "acertei", "errei"}
+
+    if any(t in compacto for t in ("crianota", "listarnotas", "buscarnotas", "vernota", "editarnota", "deletarnota")):
+        return "anotacoes"
+    if any(t in compacto for t in ("listarflashcards", "criarflashcard", "flashcard", "flashcards")):
+        return "estudos"
+
+    if any(t in norm for t in termos_notas):
+        return "anotacoes"
+    if any(p in norm for p in ("minhas notas", "lista notas", "busca notas", "nota sobre", "salva isso")):
+        return "anotacoes"
+    if any(t in norm for t in termos_estudos):
+        return "estudos"
+
+    if norm in {"quais sao", "quais", "mostra", "me mostra", "bora comecar", "comecar", "vamos comecar"}:
+        if _history_tem_termo(history, {"flashcard", "flashcards", "revisao", "estudos"}):
+            return "estudos"
+        if _history_tem_termo(history, {"nota", "notas", "obsidian"}):
+            return "anotacoes"
+
+    return None
 
 
 class State(TypedDict):
@@ -41,6 +95,15 @@ def orchestrator_node(state: State) -> dict:
 
     user_message = state["raw_input"]
     history = state.get("messages", [])
+
+    intent_heuristica = _heuristica_intent(user_message, history)
+    if intent_heuristica:
+        logger.info(
+            "Orquestrador: heuristica acionada user=%s intent=%s",
+            state.get("user_id"),
+            intent_heuristica,
+        )
+        return {"intent": intent_heuristica}
 
     messages = orch_prompt.build_messages(user_message, history)
     logger.info("Orquestrador: classificando intenção para user=%s", state.get("user_id"))

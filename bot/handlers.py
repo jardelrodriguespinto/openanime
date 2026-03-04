@@ -1,6 +1,8 @@
 import asyncio
+import difflib
 import html
 import logging
+import re
 import unicodedata
 
 from telegram import Message, Update
@@ -19,6 +21,52 @@ MAX_TELEGRAM_RETRIES = 3
 MAX_TELEGRAM_MESSAGE_LEN = 4096
 MAX_TELEGRAM_FORMATTED_CHUNK_LEN = 3900
 _SPLIT_FLOOR_RATIO = 0.4
+
+
+def _build_help_text() -> str:
+    return (
+        "Como usar:\n\n"
+        "Fale naturalmente. Exemplos:\n\n"
+        "- \"Me recomenda algo como Solo Leveling\"\n"
+        "- \"Analisa o Attack on Titan pra mim\"\n"
+        "- \"Quem e o pai do Eren?\"\n"
+        "- \"Tem temporada nova de Chainsaw Man?\"\n"
+        "- \"Noticias de tech hoje\"\n"
+        "- \"Tem vaga de dev python remoto?\"\n"
+        "- \"Gera meu curriculo ATS\"\n"
+        "- \"Me candidata nessa vaga\"\n"
+        "- Envie um PDF para analise automatica\n"
+        "- Envie audio de voz e eu transcrevo para responder\n\n"
+        "Comandos Telegram:\n"
+        "/start - inicio\n"
+        "/help - ajuda\n"
+        "/comandos - lista todos os comandos\n"
+        "/ajuda - alias de ajuda\n"
+        "/historico - seu historico de midia\n"
+        "/stats - suas estatisticas pessoais\n"
+        "/maratona &lt;franquia&gt; - ordem de watch\n"
+        "/novidades - digest de novidades de anime\n"
+        "/noticias [area] - noticias gerais (tech, ia, mercado...)\n"
+        "/vagas [query] - busca vagas de emprego\n"
+        "/curriculo_ats - gera curriculo ATS personalizado\n"
+        "/perfil_pro - seu perfil profissional\n"
+        "/candidaturas - pipeline de candidaturas\n"
+        "/notificacoes - configura horario e tipo de alertas\n"
+        "/limpar - limpa o historico da conversa\n\n"
+        "Comandos naturais de notas (mini Obsidian):\n"
+        "- \"anota que [texto]\" ou \"crianota [texto]\"\n"
+        "- \"listarnotas\" ou \"minhas notas\"\n"
+        "- \"buscarnotas [query]\"\n"
+        "- \"vernota [id/titulo]\"\n"
+        "- \"editarnota [id/titulo]: [novo texto]\"\n"
+        "- \"deletarnota [id/titulo]\"\n\n"
+        "Comandos naturais de estudos (flashcards):\n"
+        "- \"cria flashcards sobre [tema]\"\n"
+        "- \"listarflashcards\" ou \"quais sao?\"\n"
+        "- \"revisar\" ou \"bora comecar\"\n"
+        "- \"acertei [id]\" ou \"errei [id]\"\n"
+        "- \"meu progresso de estudos\""
+    )
 
 
 def _find_split_index(text: str, hard_limit: int) -> int:
@@ -228,35 +276,13 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /help."""
     await _telegram_call_with_retry(
         "reply_html_help",
-        lambda: update.message.reply_html(
-            "Como usar:\n\n"
-            "Fale naturalmente. Exemplos:\n\n"
-            "- \"Me recomenda algo como Solo Leveling\"\n"
-            "- \"Analisa o Attack on Titan pra mim\"\n"
-            "- \"Quem e o pai do Eren?\"\n"
-            "- \"Tem temporada nova de Chainsaw Man?\"\n"
-            "- \"Noticias de tech hoje\"\n"
-            "- \"Tem vaga de dev python remoto?\"\n"
-            "- \"Gera meu curriculo ATS\"\n"
-            "- \"Me candidata nessa vaga\"\n"
-            "- Envie um PDF para analise automatica\n"
-            "- Envie audio de voz e eu transcrevo para responder\n\n"
-            "Comandos:\n"
-            "/start - inicio\n"
-            "/help - ajuda\n"
-            "/historico - seu historico de midia\n"
-            "/stats - suas estatisticas pessoais\n"
-            "/maratona &lt;franquia&gt; - ordem de watch\n"
-            "/novidades - digest de novidades de anime\n"
-            "/noticias [area] - noticias gerais (tech, ia, mercado...)\n"
-            "/vagas [query] - busca vagas de emprego\n"
-            "/curriculo_ats - gera curriculo ATS personalizado\n"
-            "/perfil_pro - seu perfil profissional\n"
-            "/candidaturas - pipeline de candidaturas\n"
-            "/notificacoes - configura horario e tipo de alertas\n"
-            "/limpar - limpa o historico da conversa"
-        ),
+        lambda: update.message.reply_html(_build_help_text()),
     )
+
+
+async def handle_comandos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /comandos e /ajuda."""
+    await handle_help(update, context)
 
 
 async def handle_historico(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -401,6 +427,52 @@ def _normalizar_texto(texto: str) -> str:
     return "".join(ch for ch in sem_acentos if unicodedata.category(ch) != "Mn")
 
 
+def _compactar_repeticoes(texto: str) -> str:
+    # "cooomandooo" -> "comando"
+    return re.sub(r"(.)\1{2,}", r"\1", texto or "")
+
+
+def _tokenizar(texto: str) -> list[str]:
+    base = _normalizar_texto(_compactar_repeticoes(texto))
+    return re.findall(r"[a-z0-9_]+", base)
+
+
+def _fuzzy_match(token: str, alvo: str, cutoff: float = 0.76) -> bool:
+    if not token:
+        return False
+    if token == alvo or alvo in token or token in alvo:
+        return True
+    return difflib.SequenceMatcher(None, token, alvo).ratio() >= cutoff
+
+
+def _is_help_request(texto: str) -> bool:
+    raw = (texto or "").strip()
+    if not raw:
+        return False
+
+    if raw.startswith("/"):
+        cmd = _normalizar_texto(raw[1:].split()[0])
+        if cmd in {"help", "comandos", "ajuda"}:
+            return True
+
+    tokens = _tokenizar(raw)
+    if not tokens:
+        return False
+
+    if any(_fuzzy_match(tok, "help") or _fuzzy_match(tok, "ajuda") for tok in tokens):
+        return True
+    if any(_fuzzy_match(tok, "comando") or _fuzzy_match(tok, "comandos") for tok in tokens):
+        return True
+    if any(_fuzzy_match(tok, "menu") for tok in tokens):
+        return True
+
+    base = " ".join(tokens)
+    if "o que voce faz" in base or "lista comandos" in base or "listar comandos" in base:
+        return True
+
+    return False
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler principal - processa toda mensagem de texto."""
     if not update.message or not update.message.text:
@@ -458,6 +530,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     # --- Fluxo normal ---
+    if _is_help_request(text):
+        await _telegram_call_with_retry(
+            "reply_html_help_natural",
+            lambda: update.message.reply_html(_build_help_text()),
+        )
+        return
+
     msg_processando = await _telegram_call_with_retry(
         "reply_text_processing",
         lambda: update.message.reply_text("Pensando..."),

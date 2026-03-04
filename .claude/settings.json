@@ -11,7 +11,8 @@
       "Bash(ls /d/anime-bot/*.md)",
       "Bash(xargs grep -l -i \"curriculo\\\\|pdf\\\\|weasyprint\\\\|resume\\\\|curriculum\")",
       "Bash(xargs grep -l \"curriculo\\\\|ATS\\\\|job\\\\|aplicacao\")",
-      "Bash(docker compose build bot --no-cache)"
+      "Bash(docker compose build bot --no-cache)",
+      "WebFetch(domain:github.com)"
     ]
   }
 }
