@@ -35,6 +35,7 @@ def otimizar_para_vaga(
     vaga_descricao: str,
     vaga_requisitos: list[str],
     preferencias: dict | None = None,
+    instrucoes_usuario: str = "",
 ) -> dict:
     """
     Gera curriculo ATS de forma deterministica, sem usar modelo generativo.
@@ -75,6 +76,7 @@ def otimizar_para_vaga(
         "idiomas": _dedup_idiomas(perfil.get("idiomas", [])),
     }
     _aplicar_preferencias_curriculo(resultado, preferencias or {})
+    _aplicar_instrucoes_livres(resultado, instrucoes_usuario)
 
     logger.info(
         "ats_optimizer(local): vaga=%s | keywords=%d | habilidades=%d | experiencias=%d",
@@ -116,6 +118,17 @@ def _aplicar_preferencias_curriculo(resultado: dict, preferencias: dict) -> None
     if preferencias.get("incluir_idiomas") is False:
         resultado["idiomas"] = []
 
+    if preferencias.get("incluir_linkedin") is False:
+        resultado["linkedin"] = ""
+    if preferencias.get("incluir_github") is False:
+        resultado["github"] = ""
+    if preferencias.get("incluir_portfolio") is False:
+        resultado["portfolio"] = ""
+    if preferencias.get("incluir_telefone") is False:
+        resultado["telefone"] = ""
+    if preferencias.get("incluir_email") is False:
+        resultado["email"] = ""
+
     foco_palavras = preferencias.get("foco_palavras") or []
     if foco_palavras:
         resultado["habilidades"] = _ordenar_habilidades_por_foco(
@@ -150,6 +163,36 @@ def _aplicar_preferencias_curriculo(resultado: dict, preferencias: dict) -> None
 
     if preferencias.get("experiencia_primeiro"):
         resultado["experiencia_primeiro"] = True
+
+    if preferencias.get("objetivo_curto") and resultado.get("objetivo"):
+        resultado["objetivo"] = _encurtar_texto(resultado["objetivo"], max_chars=180)
+
+
+def _aplicar_instrucoes_livres(resultado: dict, instrucoes_usuario: str) -> None:
+    """
+    Pequenos ajustes adicionais quando o usuario descreve preferencia em linguagem livre.
+    Mantem o comportamento deterministico e sem inventar dados.
+    """
+    txt = (instrucoes_usuario or "").lower()
+    if not txt:
+        return
+
+    if ("habilidades primeiro" in txt) or ("skills primeiro" in txt):
+        resultado["experiencia_primeiro"] = False
+
+    if ("experiencia primeiro" in txt) or ("experiencias primeiro" in txt):
+        resultado["experiencia_primeiro"] = True
+
+    if ("objetivo curto" in txt or "resumo curto" in txt) and resultado.get("objetivo"):
+        resultado["objetivo"] = _encurtar_texto(resultado["objetivo"], max_chars=180)
+
+
+def _encurtar_texto(texto: str, max_chars: int = 180) -> str:
+    t = (texto or "").strip()
+    if len(t) <= max(40, max_chars):
+        return t
+    corte = t[:max_chars].rsplit(" ", 1)[0].strip()
+    return (corte or t[:max_chars]).rstrip(".,;:") + "."
 
 
 def _normalizar_foco(txt: str) -> str:

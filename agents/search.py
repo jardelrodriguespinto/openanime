@@ -16,6 +16,8 @@ from data.tvmaze import tvmaze
 from data.wikipedia import wikipedia
 from data.youtube import youtube_search
 import prompts.search as search_prompt
+import prompts.webpage as webpage_prompt
+from utils.webpage_reader import extrair_urls, ler_pagina
 
 logger = logging.getLogger(__name__)
 
@@ -344,6 +346,52 @@ def _rank_language(items: list[dict], prefer_pt: bool) -> list[dict]:
     return pt_items + other_items
 
 
+def _responder_link_direto(user_message: str, history: list[dict], user_id: str) -> str | None:
+    """
+    Se a mensagem trouxer URL, tenta ler a pagina e responder o pedido do usuario.
+    Retorna resposta textual pronta ou None (quando nao ha URL).
+    """
+    urls = extrair_urls(user_message, max_urls=2)
+    if not urls:
+        return None
+
+    paginas_validas: list[dict] = []
+    erros: list[str] = []
+
+    for url in urls:
+        pagina = ler_pagina(url, max_chars=16000)
+        if pagina.get("text"):
+            paginas_validas.append(pagina)
+        else:
+            erro = pagina.get("error") or "falha ao extrair conteudo"
+            erros.append(f"{url} ({erro})")
+
+    if not paginas_validas:
+        erro_texto = "; ".join(erros[:2]) if erros else "nao foi possivel ler o link"
+        return f"Nao consegui ler esse link agora: {erro_texto}. Tenta outro URL ou manda o trecho que voce quer analisar."
+
+    logger.info(
+        "Search: leitura direta de URL user=%s urls=%d extraidas=%d",
+        user_id,
+        len(urls),
+        len(paginas_validas),
+    )
+    messages = webpage_prompt.build_messages(user_message=user_message, history=history, pages=paginas_validas)
+    try:
+        resposta = openrouter.search_synthesize(messages)
+    except Exception as e:
+        logger.error("Search: erro ao sintetizar leitura de URL: %s", e)
+        trecho = paginas_validas[0].get("text", "")[:900]
+        titulo = paginas_validas[0].get("title") or "pagina"
+        url = paginas_validas[0].get("resolved_url") or paginas_validas[0].get("url")
+        return (
+            f"Nao consegui resumir com IA agora, mas li a pagina '{titulo}'.\n\n"
+            f"Trecho extraido:\n{trecho}\n\nFonte: {url}"
+        )
+
+    return resposta
+
+
 def _agent_link_validator(payload: dict) -> tuple[dict, str]:
     """Subagente de confiabilidade: remove links quebrados antes da sintese."""
     total_checked = 0
@@ -389,6 +437,10 @@ def search_node(state: State) -> dict:
     user_message = state["raw_input"]
     history = state.get("messages", [])
     user_id = state.get("user_id", "?")
+
+    resposta_link = _responder_link_direto(user_message, history, user_id)
+    if resposta_link is not None:
+        return {"response": resposta_link}
 
     collectors = {
         "web": _collector_web,

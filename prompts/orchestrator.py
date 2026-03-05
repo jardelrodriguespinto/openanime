@@ -38,6 +38,8 @@ Exemplos:
 "o que acha de parasite?" → analise
 "analisa squid game" → analise
 "tem temporada nova de chainsaw man?" → busca
+"resume esse link pra mim https://site.com/pagina" → busca
+"extrai os pontos principais desse link https://site.com/pagina" → busca
 "sites para ler manhwa de graça" → busca
 "nova musica do BTS?" → busca
 "tem turnê do coldplay no brasil?" → busca
@@ -89,6 +91,7 @@ Exemplos:
 "quais vagas combinam comigo?" → vaga
 "oportunidades de emprego em SP" → vaga
 "gera meu curriculo ATS" → curriculo_ats
+"gera meu curriculo ATS com base nessa vaga https://empresa.com/jobs/123" → curriculo_ats
 "cria um curriculo para aquela vaga" → curriculo_ats
 "personaliza meu curriculo para a vaga da Nubank" → curriculo_ats
 "quero um curriculo em PDF" → curriculo_ats

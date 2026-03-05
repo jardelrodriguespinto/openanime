@@ -6,11 +6,13 @@ import logging
 import re
 import unicodedata
 import difflib
+from urllib.parse import urlparse
 
 from ai.openrouter import openrouter
 from data.jobs import Vaga, buscar_vagas, gerar_variantes
 from graph.neo4j_client import get_neo4j
 import prompts.jobs as jobs_prompt
+from utils.webpage_reader import extrair_urls, ler_pagina
 
 logger = logging.getLogger(__name__)
 
@@ -202,6 +204,93 @@ def calcular_score_match(perfil: dict, vaga: Vaga) -> float:
     return round(min(score, 1.0), 2)
 
 
+def _merge_vagas_unicas(*listas: list[Vaga]) -> list[Vaga]:
+    """Combina vagas removendo duplicatas por URL ou titulo+empresa."""
+    seen: set[str] = set()
+    out: list[Vaga] = []
+
+    for vagas in listas:
+        for vaga in vagas or []:
+            chave_url = (vaga.url or "").strip().lower()
+            chave_title = f"{(vaga.titulo or '').strip().lower()}|{(vaga.empresa or '').strip().lower()}"
+            chave = chave_url or chave_title
+            if not chave or chave in seen:
+                continue
+            seen.add(chave)
+            out.append(vaga)
+    return out
+
+
+def _simplificar_query_vagas(query: str) -> str:
+    txt = _normalizar_ruido(query or "")
+    tokens = [t for t in txt.split() if len(t) > 2]
+    if not tokens:
+        return "desenvolvedor"
+
+    ruido = {
+        "senior", "pleno", "junior", "sr", "jr", "mid",
+        "remoto", "hibrido", "presencial", "home", "office",
+        "brasil", "brazil",
+    }
+    base = [t for t in tokens if t not in ruido]
+    if not base:
+        base = tokens
+    return " ".join(base[:3]).strip() or "desenvolvedor"
+
+
+def _buscar_vagas_em_cascata(
+    query_principal: str,
+    localizacao: str,
+    modalidade: str,
+    queries_extras: list[str],
+) -> list[Vaga]:
+    """
+    Busca com fallback progressivo para aumentar cobertura:
+    1) busca original
+    2) relaxa localizacao/modalidade
+    3) query simplificada + sem localizacao
+    """
+    base = buscar_vagas(
+        query_principal,
+        localizacao=localizacao,
+        modalidade=modalidade,
+        queries_extras=queries_extras,
+    )
+    if len(base) >= 8:
+        return base
+
+    logger.info(
+        "jobs: poucos resultados na busca inicial (%d), ampliando cobertura",
+        len(base),
+    )
+
+    ampliada = buscar_vagas(
+        query_principal,
+        localizacao="",
+        modalidade="",
+        queries_extras=queries_extras,
+    )
+
+    query_relax = _simplificar_query_vagas(query_principal)
+    extras_relax = gerar_variantes(query_relax)
+    relaxada = buscar_vagas(
+        query_relax,
+        localizacao="",
+        modalidade="",
+        queries_extras=extras_relax[1:] if len(extras_relax) > 1 else [],
+    )
+
+    combinada = _merge_vagas_unicas(base, ampliada, relaxada)
+    logger.info(
+        "jobs: cobertura ampliada base=%d ampliada=%d relaxada=%d total=%d",
+        len(base),
+        len(ampliada),
+        len(relaxada),
+        len(combinada),
+    )
+    return combinada
+
+
 def jobs_node(state: dict) -> dict:
     """No LangGraph do agente de vagas."""
     user_id = state.get("user_id", "")
@@ -250,8 +339,8 @@ def _modo_busca(state: dict) -> dict:
 
     logger.info("jobs: query='%s' senioridade='%s' variantes=%s", query_principal, senioridade, queries_extras)
 
-    vagas = buscar_vagas(
-        query_principal,
+    vagas = _buscar_vagas_em_cascata(
+        query_principal=query_principal,
         localizacao=localizacao,
         modalidade=modalidade,
         queries_extras=queries_extras,
@@ -312,21 +401,35 @@ def _modo_curriculo_ats(state: dict) -> dict:
         return {"response": "Seu perfil esta vazio ainda. Manda seu curriculo em PDF ou me conta sobre sua experiencia para eu gerar um curriculo personalizado!"}
 
     preferencias_curriculo = _extrair_preferencias_curriculo(mensagem)
-    if _pediu_formato_sem_detalhar(mensagem, preferencias_curriculo) or _pediu_ajuste_generico_sem_detalhar(mensagem, preferencias_curriculo):
-        return {
-            "response": (
-                "Posso gerar no formato que voce quiser. Me diga como quer, por exemplo: "
-                "\"sem resumo\", \"mais compacto (1 pagina)\", \"foco em projetos\", "
-                "\"remover idiomas\" ou \"priorizar experiencia antes de habilidades\"."
-            )
-        }
 
     # Tenta detectar vaga especifica na mensagem antes de usar historico.
     vaga_titulo_extraido = _extrair_titulo_vaga_mensagem(mensagem)
     vaga_titulo = vaga_titulo_extraido or ""
     vaga_empresa = ""
     vaga_descricao = ""
-    vaga_requisitos = []
+    vaga_requisitos: list[str] = []
+
+    # Se veio link de vaga, usa scraping para enriquecer o contexto.
+    urls = extrair_urls(mensagem, max_urls=2)
+    if urls:
+        for url in urls:
+            ctx = _extrair_contexto_vaga_por_url(url)
+            if not ctx:
+                continue
+            if not vaga_titulo:
+                vaga_titulo = ctx.get("titulo", "") or vaga_titulo
+            if not vaga_empresa:
+                vaga_empresa = ctx.get("empresa", "") or vaga_empresa
+            vaga_descricao = _merge_textos(vaga_descricao, ctx.get("descricao", ""))
+            vaga_requisitos = _merge_listas(vaga_requisitos, ctx.get("requisitos", []))
+            logger.info(
+                "jobs: contexto de vaga extraido por URL user=%s url=%s titulo=%s reqs=%d",
+                user_id,
+                url,
+                vaga_titulo,
+                len(vaga_requisitos),
+            )
+            break
 
     # So usa ultima vaga quando a mensagem realmente se refere a ela.
     try:
@@ -335,9 +438,10 @@ def _modo_curriculo_ats(state: dict) -> dict:
         if ultima_vaga and _deve_usar_ultima_vaga(mensagem, vaga_titulo_extraido):
             if not vaga_titulo:
                 vaga_titulo = ultima_vaga.get("titulo", vaga_titulo)
-            vaga_empresa = ultima_vaga.get("empresa", "")
-            vaga_descricao = ultima_vaga.get("descricao", "")
-            vaga_requisitos = ultima_vaga.get("requisitos", [])
+            if not vaga_empresa:
+                vaga_empresa = ultima_vaga.get("empresa", "")
+            vaga_descricao = _merge_textos(vaga_descricao, ultima_vaga.get("descricao", ""))
+            vaga_requisitos = _merge_listas(vaga_requisitos, ultima_vaga.get("requisitos", []))
     except Exception:
         pass
 
@@ -366,6 +470,7 @@ def _modo_curriculo_ats(state: dict) -> dict:
             vaga_descricao=vaga_descricao,
             vaga_requisitos=vaga_requisitos,
             preferencias=preferencias_curriculo,
+            instrucoes_usuario=mensagem,
         )
 
         pdf_bytes = gerar_pdf_curriculo(dados_curriculo)
@@ -416,6 +521,8 @@ def _extrair_titulo_vaga_mensagem(mensagem: str) -> str:
 
     if not extraido:
         return ""
+    if "http://" in extraido or "https://" in extraido or "www." in extraido:
+        return ""
 
     stop = {
         "curriculo", "curriculoats", "ats", "gera", "gerar", "monta", "montar",
@@ -427,6 +534,109 @@ def _extrair_titulo_vaga_mensagem(mensagem: str) -> str:
     if len(titulo) < 3:
         return ""
     return titulo
+
+
+def _extrair_contexto_vaga_por_url(url: str) -> dict:
+    """Lê página da vaga e extrai titulo/empresa/descricao/requisitos."""
+    pagina = ler_pagina(url, max_chars=18000)
+    if not pagina.get("text"):
+        logger.debug("jobs: falha scraping vaga url=%s erro=%s", url, pagina.get("error"))
+        return {}
+
+    texto = pagina.get("text", "")
+    raw_title = pagina.get("title", "")
+    titulo = _limpar_titulo_vaga_link(raw_title)
+    empresa = _inferir_empresa_vaga(raw_title, pagina.get("resolved_url") or url)
+    requisitos = _extrair_requisitos_texto(texto)
+
+    return {
+        "titulo": titulo,
+        "empresa": empresa,
+        "descricao": texto,
+        "requisitos": requisitos,
+    }
+
+
+def _limpar_titulo_vaga_link(title: str) -> str:
+    if not title:
+        return ""
+    t = re.sub(r"\s+", " ", title).strip()
+    # Muitos portais usam "Cargo - Empresa - Site"
+    partes = [p.strip() for p in re.split(r"\s+\|\s+|\s+-\s+", t) if p.strip()]
+    if not partes:
+        return t[:120]
+    # Heuristica: primeiro segmento costuma ser cargo.
+    return partes[0][:120]
+
+
+def _inferir_empresa_vaga(titulo: str, url: str) -> str:
+    # Tenta segunda parte do titulo
+    partes = [p.strip() for p in re.split(r"\s+\|\s+|\s+-\s+", titulo or "") if p.strip()]
+    if len(partes) >= 2 and len(partes[1]) >= 2:
+        return partes[1][:80]
+
+    try:
+        host = (urlparse(url).netloc or "").lower()
+        host = re.sub(r"^www\.", "", host)
+        if not host:
+            return ""
+        domain = host.split(".")[0]
+        if domain in {"gupy", "jobs", "careers", "linkedin", "indeed", "greenhouse", "lever"}:
+            return ""
+        return domain.replace("-", " ").replace("_", " ").title()[:80]
+    except Exception:
+        return ""
+
+
+def _extrair_requisitos_texto(texto: str) -> list[str]:
+    if not texto:
+        return []
+    padrao = (
+        r"\b(python|java|javascript|typescript|node(?:\.js)?|react|angular|vue|next\.js|nestjs|"
+        r"django|flask|fastapi|spring|dotnet|\.net|php|go|golang|kotlin|swift|sql|postgresql|mysql|"
+        r"mongodb|redis|aws|azure|gcp|docker|kubernetes|terraform|linux|git|github|gitlab|rest|graphql|"
+        r"microservices|ci/cd|jenkins|kafka|rabbitmq)\b"
+    )
+    found = re.findall(padrao, texto.lower())
+    uniq: list[str] = []
+    seen: set[str] = set()
+    for item in found:
+        norm = item.strip().lower()
+        if norm and norm not in seen:
+            seen.add(norm)
+            uniq.append(norm)
+        if len(uniq) >= 20:
+            break
+    return uniq
+
+
+def _merge_textos(base: str, novo: str, max_chars: int = 16000) -> str:
+    b = (base or "").strip()
+    n = (novo or "").strip()
+    if not b:
+        return n[:max_chars]
+    if not n:
+        return b[:max_chars]
+    if n in b:
+        return b[:max_chars]
+    return f"{b}\n\n{n}"[:max_chars]
+
+
+def _merge_listas(base: list, nova: list, max_items: int = 24) -> list:
+    out: list = []
+    seen: set[str] = set()
+    for seq in (base or [], nova or []):
+        if not seq:
+            continue
+        for item in seq:
+            key = str(item or "").strip().lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            out.append(str(item).strip())
+            if len(out) >= max_items:
+                return out
+    return out
 
 
 def _deve_usar_ultima_vaga(mensagem: str, vaga_titulo_extraido: str) -> bool:
@@ -487,6 +697,21 @@ def _extrair_preferencias_curriculo(mensagem: str) -> dict:
 
     if any(k in txt for k in ["sem experiencia", "sem experiencias", "remover experiencias", "tira experiencias"]):
         prefs["incluir_experiencias"] = False
+
+    if any(k in txt for k in ["sem linkedin", "remover linkedin", "tira linkedin"]):
+        prefs["incluir_linkedin"] = False
+
+    if any(k in txt for k in ["sem github", "remover github", "tira github"]):
+        prefs["incluir_github"] = False
+
+    if any(k in txt for k in ["sem portfolio", "remover portfolio", "tira portfolio"]):
+        prefs["incluir_portfolio"] = False
+
+    if any(k in txt for k in ["sem telefone", "remover telefone", "tira telefone"]):
+        prefs["incluir_telefone"] = False
+
+    if any(k in txt for k in ["sem email", "remover email", "tira email"]):
+        prefs["incluir_email"] = False
 
     if any(k in txt for k in ["somente habilidades", "so habilidades", "apenas habilidades"]):
         prefs["somente_habilidades"] = True
@@ -551,6 +776,9 @@ def _extrair_preferencias_curriculo(mensagem: str) -> dict:
     focos = _extrair_foco_palavras(txt)
     if focos:
         prefs["foco_palavras"] = focos
+
+    if any(k in txt for k in ["objetivo curto", "resumo curto", "objetivo enxuto"]):
+        prefs["objetivo_curto"] = True
 
     return prefs
 
@@ -620,12 +848,24 @@ def _resumo_preferencias(prefs: dict) -> str:
         itens.append("sem habilidades")
     if prefs.get("incluir_experiencias") is False:
         itens.append("sem experiencias")
+    if prefs.get("incluir_linkedin") is False:
+        itens.append("sem linkedin")
+    if prefs.get("incluir_github") is False:
+        itens.append("sem github")
+    if prefs.get("incluir_portfolio") is False:
+        itens.append("sem portfolio")
+    if prefs.get("incluir_telefone") is False:
+        itens.append("sem telefone")
+    if prefs.get("incluir_email") is False:
+        itens.append("sem email")
     if prefs.get("somente_habilidades"):
         itens.append("somente habilidades")
     if prefs.get("somente_experiencias"):
         itens.append("somente experiencias")
     if prefs.get("experiencia_primeiro"):
         itens.append("experiencia antes de habilidades")
+    if prefs.get("objetivo_curto"):
+        itens.append("objetivo curto")
 
     if isinstance(prefs.get("max_habilidades"), int):
         itens.append(f"max {prefs['max_habilidades']} habilidades")

@@ -18,6 +18,8 @@ VALID_INTENTS = {
     "lembrete", "financas", "ranking", "treino", "estudos", "anotacoes",
 }
 
+_URL_RE = re.compile(r"https?://[^\s]+", re.IGNORECASE)
+
 
 def _normalizar_para_match(texto: str) -> str:
     base = (texto or "").lower().strip()
@@ -61,6 +63,21 @@ def _heuristica_intent(user_message: str, history: list) -> str | None:
         return "anotacoes"
     if any(t in norm for t in termos_estudos):
         return "estudos"
+
+    has_url = _URL_RE.search(user_message or "") is not None
+    if has_url:
+        termos_curriculo = {"curriculo", "curriculo ats", "cv", "ats"}
+        termos_leitura_link = {
+            "resumo", "resumir", "resuma", "extrai", "extrair", "pagina",
+            "link", "site", "scrap", "scraping", "leia", "ler", "o que diz",
+        }
+
+        if any(t in norm for t in termos_curriculo):
+            return "curriculo_ats"
+        if any(t in norm for t in termos_leitura_link):
+            return "busca"
+        if norm.startswith("http://") or norm.startswith("https://"):
+            return "busca"
 
     if norm in {"quais sao", "quais", "mostra", "me mostra", "bora comecar", "comecar", "vamos comecar"}:
         if _history_tem_termo(history, {"flashcard", "flashcards", "revisao", "estudos"}):

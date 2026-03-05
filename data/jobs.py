@@ -7,7 +7,7 @@ Suporta multi-query para expandir cobertura com variantes PT/EN e skills.
 import logging
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, field
 from urllib.parse import quote_plus, urlencode
 
@@ -1074,12 +1074,31 @@ def buscar_vagas(
     # Execucao paralela (max 20 workers)
     with ThreadPoolExecutor(max_workers=min(len(tarefas), 20)) as executor:
         futures = {executor.submit(fn, *args): fn.__name__ for fn, args in tarefas}
-        for future in as_completed(futures, timeout=45):
-            try:
-                resultado = future.result()
-                todas.extend(resultado)
-            except Exception as e:
-                logger.debug("jobs: tarefa %s falhou: %s", futures[future], e)
+        concluidas: set = set()
+        try:
+            for future in as_completed(futures, timeout=45):
+                concluidas.add(future)
+                try:
+                    resultado = future.result()
+                    todas.extend(resultado)
+                except Exception as e:
+                    logger.debug("jobs: tarefa %s falhou: %s", futures[future], e)
+        except FuturesTimeoutError:
+            pendentes = [f for f in futures if f not in concluidas]
+            logger.warning(
+                "jobs: timeout parcial na coleta (%d/%d tarefas pendentes), retornando resultados parciais",
+                len(pendentes),
+                len(futures),
+            )
+            for future in pendentes:
+                if not future.done():
+                    future.cancel()
+                    continue
+                try:
+                    resultado = future.result()
+                    todas.extend(resultado)
+                except Exception:
+                    pass
 
     # Filtra vagas com mais de 15 dias (mantém as sem data)
     todas = [v for v in todas if _dentro_prazo(v.data_publicacao, max_dias=15)]

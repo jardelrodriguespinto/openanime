@@ -34,6 +34,7 @@ def _build_help_text() -> str:
         "- \"Noticias de tech hoje\"\n"
         "- \"Tem vaga de dev python remoto?\"\n"
         "- \"Gera meu curriculo ATS\"\n"
+        "- \"Resume esse link: https://...\"\n"
         "- \"Me candidata nessa vaga\"\n"
         "- Envie um PDF para analise automatica\n"
         "- Envie audio de voz e eu transcrevo para responder\n\n"
@@ -459,11 +460,16 @@ def _is_help_request(texto: str) -> bool:
     if not tokens:
         return False
 
-    if any(_fuzzy_match(tok, "help") or _fuzzy_match(tok, "ajuda") for tok in tokens):
+    # So considera pedido de ajuda quando a mensagem e realmente sobre ajuda/comandos.
+    gatilhos_help = any(_fuzzy_match(tok, "help") or _fuzzy_match(tok, "ajuda") for tok in tokens)
+    gatilhos_comandos = any(_fuzzy_match(tok, "comando") or _fuzzy_match(tok, "comandos") for tok in tokens)
+    gatilho_menu = any(_fuzzy_match(tok, "menu") for tok in tokens)
+
+    if gatilhos_help:
         return True
-    if any(_fuzzy_match(tok, "comando") or _fuzzy_match(tok, "comandos") for tok in tokens):
+    if gatilhos_comandos and len(tokens) <= 6:
         return True
-    if any(_fuzzy_match(tok, "menu") for tok in tokens):
+    if gatilho_menu and len(tokens) <= 3:
         return True
 
     base = " ".join(tokens)
@@ -530,13 +536,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     # --- Fluxo normal ---
-    if _is_help_request(text):
-        await _telegram_call_with_retry(
-            "reply_html_help_natural",
-            lambda: update.message.reply_html(_build_help_text()),
-        )
-        return
-
     msg_processando = await _telegram_call_with_retry(
         "reply_text_processing",
         lambda: update.message.reply_text("Pensando..."),
@@ -709,12 +708,17 @@ async def handle_vagas(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_curriculo_ats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /curriculo_ats - gera curriculo ATS personalizado."""
     user_id = str(update.effective_user.id)
+    args = context.args or []
+    alvo = " ".join(args).strip()
     logger.info("/curriculo_ats: user_id=%s", user_id)
     msg = await _telegram_call_with_retry(
         "reply_text_curriculo_processing",
         lambda: update.message.reply_text("Gerando seu curriculo ATS..."),
     )
-    await _processar_input(update, user_id, "gera meu curriculo ats personalizado", msg)
+    texto = "gera meu curriculo ats personalizado"
+    if alvo:
+        texto = f"gera meu curriculo ats para {alvo}"
+    await _processar_input(update, user_id, texto, msg)
 
 
 async def handle_perfil_pro(update: Update, context: ContextTypes.DEFAULT_TYPE):

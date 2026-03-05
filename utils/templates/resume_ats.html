@@ -1,140 +1,126 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
 <meta charset="UTF-8">
 <style>
-  /* Ã¢â€â‚¬Ã¢â€â‚¬ Reset Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
   * { margin: 0; padding: 0; box-sizing: border-box; }
 
-  /* Ã¢â€â‚¬Ã¢â€â‚¬ Corpo Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
   body {
     font-family: Arial, Helvetica, sans-serif;
     font-size: 10.5pt;
-    line-height: 1.5;
-    color: #000;
+    line-height: 1.45;
+    color: #111;
     background: #fff;
-    padding: 1.6cm 2cm;
+    padding: 1.5cm 1.8cm;
   }
 
-  /* Ã¢â€â‚¬Ã¢â€â‚¬ Cabecalho Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
-  .cabecalho { margin-bottom: 10px; }
-
-  .nome {
+  .header { margin-bottom: 10px; }
+  .name {
     font-size: 20pt;
-    font-weight: bold;
-    letter-spacing: -0.3px;
+    font-weight: 700;
     line-height: 1.2;
   }
-
-  .cargo-titulo {
+  .role {
     font-size: 11pt;
     color: #333;
     margin-top: 2px;
     margin-bottom: 6px;
   }
 
-  /* linha de contato em uma unica linha, separada por | */
-  .contato {
+  .contact {
     font-size: 9.5pt;
     color: #333;
-    border-top: 1.5px solid #000;
-    border-bottom: 1px solid #ccc;
+    border-top: 1.2px solid #000;
+    border-bottom: 1px solid #cfcfcf;
     padding: 4px 0;
-    margin-top: 6px;
     display: flex;
     flex-wrap: wrap;
     gap: 0 12px;
   }
 
-  /* Ã¢â€â‚¬Ã¢â€â‚¬ Secoes Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
-  .secao { margin-top: 14px; }
-
-  .secao-titulo {
+  .section { margin-top: 14px; }
+  .section-title {
     font-size: 9pt;
-    font-weight: bold;
-    letter-spacing: 1.2px;
-    text-transform: uppercase;        /* weasyprint suporta em contexto de secao */
-    border-bottom: 1.5px solid #000;
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    border-bottom: 1.2px solid #000;
     padding-bottom: 2px;
     margin-bottom: 7px;
   }
 
-  /* Ã¢â€â‚¬Ã¢â€â‚¬ Objetivo Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
-  .objetivo-texto {
-    text-align: justify;
-  }
+  .objective { text-align: justify; }
 
-  /* Ã¢â€â‚¬Ã¢â€â‚¬ Habilidades Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
-  /* Grade de 3 colunas, como padrao Indeed */
-  .skills-grid {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 2px 8px;
-    list-style: disc inside;
-    padding-left: 4px;
+  .skills-list {
+    columns: 3;
+    column-gap: 16px;
+    list-style: disc;
+    padding-left: 18px;
   }
-  .skills-grid li {
+  .skills-list li { margin-bottom: 2px; }
+
+  .exp-block { margin-bottom: 10px; }
+  .exp-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 8px;
+  }
+  .exp-company {
+    font-size: 10.5pt;
+    font-weight: 700;
+  }
+  .exp-period {
+    font-size: 9.4pt;
+    color: #444;
+    white-space: nowrap;
+  }
+  .exp-role {
+    font-style: italic;
     font-size: 10pt;
+    margin-top: 1px;
+    margin-bottom: 3px;
   }
-
-  /* Ã¢â€â‚¬Ã¢â€â‚¬ Experiencia Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
-  .exp-bloco { margin-bottom: 12px; }
-
-  .exp-linha1 {
-    display: flex;
-    justify-content: space-between;
-    align-items: baseline;
-  }
-  .exp-empresa { font-weight: bold; font-size: 10.5pt; }
-  .exp-periodo { font-size: 9.5pt; color: #444; white-space: nowrap; }
-
-  .exp-linha2 {
-    display: flex;
-    justify-content: space-between;
-    align-items: baseline;
-    margin-bottom: 4px;
-  }
-  .exp-cargo { font-style: italic; font-size: 10pt; }
-  .exp-local { font-size: 9.5pt; color: #555; }
-
   .exp-bullets {
-    margin-left: 16px;
-    margin-top: 2px;
+    list-style: disc;
+    margin-left: 18px;
   }
   .exp-bullets li {
     margin-bottom: 2px;
     text-align: justify;
   }
 
-  /* Ã¢â€â‚¬Ã¢â€â‚¬ Formacao Academica
-  .form-bloco { margin-bottom: 8px; }
-
-  .form-linha1 {
+  .edu-block { margin-bottom: 7px; }
+  .edu-head {
     display: flex;
     justify-content: space-between;
     align-items: baseline;
+    gap: 8px;
   }
-  .form-curso { font-weight: bold; }
-  .form-ano { font-size: 9.5pt; color: #444; }
-  .form-inst { font-size: 9.5pt; color: #333; }
+  .edu-course { font-weight: 700; }
+  .edu-year {
+    font-size: 9.4pt;
+    color: #444;
+    white-space: nowrap;
+  }
+  .edu-inst {
+    font-size: 9.5pt;
+    color: #333;
+  }
 
-  /* Ã¢â€â‚¬Ã¢â€â‚¬ Idiomas Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
-  .idiomas-lista {
-    list-style: disc inside;
-    padding-left: 4px;
+  .lang-list {
+    list-style: disc;
+    margin-left: 18px;
   }
-  .idiomas-lista li { margin-bottom: 2px; }
+  .lang-list li { margin-bottom: 2px; }
 </style>
 </head>
 <body>
 
-<!-- CABECALHO -->
-<div class="cabecalho">
-  <div class="nome">{{ nome or "Nome Completo" }}</div>
-  {% if cargo_atual %}
-  <div class="cargo-titulo">{{ cargo_atual }}</div>
-  {% endif %}
-  <div class="contato">
+<div class="header">
+  <div class="name">{{ nome or "Nome Completo" }}</div>
+  {% if cargo_atual %}<div class="role">{{ cargo_atual }}</div>{% endif %}
+  <div class="contact">
     {% if email %}<span>{{ email }}</span>{% endif %}
     {% if telefone %}<span>{{ telefone }}</span>{% endif %}
     {% if linkedin %}<span>{{ linkedin }}</span>{% endif %}
@@ -144,33 +130,27 @@
   </div>
 </div>
 
-<!-- RESUMO PROFISSIONAL -->
 {% if objetivo %}
-<div class="secao">
-  <div class="secao-titulo">Resumo Profissional</div>
-  <p class="objetivo-texto">{{ objetivo }}</p>
+<div class="section">
+  <div class="section-title">Resumo Profissional</div>
+  <p class="objective">{{ objetivo }}</p>
 </div>
 {% endif %}
 
 {% if experiencia_primeiro %}
-  <!-- EXPERIENCIA PROFISSIONAL -->
   {% if experiencias %}
-  <div class="secao">
-    <div class="secao-titulo">Experiencia Profissional</div>
+  <div class="section">
+    <div class="section-title">Experiencia Profissional</div>
     {% for exp in experiencias %}
-    <div class="exp-bloco">
-      <div class="exp-linha1">
-        <span class="exp-empresa">{{ exp.empresa }}</span>
-        <span class="exp-periodo">{{ exp.periodo }}</span>
+    <div class="exp-block">
+      <div class="exp-head">
+        <span class="exp-company">{{ exp.empresa }}</span>
+        <span class="exp-period">{{ exp.periodo }}</span>
       </div>
-      <div class="exp-linha2">
-        <span class="exp-cargo">{{ exp.cargo }}</span>
-      </div>
+      {% if exp.cargo %}<div class="exp-role">{{ exp.cargo }}</div>{% endif %}
       {% if exp.bullets %}
       <ul class="exp-bullets">
-        {% for bullet in exp.bullets %}
-        <li>{{ bullet }}</li>
-        {% endfor %}
+        {% for bullet in exp.bullets %}<li>{{ bullet }}</li>{% endfor %}
       </ul>
       {% endif %}
     </div>
@@ -178,48 +158,37 @@
   </div>
   {% endif %}
 
-  <!-- HABILIDADES -->
   {% if habilidades %}
-  <div class="secao">
-    <div class="secao-titulo">Habilidades</div>
-    <ul class="skills-grid">
-      {% for skill in habilidades %}
-      <li>{{ skill }}</li>
-      {% endfor %}
+  <div class="section">
+    <div class="section-title">Habilidades</div>
+    <ul class="skills-list">
+      {% for skill in habilidades %}<li>{{ skill }}</li>{% endfor %}
     </ul>
   </div>
   {% endif %}
 {% else %}
-  <!-- HABILIDADES -->
   {% if habilidades %}
-  <div class="secao">
-    <div class="secao-titulo">Habilidades</div>
-    <ul class="skills-grid">
-      {% for skill in habilidades %}
-      <li>{{ skill }}</li>
-      {% endfor %}
+  <div class="section">
+    <div class="section-title">Habilidades</div>
+    <ul class="skills-list">
+      {% for skill in habilidades %}<li>{{ skill }}</li>{% endfor %}
     </ul>
   </div>
   {% endif %}
 
-  <!-- EXPERIENCIA PROFISSIONAL -->
   {% if experiencias %}
-  <div class="secao">
-    <div class="secao-titulo">Experiencia Profissional</div>
+  <div class="section">
+    <div class="section-title">Experiencia Profissional</div>
     {% for exp in experiencias %}
-    <div class="exp-bloco">
-      <div class="exp-linha1">
-        <span class="exp-empresa">{{ exp.empresa }}</span>
-        <span class="exp-periodo">{{ exp.periodo }}</span>
+    <div class="exp-block">
+      <div class="exp-head">
+        <span class="exp-company">{{ exp.empresa }}</span>
+        <span class="exp-period">{{ exp.periodo }}</span>
       </div>
-      <div class="exp-linha2">
-        <span class="exp-cargo">{{ exp.cargo }}</span>
-      </div>
+      {% if exp.cargo %}<div class="exp-role">{{ exp.cargo }}</div>{% endif %}
       {% if exp.bullets %}
       <ul class="exp-bullets">
-        {% for bullet in exp.bullets %}
-        <li>{{ bullet }}</li>
-        {% endfor %}
+        {% for bullet in exp.bullets %}<li>{{ bullet }}</li>{% endfor %}
       </ul>
       {% endif %}
     </div>
@@ -228,30 +197,26 @@
   {% endif %}
 {% endif %}
 
-<!-- FORMACAO -->
 {% if formacao %}
-<div class="secao">
-  <div class="secao-titulo">Formacao Academica</div>
+<div class="section">
+  <div class="section-title">Formacao Academica</div>
   {% for f in formacao %}
-  <div class="form-bloco">
-    <div class="form-linha1">
-      <span class="form-curso">{{ f.curso }}</span>
-      <span class="form-ano">{{ f.ano }}</span>
+  <div class="edu-block">
+    <div class="edu-head">
+      <span class="edu-course">{{ f.curso }}</span>
+      <span class="edu-year">{{ f.ano }}</span>
     </div>
-    <div class="form-inst">{{ f.instituicao }}{% if f.nivel %} &mdash; {{ f.nivel }}{% endif %}</div>
+    <div class="edu-inst">{{ f.instituicao }}{% if f.nivel %} - {{ f.nivel }}{% endif %}</div>
   </div>
   {% endfor %}
 </div>
 {% endif %}
 
-<!-- IDIOMAS -->
 {% if idiomas %}
-<div class="secao">
-  <div class="secao-titulo">Idiomas</div>
-  <ul class="idiomas-lista">
-    {% for idioma in idiomas %}
-    <li><strong>{{ idioma.idioma }}</strong>: {{ idioma.nivel }}</li>
-    {% endfor %}
+<div class="section">
+  <div class="section-title">Idiomas</div>
+  <ul class="lang-list">
+    {% for idioma in idiomas %}<li><strong>{{ idioma.idioma }}</strong>: {{ idioma.nivel }}</li>{% endfor %}
   </ul>
 </div>
 {% endif %}
