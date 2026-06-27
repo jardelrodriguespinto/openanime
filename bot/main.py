@@ -60,9 +60,11 @@ logger = logging.getLogger(__name__)
 
 
 def main():
+    # Telegram token optional when running only Evolution webhook
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
-        raise ValueError("TELEGRAM_BOT_TOKEN nao configurado no .env")
+        logger.info("TELEGRAM_BOT_TOKEN nao definido — pulando inicializacao Telegram Bot")
+        return
 
     logger.info("=== Anime Multi-Assistant iniciando ===")
     logger.info("Log level: %s", LOG_LEVEL)

@@ -1,23 +1,21 @@
 """
 Notificador diario - envia digest de novidades e sugestoes para todos os usuarios.
-Roda via JobQueue do python-telegram-bot.
+Roda via Evolution API.
 """
 
+import datetime
 import logging
 import re
 import time
-import datetime
 import asyncio
-import html
 from urllib.parse import urlparse
 
 import httpx
 import pytz
 from bs4 import BeautifulSoup
-from telegram.ext import CallbackContext
 
+from ai.evolution import send_text
 from ai.openrouter import openrouter
-from bot.formatter import formatar_telegram
 from data.anilist import anilist
 from data.jikan import jikan
 from data.reddit import reddit
@@ -36,32 +34,6 @@ _DDG_HEADERS = {
     "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
     "Referer": "https://lite.duckduckgo.com/",
 }
-
-
-def _escape_html(value: str) -> str:
-    return html.escape(str(value or ""), quote=True)
-
-
-def _sanitize_href(url: str) -> str:
-    raw = str(url or "").strip()
-    if not raw:
-        return ""
-    try:
-        parsed = urlparse(raw)
-    except Exception:
-        return ""
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        return ""
-    return _escape_html(raw)
-
-
-def _format_html_link(title: str, href: str, max_len: int = 80) -> str:
-    text = (str(title or "").strip() or "link")[:max(1, max_len)]
-    safe_text = _escape_html(text)
-    safe_href = _sanitize_href(href)
-    if not safe_href:
-        return safe_text
-    return f"<a href='{safe_href}'>{safe_text}</a>"
 
 
 def _buscar_novidades_ddg(query: str, max_results: int = 6) -> list[dict]:
@@ -138,7 +110,6 @@ def _coletar_dados_diarios() -> tuple[list, list, list]:
     except Exception as e:
         logger.warning("Notificador: erro Jikan: %s", e)
 
-    # AniList trending para reforcar radar da temporada.
     try:
         anilist_trending = anilist.get_trending(limit=10)
         if anilist_trending:
@@ -156,7 +127,6 @@ def _coletar_dados_diarios() -> tuple[list, list, list]:
 
     novidades_web = []
     try:
-        # RSS primeiro (mais estavel para noticias).
         rss = rss_news.get_latest_news(query="anime", limit=6, days=7)
         novidades_web.extend(rss)
 
@@ -317,7 +287,6 @@ def _filtrar_temporada_por_alertas(temporada: list[dict], user_profile: dict) ->
 
 
 async def _enviar_digest_usuario(
-    context: CallbackContext,
     neo4j,
     user_id: str,
     temporada: list[dict],
@@ -350,7 +319,6 @@ async def _enviar_digest_usuario(
     )
     digest = await asyncio.to_thread(openrouter.converse, messages)
 
-    # Salva os animes do radar como recomendados para nao repetir no proximo digest
     if radar.get("picks"):
         try:
             titulos_picks = [p["titulo"] for p in radar["picks"] if p.get("titulo")]
@@ -359,15 +327,11 @@ async def _enviar_digest_usuario(
         except Exception as e:
             logger.debug("Notificador: erro ao registrar recomendados user=%s: %s", user_id, e)
 
-    texto = formatar_telegram(digest)
-    await context.bot.send_message(
-        chat_id=user_id,
-        text=texto,
-    )
+    await send_text(user_id, digest)
     return True
 
 
-async def enviar_diario(context: CallbackContext) -> None:
+async def enviar_diario() -> None:
     """Job diario - coleta novidades e envia digest personalizado por usuario."""
     logger.info("Notificador: iniciando digest diario")
 
@@ -388,7 +352,6 @@ async def enviar_diario(context: CallbackContext) -> None:
     for user_id in user_ids:
         try:
             await _enviar_digest_usuario(
-                context=context,
                 neo4j=neo4j,
                 user_id=user_id,
                 temporada=temporada,
@@ -406,8 +369,8 @@ async def enviar_diario(context: CallbackContext) -> None:
     logger.info("Notificador: digest concluido - enviados=%d erros=%d", enviados, erros)
 
 
-async def enviar_diario_usuario(context: CallbackContext, user_id: str) -> bool:
-    """Gera digest imediatamente para um unico usuario (uso no comando /novidades)."""
+async def enviar_diario_usuario(user_id: str) -> bool:
+    """Gera digest imediatamente para um unico usuario."""
     user_id = str(user_id)
     logger.info("Notificador: digest on-demand user=%s", user_id)
 
@@ -421,7 +384,6 @@ async def enviar_diario_usuario(context: CallbackContext, user_id: str) -> bool:
 
     try:
         await _enviar_digest_usuario(
-            context=context,
             neo4j=neo4j,
             user_id=user_id,
             temporada=temporada,
@@ -436,9 +398,9 @@ async def enviar_diario_usuario(context: CallbackContext, user_id: str) -> bool:
         return False
 
 
-async def verificar_novos_episodios(context: CallbackContext) -> None:
+async def verificar_novos_episodios() -> None:
     """
-    Job de alerta de episodios (20h) - notifica series em progresso com
+    Job de alerta de episodios - notifica series em progresso com
     episodios chegando nos proximos 2 dias. Sem LLM, direto ao ponto.
     """
     logger.info("Notificador: verificando novos episodios")
@@ -470,9 +432,10 @@ async def verificar_novos_episodios(context: CallbackContext) -> None:
                         tvmaze_cache[titulo] = []
                 for ep in tvmaze_cache[titulo]:
                     key = f"{ep.get('show_name')}|{ep.get('airdate')}|{ep.get('season')}|{ep.get('episode')}"
-                    if key not in seen:
-                        seen.add(key)
-                        alertas.append(ep)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    alertas.append(ep)
 
             if not alertas:
                 continue
@@ -487,10 +450,7 @@ async def verificar_novos_episodios(context: CallbackContext) -> None:
                 ep_label = f" S{season:02d}E{episode:02d}" if season and episode else ""
                 linhas.append(f"- {show}{ep_label} | {airdate}")
 
-            await context.bot.send_message(
-                chat_id=user_id,
-                text="\n".join(linhas),
-            )
+            await send_text(user_id, "\n".join(linhas))
             enviados += 1
             logger.info("Notificador episodios: alerta enviado para user=%s", user_id)
 
@@ -500,7 +460,7 @@ async def verificar_novos_episodios(context: CallbackContext) -> None:
     logger.info("Notificador episodios: concluido - enviados=%d", enviados)
 
 
-async def coordinator_notificacoes(context: CallbackContext) -> None:
+async def coordinator_notificacoes() -> None:
     """
     Roda a cada minuto. Verifica quais usuarios querem notificacao agora
     e envia os tipos correspondentes (digest, episodios, vagas, noticias).
@@ -518,9 +478,7 @@ async def coordinator_notificacoes(context: CallbackContext) -> None:
         logger.error("Coordinator: erro Neo4j: %s", e)
         return
 
-    # ── Digest (novidades anime/manga) — dispara so no minuto 0 ──────────────
     if minuto_atual != 0:
-        # Pula digest/episodios/vagas fora do minuto exato da hora
         ids_digest = []
     else:
         ids_digest = neo4j.get_usuarios_por_hora_notificacao(hora_atual, "digest")
@@ -531,7 +489,6 @@ async def coordinator_notificacoes(context: CallbackContext) -> None:
         for user_id in ids_digest:
             try:
                 await _enviar_digest_usuario(
-                    context=context,
                     neo4j=neo4j,
                     user_id=user_id,
                     temporada=temporada,
@@ -543,11 +500,9 @@ async def coordinator_notificacoes(context: CallbackContext) -> None:
             except Exception as e:
                 logger.warning("Coordinator: erro digest user=%s: %s", user_id, e)
 
-    # ── Episodios — dispara so no minuto 0 ────────────────────────────────────
     ids_ep = [] if minuto_atual != 0 else neo4j.get_usuarios_por_hora_notificacao(hora_atual, "episodios")
     if ids_ep:
         logger.info("Coordinator: episodios para %d usuarios na hora %d", len(ids_ep), hora_atual)
-        # Reusar logica do verificar_novos_episodios mas so para esses usuarios
         tvmaze_cache_ep: dict[str, list[dict]] = {}
         for user_id in ids_ep:
             try:
@@ -565,9 +520,10 @@ async def coordinator_notificacoes(context: CallbackContext) -> None:
                             tvmaze_cache_ep[titulo] = []
                     for ep in tvmaze_cache_ep[titulo]:
                         key = f"{ep.get('show_name')}|{ep.get('airdate')}|{ep.get('season')}|{ep.get('episode')}"
-                        if key not in seen:
-                            seen.add(key)
-                            alertas.append(ep)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        alertas.append(ep)
                 if not alertas:
                     continue
                 alertas.sort(key=lambda x: x.get("airdate") or "")
@@ -579,11 +535,10 @@ async def coordinator_notificacoes(context: CallbackContext) -> None:
                     episode = ep.get("episode")
                     ep_label = f" S{season:02d}E{episode:02d}" if season and episode else ""
                     linhas.append(f"- {show}{ep_label} | {airdate}")
-                await context.bot.send_message(chat_id=user_id, text="\n".join(linhas))
+                await send_text(user_id, "\n".join(linhas))
             except Exception as e:
                 logger.warning("Coordinator: erro episodios user=%s: %s", user_id, e)
 
-    # ── Vagas — dispara so no minuto 0 ────────────────────────────────────────
     ids_vagas = [] if minuto_atual != 0 else neo4j.get_usuarios_por_hora_notificacao(hora_atual, "vagas")
     if ids_vagas:
         logger.info("Coordinator: vagas para %d usuarios na hora %d", len(ids_vagas), hora_atual)
@@ -594,14 +549,10 @@ async def coordinator_notificacoes(context: CallbackContext) -> None:
                 resultado = await asyncio.to_thread(jobs_node, state)
                 texto_vagas = resultado.get("response", "")
                 if texto_vagas:
-                    await context.bot.send_message(
-                        chat_id=user_id,
-                        text=f"Vagas do dia para voce:\n\n{texto_vagas}",
-                    )
+                    await send_text(user_id, f"Vagas do dia para voce:\n\n{texto_vagas}")
             except Exception as e:
                 logger.warning("Coordinator: erro vagas user=%s: %s", user_id, e)
 
-    # ── Lembretes — dispara em hora:minuto exato ──────────────────────────────
     try:
         agora_iso = datetime.datetime.now(_TZ_BR).isoformat(timespec="seconds")
         lembretes_disparar = neo4j.get_lembretes_para_disparar(agora_iso)
@@ -610,10 +561,7 @@ async def coordinator_notificacoes(context: CallbackContext) -> None:
             texto = lem.get("texto", "Lembrete!")
             lid = lem.get("id")
             try:
-                await context.bot.send_message(
-                    chat_id=uid,
-                    text=f"Lembrete: {texto}",
-                )
+                await send_text(uid, f"Lembrete: {texto}")
                 neo4j.marcar_lembrete_disparado(lid)
                 logger.info("Coordinator: lembrete disparado user=%s id=%s", uid, lid)
             except Exception as e:
@@ -621,7 +569,6 @@ async def coordinator_notificacoes(context: CallbackContext) -> None:
     except Exception as e:
         logger.warning("Coordinator: erro ao verificar lembretes: %s", e)
 
-    # ── Noticias personalizadas — hora:minuto exato ───────────────────────────
     ids_noticias = neo4j.get_usuarios_noticias_agendadas(hora_atual, minuto_atual)
     if ids_noticias:
         logger.info("Coordinator: noticias para %d usuarios em %02d:%02d", len(ids_noticias), hora_atual, minuto_atual)
@@ -638,19 +585,15 @@ async def coordinator_notificacoes(context: CallbackContext) -> None:
                     titulo = n.get("titulo", "")
                     url = n.get("url", "")
                     linhas.append(f"- {titulo} - {url}" if url else f"- {titulo}")
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text="\n".join(linhas),
-                    disable_web_page_preview=True,
-                )
+                await send_text(user_id, "\n".join(linhas))
             except Exception as e:
                 logger.warning("Coordinator: erro noticias user=%s: %s", user_id, e)
 
 
-async def verificar_lancamentos_culturais(context: CallbackContext) -> None:
+async def verificar_lancamentos_culturais() -> None:
     """
     Job semanal (sexta 12h) - notifica usuarios sobre novos lancamentos de artistas
-    e autores favoritos: albums, turnês e novos livros.
+    e autores favoritos: albums, turnes e novos livros.
     """
     logger.info("Notificador cultural: iniciando verificacao de lancamentos")
 
@@ -678,7 +621,7 @@ async def verificar_lancamentos_culturais(context: CallbackContext) -> None:
     ano_atual = datetime.datetime.now(_TZ_BR).year
 
     for usuario in usuarios:
-        user_id = usuario.get("telegram_id")
+        user_id = usuario.get("user_id")
         artistas = usuario.get("artistas_favoritos", [])
         autores = usuario.get("autores_favoritos", [])
 
@@ -687,7 +630,6 @@ async def verificar_lancamentos_culturais(context: CallbackContext) -> None:
 
         linhas = []
 
-        # Verifica lancamentos de artistas favoritos
         for artista in artistas[:5]:
             if artista not in mb_cache:
                 try:
@@ -706,7 +648,6 @@ async def verificar_lancamentos_culturais(context: CallbackContext) -> None:
                     f"{' | ' + data if data else ''}"
                 )
 
-        # Busca tambem por DDG para turnês e shows ao vivo
         for artista in artistas[:3]:
             try:
                 anos_busca = [ano_atual, ano_atual + 1]
@@ -726,7 +667,6 @@ async def verificar_lancamentos_culturais(context: CallbackContext) -> None:
             except Exception as e:
                 logger.debug("Notificador cultural: DDG turne erro: %s", e)
 
-        # Verifica novos livros de autores favoritos
         for autor in autores[:5]:
             if autor not in ol_cache:
                 try:
@@ -747,11 +687,7 @@ async def verificar_lancamentos_culturais(context: CallbackContext) -> None:
         try:
             header = "Novidades dos seus artistas e autores favoritos esta semana:\n"
             texto = header + "\n".join(linhas[:10])
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=texto,
-                disable_web_page_preview=True,
-            )
+            await send_text(user_id, texto)
             enviados += 1
             logger.info("Notificador cultural: lancamentos enviados para user=%s", user_id)
         except Exception as e:

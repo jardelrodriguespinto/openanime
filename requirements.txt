@@ -1,4 +1,6 @@
-python-telegram-bot==21.6
+fastapi==0.100.0
+uvicorn[standard]==0.22.0
+httpx==0.27.2
 redis==5.2.1
 pytz==2024.2
 langgraph==0.2.45
@@ -32,3 +34,7 @@ jinja2==3.1.4
 playwright==1.44.0
 # Scrapling — scraping com anti-bot e TLS impersonation
 scrapling
+# Socket.IO para realtime
+python-socketio==5.11.0
+# PostgreSQL pgvector support
+psycopg2-binary==2.9.9

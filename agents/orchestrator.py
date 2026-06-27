@@ -90,7 +90,7 @@ def _heuristica_intent(user_message: str, history: list) -> str | None:
 
 class State(TypedDict):
     messages: Annotated[list, operator.add]   # histórico da conversa
-    user_id: str                               # telegram user id
+    user_id: str                               # evolution/whatsapp user id
     intent: str                                # intenção classificada
     user_profile: dict                         # perfil carregado do Neo4j
     context: str                               # contexto do GraphRAG/Weaviate

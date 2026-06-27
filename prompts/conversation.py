@@ -10,7 +10,7 @@ Regras:
 - Se o usuario perguntar sobre personagem, historia, origem ou lore, responda com riqueza de detalhes.
 
 Formato:
-- Mensagem no Telegram com markdown simples (*negrito*, _italico_).
+- Mensagem no WhatsApp com texto simples (sem markdown complexo).
 - Maximo 400 palavras por resposta.
 - Se ficar longo, use topicos.
 """

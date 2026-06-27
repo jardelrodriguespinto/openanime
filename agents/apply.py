@@ -231,8 +231,10 @@ def _montar_confirmacao(vaga: dict, perfil: dict, plataforma: str, score: float)
     matches = [r for r in requisitos if any(r in s or s in r for s in skills_perfil)]
     faltam = [r for r in requisitos if r not in matches][:5]
 
+    # Plataforma info e respostas customizadas
     plataforma_info = {
         "linkedin": "LinkedIn Easy Apply (automatico)",
+        "indeed": "Indeed (automatico)",
         "gupy": "Gupy (automatico com login)",
         "greenhouse": "Greenhouse (automatico)",
         "lever": "Lever (automatico)",
@@ -311,6 +313,9 @@ async def executar_candidatura(user_id: str, vaga: dict, perfil: dict, plataform
         if plataforma == "linkedin":
             from automation.linkedin_apply import aplicar
             resultado = await aplicar(vaga_url, perfil, curriculo_path)
+        elif plataforma == "indeed":
+            from automation.indeed_apply import aplicar as indeed_aplicar
+            resultado = await indeed_aplicar(vaga_url, perfil, curriculo_path)
         elif plataforma == "gupy":
             from automation.gupy_apply import aplicar
             resultado = await aplicar(vaga_url, perfil, curriculo_path)

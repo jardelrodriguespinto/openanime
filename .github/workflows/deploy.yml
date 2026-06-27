@@ -1,0 +1,97 @@
+name: Deploy OpenAnime Bot
+
+on:
+  push:
+    branches:
+      - main
+      - homolog
+
+jobs:
+  build-and-deploy:
+    runs-on: self-hosted
+    environment:
+      name: ${{ github.ref == 'refs/heads/main' && 'production' || 'homolog' }}
+
+    env:
+      COMPOSE_PROJECT_NAME: ${{ github.ref == 'refs/heads/main' && 'openanime-prod' || 'openanime-homolog' }}
+
+    steps:
+      - name: Deploy and Sync
+        run: |
+          # 0. Configuracoes Iniciais de Seguranca
+          mkdir -p ~/.ssh
+          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+          git config --global --add safe.directory "${{ vars.REMOTE_TARGET }}"
+
+          # 1. Validar se o diretorio existe
+          test -d "${{ vars.REMOTE_TARGET }}" || { echo "Erro: Diretorio ${{ vars.REMOTE_TARGET }} nao encontrado."; exit 1; }
+          cd "${{ vars.REMOTE_TARGET }}"
+
+          # 2. Derrubar o stack atual
+          docker compose -p $COMPOSE_PROJECT_NAME down --remove-orphans || true
+
+          # 3. Limpar diretorios antigos
+          echo "Limpando diretorios antigos..."
+          docker run --rm -v "$(pwd)":/cleanup alpine sh -c "rm -rf /cleanup/data /cleanup/minio_data /cleanup/pg_data" || true
+
+          # 4. Sincronizacao do Git
+          echo "Sincronizando codigo..."
+          git remote set-url origin "https://x-access-token:${{ secrets.GIT_TOKEN }}@github.com/${{ github.repository }}.git"
+          git fetch origin ${{ github.ref_name }}
+          git checkout -f ${{ github.ref_name }}
+          git reset --hard origin/${{ github.ref_name }}
+
+          # 5. Validar integridade
+          test -f docker-compose.yml || exit 1
+
+          # 6. Gerar .env
+          echo "Gerando .env..."
+          VOL_PREFIX="./volumes/${COMPOSE_PROJECT_NAME}"
+          mkdir -p "${VOL_PREFIX}/neo4j/data" "${VOL_PREFIX}/neo4j/logs" "${VOL_PREFIX}/redis" "${VOL_PREFIX}/postgres" "${VOL_PREFIX}/sessions"
+
+          cat > .env << EOF
+          # --- CONFIGURACOES DE ISOLAMENTO (VOLUMES) ---
+          HOST_DATA_DIR=${VOL_PREFIX}/neo4j/data
+          HOST_LOGS_DIR=${VOL_PREFIX}/neo4j/logs
+          HOST_REDIS_DIR=${VOL_PREFIX}/redis
+          HOST_PG_DATA_DIR=${VOL_PREFIX}/postgres
+          HOST_SESSIONS_DIR=${VOL_PREFIX}/sessions
+
+          # --- CONFIGURACOES DE PORTAS ---
+          NEO4J_PORT_BROWZE=7474
+          NEO4J_PORT_BOLT=7687
+          REDIS_PORT=6379
+          DASHBOARD_PORT=8082
+          BOT_WEBHOOK_PORT=8081
+          POSTGRES_PORT=5432
+
+          # --- CONFIGURACOES OBRIGATORIAS (VARS) ---
+          NEO4J_PASSWORD=${{ vars.NEO4J_PASSWORD || 'neo4j_password' }}
+          REDIS_PASSWORD=${{ vars.REDIS_PASSWORD || 'open-anime' }}
+          POSTGRES_DB=${{ vars.POSTGRES_DB || 'anime' }}
+          POSTGRES_USER=${{ vars.POSTGRES_USER || 'anime' }}
+
+          # --- CREDENCIAIS (SECRETS) ---
+          OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}
+          TMDB_API_KEY=${{ secrets.TMDB_API_KEY }}
+          ASSEMBLY_IA_KEY=${{ secrets.ASSEMBLY_IA_KEY }}
+          TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}
+          LINKEDIN_EMAIL=${{ secrets.LINKEDIN_EMAIL }}
+          LINKEDIN_PASSWORD=${{ secrets.LINKEDIN_PASSWORD }}
+          GUPY_EMAIL=${{ secrets.GUPY_EMAIL }}
+          GUPY_PASSWORD=${{ secrets.GUPY_PASSWORD }}
+          DASHBOARD_PASS=${{ secrets.DASHBOARD_PASS }}
+          POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
+          EOF
+
+          # 7. Build e Up
+          echo "Iniciando Docker Compose..."
+          docker compose -p $COMPOSE_PROJECT_NAME build
+          docker compose -p $COMPOSE_PROJECT_NAME up -d --remove-orphans
+
+          echo "Stack atualizada com sucesso!"
+
+      - name: Notification
+        if: always()
+        run: |
+          echo "Deployment for ${{ github.ref_name }} finished with status: ${{ job.status }}"

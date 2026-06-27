@@ -33,7 +33,7 @@ def _render_template(template_name: str, contexto: dict) -> str:
 def gerar_pdf(template: str, conteudo: dict, nome_arquivo: str = "documento") -> bytes:
     """
     Gera PDF a partir de template HTML + dados.
-    Retorna bytes do PDF prontos para enviar pelo Telegram.
+    Retorna bytes do PDF prontos para enviar pela Evolution API (WhatsApp).
     template: "report" | "resume_ats"
     """
     try:

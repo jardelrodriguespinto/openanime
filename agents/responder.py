@@ -7,7 +7,7 @@ logger = logging.getLogger(__name__)
 def responder_node(state: State) -> dict:
     """
     Nó final — apenas loga e passa a resposta adiante.
-    A formatação real é feita no bot/formatter.py.
+    A formatação real é feita em ai/evolution.py.
     """
     response = state.get("response", "")
     user_id = state.get("user_id", "?")

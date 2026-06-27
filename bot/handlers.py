@@ -253,23 +253,16 @@ async def _safe_delete_message(message: Message | None):
 
 async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /start."""
+    # keep compatibility with telegram handler; Evolution webhook handles replies separately
+    if not update or not getattr(update, "message", None):
+        return
     user = update.effective_user
     logger.info("/start: user_id=%s username=%s", user.id, user.username)
     nome = html.escape(user.first_name or "")
     await _telegram_call_with_retry(
         "reply_html_start",
         lambda: update.message.reply_html(
-            f"Oi, {nome}!\n\n"
-            "Sou seu assistente pessoal multiuso de anime, manga, manhwa, filmes, series, doramas, musica e livros.\n\n"
-            "Pode me perguntar sobre qualquer coisa:\n"
-            "- Recomendacoes personalizadas no seu estilo\n"
-            "- Analise e review de qualquer obra\n"
-            "- Noticias, lancamentos e temporada atual\n"
-            "- Sites e links para assistir/ler/ouvir\n"
-            "- Registrar o que voce assistiu ou leu\n"
-            "- Enviar audio para transcricao e resposta\n\n"
-            "E so falar naturalmente, sem comandos!"
-        ),
+            f"Oi, {nome}!\n\nSou seu assistente pessoal. Use WhatsApp via Evolution se preferir."),
     )
 
 

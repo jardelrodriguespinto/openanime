@@ -30,7 +30,7 @@ class Neo4jClient:
         statements = [
             "CREATE CONSTRAINT IF NOT EXISTS FOR (a:Anime) REQUIRE a.id IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (m:Manga) REQUIRE m.id IS UNIQUE",
-            "CREATE CONSTRAINT IF NOT EXISTS FOR (u:Usuario) REQUIRE u.telegram_id IS UNIQUE",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (u:Usuario) REQUIRE u.user_id IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (g:Genero) REQUIRE g.nome IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (t:Tema) REQUIRE t.nome IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (e:Estudio) REQUIRE e.nome IS UNIQUE",
@@ -290,9 +290,9 @@ class Neo4jClient:
         }
     # Usuario -----------------------------------------------------------------
 
-    def get_or_create_user(self, telegram_id: str) -> dict:
+    def get_or_create_user(self, user_id: str) -> dict:
         cypher = """
-        MERGE (u:Usuario {telegram_id: $telegram_id})
+        MERGE (u:Usuario {user_id: $user_id})
         ON CREATE SET
           u.criado_em = datetime(),
           u.preferencia_audio = "indiferente",
@@ -302,11 +302,11 @@ class Neo4jClient:
         RETURN u
         """
         with self.driver.session() as session:
-            result = session.run(cypher, telegram_id=telegram_id)
+            result = session.run(cypher, user_id=user_id)
             record = result.single()
             if record:
                 return dict(record["u"])
-        return {"telegram_id": telegram_id}
+        return {"user_id": user_id}
 
     @staticmethod
     def _week_ref() -> str:
@@ -314,35 +314,35 @@ class Neo4jClient:
         week = now.isocalendar().week
         return f"{now.year}-W{week:02d}"
 
-    def set_mood_diario(self, telegram_id: str, mood: str):
+    def set_mood_diario(self, user_id: str, mood: str):
         mood_clean = self._clean_name(mood).lower()
         if not mood_clean:
             return
         with self.driver.session() as session:
             session.run(
                 """
-                MERGE (u:Usuario {telegram_id: $telegram_id})
+                MERGE (u:Usuario {user_id: $user_id})
                 SET u.mood_diario = $mood, u.mood_atualizado_em = datetime()
                 """,
-                telegram_id=telegram_id,
+                user_id=user_id,
                 mood=mood_clean,
             )
 
-    def set_tempo_disponivel(self, telegram_id: str, minutos: int | None):
+    def set_tempo_disponivel(self, user_id: str, minutos: int | None):
         with self.driver.session() as session:
             session.run(
                 """
-                MERGE (u:Usuario {telegram_id: $telegram_id})
+                MERGE (u:Usuario {user_id: $user_id})
                 SET u.tempo_disponivel_min = $minutos,
                     u.tempo_atualizado_em = datetime()
                 """,
-                telegram_id=telegram_id,
+                user_id=user_id,
                 minutos=minutos,
             )
 
     def set_filtros_maturidade(
         self,
-        telegram_id: str,
+        user_id: str,
         permitir_nsfw: bool | None = None,
         limite_violencia: str | None = None,
         limite_ecchi: str | None = None,
@@ -350,7 +350,7 @@ class Neo4jClient:
         with self.driver.session() as session:
             session.run(
                 """
-                MERGE (u:Usuario {telegram_id: $telegram_id})
+                MERGE (u:Usuario {user_id: $user_id})
                 SET
                   u.permitir_nsfw = CASE
                     WHEN $permitir_nsfw IS NULL THEN coalesce(u.permitir_nsfw, false)
@@ -366,33 +366,33 @@ class Neo4jClient:
                   END,
                   u.maturidade_atualizada_em = datetime()
                 """,
-                telegram_id=telegram_id,
+                user_id=user_id,
                 permitir_nsfw=permitir_nsfw,
                 limite_violencia=(limite_violencia or "").strip().lower() or None,
                 limite_ecchi=(limite_ecchi or "").strip().lower() or None,
             )
 
-    def set_preferencia_audio(self, telegram_id: str, preferencia: str):
+    def set_preferencia_audio(self, user_id: str, preferencia: str):
         pref = (preferencia or "").strip().lower()
         if pref not in {"dublado", "legendado", "indiferente"}:
             return
         with self.driver.session() as session:
             session.run(
                 """
-                MERGE (u:Usuario {telegram_id: $telegram_id})
+                MERGE (u:Usuario {user_id: $user_id})
                 SET u.preferencia_audio = $pref, u.audio_atualizado_em = datetime()
                 """,
-                telegram_id=telegram_id,
+                user_id=user_id,
                 pref=pref,
             )
 
-    def set_alertas(self, telegram_id: str, generos: list[str] | None = None, estudios: list[str] | None = None):
+    def set_alertas(self, user_id: str, generos: list[str] | None = None, estudios: list[str] | None = None):
         generos_clean = self._clean_list(generos or [])
         estudios_clean = self._clean_list(estudios or [])
         with self.driver.session() as session:
             session.run(
                 """
-                MERGE (u:Usuario {telegram_id: $telegram_id})
+                MERGE (u:Usuario {user_id: $user_id})
                 SET
                   u.alerta_generos = CASE
                     WHEN size($generos) = 0 THEN coalesce(u.alerta_generos, [])
@@ -404,31 +404,31 @@ class Neo4jClient:
                   END,
                   u.alerta_atualizado_em = datetime()
                 """,
-                telegram_id=telegram_id,
+                user_id=user_id,
                 generos=generos_clean,
                 estudios=estudios_clean,
             )
 
-    def set_desafio_semanal(self, telegram_id: str, texto: str):
+    def set_desafio_semanal(self, user_id: str, texto: str):
         desafio = self._clean_name(texto)
         if not desafio:
             return
         with self.driver.session() as session:
             session.run(
                 """
-                MERGE (u:Usuario {telegram_id: $telegram_id})
+                MERGE (u:Usuario {user_id: $user_id})
                 SET u.desafio_semanal = $desafio,
                     u.desafio_semana_ref = $week_ref,
                     u.desafio_atualizado_em = datetime()
                 """,
-                telegram_id=telegram_id,
+                user_id=user_id,
                 desafio=desafio,
                 week_ref=self._week_ref(),
             )
 
-    def get_user_settings(self, telegram_id: str) -> dict:
+    def get_user_settings(self, user_id: str) -> dict:
         cypher = """
-        MATCH (u:Usuario {telegram_id: $telegram_id})
+        MATCH (u:Usuario {user_id: $user_id})
         RETURN
           u.mood_diario AS mood_diario,
           u.tempo_disponivel_min AS tempo_disponivel_min,
@@ -442,7 +442,7 @@ class Neo4jClient:
           u.desafio_semana_ref AS desafio_semana_ref
         """
         with self.driver.session() as session:
-            rec = session.run(cypher, telegram_id=telegram_id).single()
+            rec = session.run(cypher, user_id=user_id).single()
             if not rec:
                 return {
                     "mood_diario": None,
@@ -469,44 +469,44 @@ class Neo4jClient:
                 "desafio_semana_ref": rec.get("desafio_semana_ref"),
             }
 
-    def registrar_recomendacoes(self, telegram_id: str, titulos: list[str]):
+    def registrar_recomendacoes(self, user_id: str, titulos: list[str]):
         limpos = self._clean_list(titulos or [])
         if not limpos:
             return
         with self.driver.session() as session:
             session.run(
-                "MERGE (:Usuario {telegram_id: $telegram_id})",
-                telegram_id=telegram_id,
+                "MERGE (:Usuario {user_id: $user_id})",
+                user_id=user_id,
             )
             for titulo in limpos:
                 anime_ref = self._ensure_anime_node(session, titulo=titulo, formato="anime")
                 session.run(
                     """
-                    MATCH (u:Usuario {telegram_id: $telegram_id})
+                    MATCH (u:Usuario {user_id: $user_id})
                     MATCH (a:Anime {titulo_key: $titulo_key})
                     MERGE (u)-[r:RECOMENDADO]->(a)
                     SET r.freq = coalesce(r.freq, 0) + 1,
                         r.ultima_data = datetime()
                     """,
-                    telegram_id=telegram_id,
+                    user_id=user_id,
                     titulo_key=anime_ref["titulo_key"],
                 )
 
-    def get_recomendados_recentes(self, telegram_id: str, days: int = 30) -> list[str]:
+    def get_recomendados_recentes(self, user_id: str, days: int = 30) -> list[str]:
         cypher = """
-        MATCH (u:Usuario {telegram_id: $telegram_id})-[r:RECOMENDADO]->(a:Anime)
+        MATCH (u:Usuario {user_id: $user_id})-[r:RECOMENDADO]->(a:Anime)
         WHERE r.ultima_data >= datetime() - duration({days: $days})
         RETURN a.titulo AS titulo
         ORDER BY r.ultima_data DESC
         LIMIT 40
         """
         with self.driver.session() as session:
-            rows = session.run(cypher, telegram_id=telegram_id, days=max(days, 1))
+            rows = session.run(cypher, user_id=user_id, days=max(days, 1))
             return [row.get("titulo") for row in rows if row.get("titulo")]
 
     def registrar_feedback_recomendacao(
         self,
-        telegram_id: str,
+        user_id: str,
         titulo: str,
         curti: bool,
         comentario: str | None = None,
@@ -516,59 +516,59 @@ class Neo4jClient:
             anime_ref = self._ensure_anime_node(session, titulo=titulo, formato="anime")
             session.run(
                 """
-                MATCH (u:Usuario {telegram_id: $telegram_id})
+                MATCH (u:Usuario {user_id: $user_id})
                 MATCH (a:Anime {titulo_key: $titulo_key})
                 MERGE (u)-[r:FEEDBACK_RECOMENDACAO]->(a)
                 SET r.score = coalesce(r.score, 0) + $delta,
                     r.ultima_data = datetime(),
                     r.comentario = coalesce($comentario, r.comentario)
                 """,
-                telegram_id=telegram_id,
+                user_id=user_id,
                 titulo_key=anime_ref["titulo_key"],
                 delta=score_delta,
                 comentario=(comentario or "").strip() or None,
             )
             session.run(
                 """
-                MATCH (u:Usuario {telegram_id: $telegram_id})-[f:FEEDBACK_RECOMENDACAO]->(a:Anime)
+                MATCH (u:Usuario {user_id: $user_id})-[f:FEEDBACK_RECOMENDACAO]->(a:Anime)
                 WHERE f.score <= -1
                 MATCH (a)-[:TEM_GENERO]->(g:Genero)
                 MERGE (u)-[e:EVITAR_GENERO]->(g)
                 SET e.freq = coalesce(e.freq, 0) + 1,
                     e.atualizado_em = datetime()
                 """,
-                telegram_id=telegram_id,
+                user_id=user_id,
             )
 
-    def get_feedback_memoria(self, telegram_id: str) -> dict:
+    def get_feedback_memoria(self, user_id: str) -> dict:
         pos_q = """
-        MATCH (u:Usuario {telegram_id: $telegram_id})-[f:FEEDBACK_RECOMENDACAO]->(a:Anime)
+        MATCH (u:Usuario {user_id: $user_id})-[f:FEEDBACK_RECOMENDACAO]->(a:Anime)
         WHERE f.score > 0
         RETURN a.titulo AS titulo, f.score AS score
         ORDER BY f.score DESC, f.ultima_data DESC
         LIMIT 10
         """
         neg_q = """
-        MATCH (u:Usuario {telegram_id: $telegram_id})-[f:FEEDBACK_RECOMENDACAO]->(a:Anime)
+        MATCH (u:Usuario {user_id: $user_id})-[f:FEEDBACK_RECOMENDACAO]->(a:Anime)
         WHERE f.score < 0
         RETURN a.titulo AS titulo, f.score AS score
         ORDER BY f.score ASC, f.ultima_data DESC
         LIMIT 10
         """
         with self.driver.session() as session:
-            pos = [row.get("titulo") for row in session.run(pos_q, telegram_id=telegram_id) if row.get("titulo")]
-            neg = [row.get("titulo") for row in session.run(neg_q, telegram_id=telegram_id) if row.get("titulo")]
+            pos = [row.get("titulo") for row in session.run(pos_q, user_id=user_id) if row.get("titulo")]
+            neg = [row.get("titulo") for row in session.run(neg_q, user_id=user_id) if row.get("titulo")]
             return {"curtidos": pos, "evitar": neg}
 
-    def get_ranking_pessoal(self, telegram_id: str, limit: int = 10) -> list[dict]:
+    def get_ranking_pessoal(self, user_id: str, limit: int = 10) -> list[dict]:
         cypher = """
-        MATCH (u:Usuario {telegram_id: $telegram_id})-[r:ASSISTIU]->(a:Anime)
+        MATCH (u:Usuario {user_id: $user_id})-[r:ASSISTIU]->(a:Anime)
         RETURN a.titulo AS titulo, r.nota AS nota, r.data AS data
         ORDER BY coalesce(toFloat(r.nota), 0.0) DESC, r.data DESC
         LIMIT $limit
         """
         with self.driver.session() as session:
-            rows = session.run(cypher, telegram_id=telegram_id, limit=max(1, limit))
+            rows = session.run(cypher, user_id=user_id, limit=max(1, limit))
             ranking = []
             for row in rows:
                 titulo = row.get("titulo")
@@ -583,12 +583,12 @@ class Neo4jClient:
                 )
             return ranking
 
-    def get_watchlist_inteligente(self, telegram_id: str, limit: int = 8) -> list[dict]:
-        settings = self.get_user_settings(telegram_id)
+    def get_watchlist_inteligente(self, user_id: str, limit: int = 8) -> list[dict]:
+        settings = self.get_user_settings(user_id)
         tempo = settings.get("tempo_disponivel_min")
 
         cypher = """
-        MATCH (u:Usuario {telegram_id: $telegram_id})-[:QUER_VER]->(a:Anime)
+        MATCH (u:Usuario {user_id: $user_id})-[:QUER_VER]->(a:Anime)
         WHERE NOT (u)-[:ASSISTIU]->(a) AND NOT (u)-[:DROPOU]->(a)
         OPTIONAL MATCH (a)-[:TEM_GENERO]->(g:Genero)
         OPTIONAL MATCH (a)-[:PRODUZIDO_POR]->(e:Estudio)
@@ -602,7 +602,7 @@ class Neo4jClient:
           coalesce(sum(pg.score), 0.0) AS afinidade
         """
         with self.driver.session() as session:
-            rows = session.run(cypher, telegram_id=telegram_id)
+            rows = session.run(cypher, user_id=user_id)
             items = []
             for row in rows:
                 titulo = row.get("titulo")
@@ -633,8 +633,8 @@ class Neo4jClient:
             items.sort(key=lambda x: x.get("score_watchlist", 0), reverse=True)
             return items[: max(1, limit)]
 
-    def gerar_desafio_semanal(self, telegram_id: str) -> str:
-        profile = self.get_user_profile(telegram_id)
+    def gerar_desafio_semanal(self, user_id: str) -> str:
+        profile = self.get_user_profile(user_id)
         progresso = profile.get("progresso", [])
         quer_ver = profile.get("quer_ver", [])
         dropados = profile.get("dropados", [])
@@ -651,7 +651,7 @@ class Neo4jClient:
         else:
             desafio = "Testar 1 obra nova fora do seu genero favorito e registrar feedback."
 
-        self.set_desafio_semanal(telegram_id, desafio)
+        self.set_desafio_semanal(user_id, desafio)
         return desafio
 
     def get_franchise_timeline(self, titulo: str) -> dict | None:
@@ -679,15 +679,15 @@ class Neo4jClient:
                 "ponte_animemanga": rec.get("ponte") or [],
             }
 
-    def get_resumo_retorno(self, telegram_id: str, titulo: str | None = None) -> dict | None:
+    def get_resumo_retorno(self, user_id: str, titulo: str | None = None) -> dict | None:
         base_where = ""
-        params = {"telegram_id": telegram_id}
+        params = {"user_id": user_id}
         if titulo:
             params["titulo_key"] = self._normalize_title(titulo)
             base_where = "AND a.titulo_key = $titulo_key"
 
         cypher = f"""
-        MATCH (u:Usuario {{telegram_id: $telegram_id}})-[p:EM_PROGRESSO]->(a:Anime)
+        MATCH (u:Usuario {{user_id: $user_id}})-[p:EM_PROGRESSO]->(a:Anime)
         WHERE 1=1 {base_where}
         OPTIONAL MATCH (a)-[:TEM_GENERO]->(g:Genero)
         RETURN
@@ -715,46 +715,46 @@ class Neo4jClient:
                 "generos": [g for g in (rec.get("generos") or []) if g],
             }
 
-    def refresh_user_taste_links(self, telegram_id: str):
+    def refresh_user_taste_links(self, user_id: str):
         with self.driver.session() as session:
             session.run(
                 """
-                MATCH (u:Usuario {telegram_id: $telegram_id})-[r:PREFERE_GENERO]->(:Genero)
+                MATCH (u:Usuario {user_id: $user_id})-[r:PREFERE_GENERO]->(:Genero)
                 DELETE r
                 """,
-                telegram_id=telegram_id,
+                user_id=user_id,
             )
             session.run(
                 """
-                MATCH (u:Usuario {telegram_id: $telegram_id})-[r:PREFERE_TEMA]->(:Tema)
+                MATCH (u:Usuario {user_id: $user_id})-[r:PREFERE_TEMA]->(:Tema)
                 DELETE r
                 """,
-                telegram_id=telegram_id,
+                user_id=user_id,
             )
             session.run(
                 """
-                MATCH (u:Usuario {telegram_id: $telegram_id})-[a:ASSISTIU]->(:Anime)-[:TEM_GENERO]->(g:Genero)
+                MATCH (u:Usuario {user_id: $user_id})-[a:ASSISTIU]->(:Anime)-[:TEM_GENERO]->(g:Genero)
                 WITH u, g, count(*) AS freq, avg(coalesce(toFloat(a.nota), 7.0)) AS score
                 MERGE (u)-[r:PREFERE_GENERO]->(g)
                 SET r.freq = freq, r.score = round(score * 100.0) / 100.0, r.atualizado_em = datetime()
                 """,
-                telegram_id=telegram_id,
+                user_id=user_id,
             )
             session.run(
                 """
-                MATCH (u:Usuario {telegram_id: $telegram_id})-[a:ASSISTIU]->(:Anime)-[:TEM_TEMA]->(t:Tema)
+                MATCH (u:Usuario {user_id: $user_id})-[a:ASSISTIU]->(:Anime)-[:TEM_TEMA]->(t:Tema)
                 WITH u, t, count(*) AS freq, avg(coalesce(toFloat(a.nota), 7.0)) AS score
                 MERGE (u)-[r:PREFERE_TEMA]->(t)
                 SET r.freq = freq, r.score = round(score * 100.0) / 100.0, r.atualizado_em = datetime()
                 """,
-                telegram_id=telegram_id,
+                user_id=user_id,
             )
 
-    def get_user_profile(self, telegram_id: str) -> dict:
-        self.refresh_user_taste_links(telegram_id)
+    def get_user_profile(self, user_id: str) -> dict:
+        self.refresh_user_taste_links(user_id)
 
         cypher = """
-        MATCH (u:Usuario {telegram_id: $telegram_id})
+        MATCH (u:Usuario {user_id: $user_id})
         OPTIONAL MATCH (u)-[r:ASSISTIU]->(a:Anime)
         OPTIONAL MATCH (u)-[d:DROPOU]->(da:Anime)
         OPTIONAL MATCH (u)-[:QUER_VER]->(qv:Anime)
@@ -779,7 +779,7 @@ class Neo4jClient:
           collect(DISTINCT {tema: t.nome, score: pt.score, freq: pt.freq}) AS tema_pref
         """
         with self.driver.session() as session:
-            result = session.run(cypher, telegram_id=telegram_id)
+            result = session.run(cypher, user_id=user_id)
             record = result.single()
             if not record:
                 return {}
@@ -818,10 +818,10 @@ class Neo4jClient:
                 )[:5]
             ]
 
-            drop_patterns = self.get_drop_patterns(telegram_id)
-            settings = self.get_user_settings(telegram_id)
-            feedback = self.get_feedback_memoria(telegram_id)
-            recomendados_recentes = self.get_recomendados_recentes(telegram_id, days=21)
+            drop_patterns = self.get_drop_patterns(user_id)
+            settings = self.get_user_settings(user_id)
+            feedback = self.get_feedback_memoria(user_id)
+            recomendados_recentes = self.get_recomendados_recentes(user_id, days=21)
             mood_inferido = self._infer_mood(assistidos, dropados, progresso)
             mood_atual = settings.get("mood_diario") or mood_inferido
             queda_interesse = self._avaliar_queda_interesse(
@@ -924,7 +924,7 @@ class Neo4jClient:
 
     def registrar_assistido(
         self,
-        telegram_id: str,
+        user_id: str,
         titulo: str,
         nota: float | None = None,
         opiniao: str | None = None,
@@ -933,7 +933,7 @@ class Neo4jClient:
         with self.driver.session() as session:
             anime_ref = self._ensure_anime_node(session, titulo=titulo, formato="anime")
             cypher = """
-            MATCH (u:Usuario {telegram_id: $telegram_id})
+            MATCH (u:Usuario {user_id: $user_id})
             MATCH (a:Anime {titulo_key: $titulo_key})
             MERGE (u)-[r:ASSISTIU]->(a)
             SET r.nota = $nota, r.data = datetime(),
@@ -944,50 +944,50 @@ class Neo4jClient:
             """
             session.run(
                 cypher,
-                telegram_id=telegram_id,
+                user_id=user_id,
                 titulo_key=anime_ref["titulo_key"],
                 nota=nota,
                 opiniao=opiniao_clean,
             )
-        self.refresh_user_taste_links(telegram_id)
-        logger.info("Registrado assistido: user=%s titulo=%s nota=%s", telegram_id, titulo, nota)
+        self.refresh_user_taste_links(user_id)
+        logger.info("Registrado assistido: user=%s titulo=%s nota=%s", user_id, titulo, nota)
 
-    def get_opinioes_usuario(self, telegram_id: str, limit: int = 10) -> list[dict]:
+    def get_opinioes_usuario(self, user_id: str, limit: int = 10) -> list[dict]:
         """Retorna opinioes textuais do usuario sobre obras que assistiu/leu."""
         cypher = """
-        MATCH (u:Usuario {telegram_id: $telegram_id})-[r:ASSISTIU]->(a:Anime)
+        MATCH (u:Usuario {user_id: $user_id})-[r:ASSISTIU]->(a:Anime)
         WHERE r.opiniao IS NOT NULL AND r.opiniao <> ''
         RETURN a.titulo AS titulo, r.nota AS nota, r.opiniao AS opiniao
         ORDER BY r.data DESC
         LIMIT $limit
         """
         with self.driver.session() as session:
-            result = session.run(cypher, telegram_id=telegram_id, limit=limit)
+            result = session.run(cypher, user_id=user_id, limit=limit)
             return [
                 {"titulo": row["titulo"], "nota": row["nota"], "opiniao": row["opiniao"]}
                 for row in result
                 if row["titulo"] and row["opiniao"]
             ]
 
-    def registrar_drop(self, telegram_id: str, titulo: str, episodio: int | None = None):
+    def registrar_drop(self, user_id: str, titulo: str, episodio: int | None = None):
         ep_final = episodio
         with self.driver.session() as session:
             anime_ref = self._ensure_anime_node(session, titulo=titulo, formato="anime")
             if ep_final is None:
                 ep_query = """
-                MATCH (u:Usuario {telegram_id: $telegram_id})-[p:EM_PROGRESSO]->(a:Anime {titulo_key: $titulo_key})
+                MATCH (u:Usuario {user_id: $user_id})-[p:EM_PROGRESSO]->(a:Anime {titulo_key: $titulo_key})
                 RETURN p.episodio AS episodio
                 """
                 rec = session.run(
                     ep_query,
-                    telegram_id=telegram_id,
+                    user_id=user_id,
                     titulo_key=anime_ref["titulo_key"],
                 ).single()
                 if rec:
                     ep_final = rec.get("episodio")
 
             cypher = """
-            MATCH (u:Usuario {telegram_id: $telegram_id})
+            MATCH (u:Usuario {user_id: $user_id})
             MATCH (a:Anime {titulo_key: $titulo_key})
             MERGE (u)-[r:DROPOU]->(a)
             SET r.episodio = $episodio, r.data = datetime()
@@ -997,26 +997,26 @@ class Neo4jClient:
             """
             session.run(
                 cypher,
-                telegram_id=telegram_id,
+                user_id=user_id,
                 titulo_key=anime_ref["titulo_key"],
                 episodio=ep_final,
             )
-        logger.info("Registrado drop: user=%s titulo=%s ep=%s", telegram_id, titulo, ep_final)
+        logger.info("Registrado drop: user=%s titulo=%s ep=%s", user_id, titulo, ep_final)
 
-    def registrar_quer_ver(self, telegram_id: str, titulo: str):
+    def registrar_quer_ver(self, user_id: str, titulo: str):
         with self.driver.session() as session:
             anime_ref = self._ensure_anime_node(session, titulo=titulo, formato="anime")
             cypher = """
-            MATCH (u:Usuario {telegram_id: $telegram_id})
+            MATCH (u:Usuario {user_id: $user_id})
             MATCH (a:Anime {titulo_key: $titulo_key})
             MERGE (u)-[:QUER_VER]->(a)
             """
-            session.run(cypher, telegram_id=telegram_id, titulo_key=anime_ref["titulo_key"])
-        logger.info("Registrado quer ver: user=%s titulo=%s", telegram_id, titulo)
+            session.run(cypher, user_id=user_id, titulo_key=anime_ref["titulo_key"])
+        logger.info("Registrado quer ver: user=%s titulo=%s", user_id, titulo)
 
     def registrar_progresso(
         self,
-        telegram_id: str,
+        user_id: str,
         titulo: str,
         episodio: int | None = None,
         capitulo: int | None = None,
@@ -1026,7 +1026,7 @@ class Neo4jClient:
         with self.driver.session() as session:
             anime_ref = self._ensure_anime_node(session, titulo=titulo, formato=formato or "anime")
             cypher = """
-            MATCH (u:Usuario {telegram_id: $telegram_id})
+            MATCH (u:Usuario {user_id: $user_id})
             MATCH (a:Anime {titulo_key: $titulo_key})
             MERGE (u)-[r:EM_PROGRESSO]->(a)
             SET
@@ -1038,7 +1038,7 @@ class Neo4jClient:
             """
             session.run(
                 cypher,
-                telegram_id=telegram_id,
+                user_id=user_id,
                 titulo_key=anime_ref["titulo_key"],
                 episodio=episodio,
                 capitulo=capitulo,
@@ -1047,7 +1047,7 @@ class Neo4jClient:
             )
         logger.info(
             "Registrado progresso: user=%s titulo=%s ep=%s cap=%s pct=%s formato=%s",
-            telegram_id,
+            user_id,
             titulo,
             episodio,
             capitulo,
@@ -1055,27 +1055,27 @@ class Neo4jClient:
             formato,
         )
 
-    def atualizar_nota(self, telegram_id: str, titulo: str, nota: float) -> bool:
+    def atualizar_nota(self, user_id: str, titulo: str, nota: float) -> bool:
         titulo_key = self._normalize_title(titulo)
         cypher = """
-        MATCH (u:Usuario {telegram_id: $telegram_id})-[r:ASSISTIU]->(a:Anime {titulo_key: $titulo_key})
+        MATCH (u:Usuario {user_id: $user_id})-[r:ASSISTIU]->(a:Anime {titulo_key: $titulo_key})
         SET r.nota = $nota, r.atualizado_em = datetime()
         RETURN r
         """
         with self.driver.session() as session:
             result = session.run(
                 cypher,
-                telegram_id=telegram_id,
+                user_id=user_id,
                 titulo_key=titulo_key,
                 nota=nota,
             )
             ok = result.single() is not None
         if ok:
-            self.refresh_user_taste_links(telegram_id)
+            self.refresh_user_taste_links(user_id)
         return ok
-    def get_user_progress(self, telegram_id: str) -> list[dict]:
+    def get_user_progress(self, user_id: str) -> list[dict]:
         cypher = """
-        MATCH (u:Usuario {telegram_id: $telegram_id})-[r:EM_PROGRESSO]->(a:Anime)
+        MATCH (u:Usuario {user_id: $user_id})-[r:EM_PROGRESSO]->(a:Anime)
         RETURN
           a.titulo AS titulo,
           r.formato AS formato,
@@ -1086,7 +1086,7 @@ class Neo4jClient:
         ORDER BY r.atualizado_em DESC
         """
         with self.driver.session() as session:
-            rows = session.run(cypher, telegram_id=telegram_id)
+            rows = session.run(cypher, user_id=user_id)
             return [
                 {
                     "titulo": row.get("titulo"),
@@ -1100,28 +1100,28 @@ class Neo4jClient:
                 if row.get("titulo")
             ]
 
-    def get_drop_patterns(self, telegram_id: str) -> dict:
+    def get_drop_patterns(self, user_id: str) -> dict:
         totals_query = """
-        MATCH (u:Usuario {telegram_id: $telegram_id})
+        MATCH (u:Usuario {user_id: $user_id})
         OPTIONAL MATCH (u)-[d:DROPOU]->(:Anime)
         WITH u, count(d) AS total_drops, avg(toFloat(d.episodio)) AS avg_drop_episode
         OPTIONAL MATCH (u)-[a:ASSISTIU]->(:Anime)
         RETURN total_drops, coalesce(avg_drop_episode, 0.0) AS avg_drop_episode, count(a) AS total_assistidos
         """
         genres_query = """
-        MATCH (u:Usuario {telegram_id: $telegram_id})-[:DROPOU]->(:Anime)-[:TEM_GENERO]->(g:Genero)
+        MATCH (u:Usuario {user_id: $user_id})-[:DROPOU]->(:Anime)-[:TEM_GENERO]->(g:Genero)
         RETURN g.nome AS genero, count(*) AS qtd
         ORDER BY qtd DESC
         LIMIT 4
         """
         recent_query = """
-        MATCH (u:Usuario {telegram_id: $telegram_id})-[d:DROPOU]->(a:Anime)
+        MATCH (u:Usuario {user_id: $user_id})-[d:DROPOU]->(a:Anime)
         RETURN a.titulo AS titulo, d.episodio AS episodio, d.data AS data
         ORDER BY d.data DESC
         LIMIT 5
         """
         with self.driver.session() as session:
-            totals = session.run(totals_query, telegram_id=telegram_id).single()
+            totals = session.run(totals_query, user_id=user_id).single()
             if not totals:
                 return {
                     "total_drops": 0,
@@ -1141,7 +1141,7 @@ class Neo4jClient:
 
             top_drop_genres = [
                 {"genero": row.get("genero"), "qtd": int(row.get("qtd") or 0)}
-                for row in session.run(genres_query, telegram_id=telegram_id)
+                for row in session.run(genres_query, user_id=user_id)
                 if row.get("genero")
             ]
             recent_drops = [
@@ -1150,7 +1150,7 @@ class Neo4jClient:
                     "episodio": row.get("episodio"),
                     "data": self._to_iso(row.get("data")),
                 }
-                for row in session.run(recent_query, telegram_id=telegram_id)
+                for row in session.run(recent_query, user_id=user_id)
                 if row.get("titulo")
             ]
 
@@ -1284,10 +1284,10 @@ class Neo4jClient:
         """Insere ou atualiza qualquer midia (filme, serie, dorama, anime) no Neo4j."""
         self.upsert_anime(payload)
 
-    def get_stats_pessoais(self, telegram_id: str) -> dict:
+    def get_stats_pessoais(self, user_id: str) -> dict:
         """Retorna estatisticas agregadas do usuario para o comando /stats."""
         cypher = """
-        MATCH (u:Usuario {telegram_id: $telegram_id})
+        MATCH (u:Usuario {user_id: $user_id})
         OPTIONAL MATCH (u)-[r:ASSISTIU]->(a:Anime)
         OPTIONAL MATCH (u)-[d:DROPOU]->(da:Anime)
         OPTIONAL MATCH (u)-[p:EM_PROGRESSO]->(pa:Anime)
@@ -1298,18 +1298,18 @@ class Neo4jClient:
             avg(CASE WHEN r.nota IS NOT NULL THEN toFloat(r.nota) ELSE null END) AS media_notas
         """
         by_tipo_cypher = """
-        MATCH (u:Usuario {telegram_id: $telegram_id})-[:ASSISTIU]->(a:Anime)
+        MATCH (u:Usuario {user_id: $user_id})-[:ASSISTIU]->(a:Anime)
         WHERE a.tipo IS NOT NULL
         RETURN a.tipo AS tipo, count(*) AS qtd
         ORDER BY qtd DESC
         """
         with self.driver.session() as session:
-            rec = session.run(cypher, telegram_id=telegram_id).single()
+            rec = session.run(cypher, user_id=user_id).single()
             if not rec:
                 return {}
             by_tipo = {
                 row["tipo"]: int(row["qtd"])
-                for row in session.run(by_tipo_cypher, telegram_id=telegram_id)
+                for row in session.run(by_tipo_cypher, user_id=user_id)
                 if row.get("tipo")
             }
 
@@ -1320,8 +1320,8 @@ class Neo4jClient:
         total = total_assistidos + total_dropados
         drop_rate = round((total_dropados / total) * 100) if total > 0 else 0
 
-        top_generos = self._top_items_por_relacao(telegram_id, "ASSISTIU", "Genero", "TEM_GENERO", limit=3)
-        top_estudios = self._top_items_por_relacao(telegram_id, "ASSISTIU", "Estudio", "PRODUZIDO_POR", limit=3)
+        top_generos = self._top_items_por_relacao(user_id, "ASSISTIU", "Genero", "TEM_GENERO", limit=3)
+        top_estudios = self._top_items_por_relacao(user_id, "ASSISTIU", "Estudio", "PRODUZIDO_POR", limit=3)
 
         return {
             "total_assistidos": total_assistidos,
@@ -1335,39 +1335,39 @@ class Neo4jClient:
         }
 
     def _top_items_por_relacao(
-        self, telegram_id: str, user_rel: str, node_label: str, anime_rel: str, limit: int = 3
+        self, user_id: str, user_rel: str, node_label: str, anime_rel: str, limit: int = 3
     ) -> list[str]:
         cypher = f"""
-        MATCH (u:Usuario {{telegram_id: $telegram_id}})-[:{user_rel}]->(a:Anime)-[:{anime_rel}]->(n:{node_label})
+        MATCH (u:Usuario {{user_id: $user_id}})-[:{user_rel}]->(a:Anime)-[:{anime_rel}]->(n:{node_label})
         WHERE n.nome IS NOT NULL
         RETURN n.nome AS nome, count(*) AS freq
         ORDER BY freq DESC
         LIMIT $limit
         """
         with self.driver.session() as session:
-            rows = session.run(cypher, telegram_id=telegram_id, limit=limit)
+            rows = session.run(cypher, user_id=user_id, limit=limit)
             return [row["nome"] for row in rows if row.get("nome")]
 
-    def get_progresso_ativo(self, telegram_id: str) -> list[str]:
+    def get_progresso_ativo(self, user_id: str) -> list[str]:
         """Retorna titulos das series que o usuario tem EM_PROGRESSO."""
         cypher = """
-        MATCH (u:Usuario {telegram_id: $telegram_id})-[p:EM_PROGRESSO]->(a:Anime)
+        MATCH (u:Usuario {user_id: $user_id})-[p:EM_PROGRESSO]->(a:Anime)
         RETURN a.titulo AS titulo
         ORDER BY p.atualizado_em DESC
         """
         with self.driver.session() as session:
-            rows = session.run(cypher, telegram_id=telegram_id)
+            rows = session.run(cypher, user_id=user_id)
             return [row["titulo"] for row in rows if row.get("titulo")]
 
     def get_all_user_ids(self) -> list[str]:
-        cypher = "MATCH (u:Usuario) RETURN u.telegram_id AS tid"
+        cypher = "MATCH (u:Usuario) RETURN u.user_id AS tid"
         with self.driver.session() as session:
             result = session.run(cypher)
             return [row["tid"] for row in result if row["tid"]]
 
     # ── Artistas e Autores favoritos (para notificações) ────────────────────
 
-    def adicionar_artista_favorito(self, telegram_id: str, artista: str) -> None:
+    def adicionar_artista_favorito(self, user_id: str, artista: str) -> None:
         """Adiciona artista à lista de favoritos do usuario (para notificacoes)."""
         artista_clean = (artista or "").strip()
         if not artista_clean:
@@ -1375,18 +1375,18 @@ class Neo4jClient:
         with self.driver.session() as session:
             session.run(
                 """
-                MERGE (u:Usuario {telegram_id: $telegram_id})
+                MERGE (u:Usuario {user_id: $user_id})
                 SET u.artistas_favoritos = CASE
                     WHEN $artista IN coalesce(u.artistas_favoritos, [])
                     THEN coalesce(u.artistas_favoritos, [])
                     ELSE coalesce(u.artistas_favoritos, []) + [$artista]
                 END
                 """,
-                telegram_id=telegram_id,
+                user_id=user_id,
                 artista=artista_clean,
             )
 
-    def adicionar_autor_favorito(self, telegram_id: str, autor: str) -> None:
+    def adicionar_autor_favorito(self, user_id: str, autor: str) -> None:
         """Adiciona autor à lista de favoritos do usuario (para notificacoes)."""
         autor_clean = (autor or "").strip()
         if not autor_clean:
@@ -1394,35 +1394,35 @@ class Neo4jClient:
         with self.driver.session() as session:
             session.run(
                 """
-                MERGE (u:Usuario {telegram_id: $telegram_id})
+                MERGE (u:Usuario {user_id: $user_id})
                 SET u.autores_favoritos = CASE
                     WHEN $autor IN coalesce(u.autores_favoritos, [])
                     THEN coalesce(u.autores_favoritos, [])
                     ELSE coalesce(u.autores_favoritos, []) + [$autor]
                 END
                 """,
-                telegram_id=telegram_id,
+                user_id=user_id,
                 autor=autor_clean,
             )
 
-    def get_artistas_favoritos(self, telegram_id: str) -> list[str]:
+    def get_artistas_favoritos(self, user_id: str) -> list[str]:
         """Retorna artistas favoritos do usuario."""
         with self.driver.session() as session:
             result = session.run(
-                "MATCH (u:Usuario {telegram_id: $telegram_id}) "
+                "MATCH (u:Usuario {user_id: $user_id}) "
                 "RETURN coalesce(u.artistas_favoritos, []) AS artistas",
-                telegram_id=telegram_id,
+                user_id=user_id,
             )
             record = result.single()
             return list(record["artistas"]) if record else []
 
-    def get_autores_favoritos(self, telegram_id: str) -> list[str]:
+    def get_autores_favoritos(self, user_id: str) -> list[str]:
         """Retorna autores favoritos do usuario."""
         with self.driver.session() as session:
             result = session.run(
-                "MATCH (u:Usuario {telegram_id: $telegram_id}) "
+                "MATCH (u:Usuario {user_id: $user_id}) "
                 "RETURN coalesce(u.autores_favoritos, []) AS autores",
-                telegram_id=telegram_id,
+                user_id=user_id,
             )
             record = result.single()
             return list(record["autores"]) if record else []
@@ -1434,7 +1434,7 @@ class Neo4jClient:
         WHERE size(coalesce(u.artistas_favoritos, [])) > 0
            OR size(coalesce(u.autores_favoritos, [])) > 0
         RETURN
-            u.telegram_id AS telegram_id,
+            u.user_id AS user_id,
             coalesce(u.artistas_favoritos, []) AS artistas_favoritos,
             coalesce(u.autores_favoritos, []) AS autores_favoritos
         """
@@ -1442,17 +1442,17 @@ class Neo4jClient:
             result = session.run(cypher)
             return [
                 {
-                    "telegram_id": row["telegram_id"],
+                    "user_id": row["user_id"],
                     "artistas_favoritos": list(row["artistas_favoritos"]),
                     "autores_favoritos": list(row["autores_favoritos"]),
                 }
                 for row in result
-                if row["telegram_id"]
+                if row["user_id"]
             ]
 
-    def get_historico(self, telegram_id: str) -> dict:
+    def get_historico(self, user_id: str) -> dict:
         cypher = """
-        MATCH (u:Usuario {telegram_id: $telegram_id})
+        MATCH (u:Usuario {user_id: $user_id})
         OPTIONAL MATCH (u)-[r:ASSISTIU]->(a:Anime)
         OPTIONAL MATCH (u)-[d:DROPOU]->(da:Anime)
         OPTIONAL MATCH (u)-[p:EM_PROGRESSO]->(pa:Anime)
@@ -1470,7 +1470,7 @@ class Neo4jClient:
           ) AS progresso
         """
         with self.driver.session() as session:
-            result = session.run(cypher, telegram_id=telegram_id)
+            result = session.run(cypher, user_id=user_id)
             record = result.single()
             if not record:
                 return {"assistidos": [], "dropados": [], "progresso": []}
@@ -1491,32 +1491,32 @@ class Neo4jClient:
 
     # ─── Noticias — interesses do usuario ────────────────────────────────────
 
-    def get_interesses_noticias(self, telegram_id: str) -> list[str]:
-        cypher = "MATCH (u:Usuario {telegram_id: $tid}) RETURN coalesce(u.interesses_noticias, []) AS interesses"
+    def get_interesses_noticias(self, user_id: str) -> list[str]:
+        cypher = "MATCH (u:Usuario {user_id: $tid}) RETURN coalesce(u.interesses_noticias, []) AS interesses"
         with self.driver.session() as session:
-            result = session.run(cypher, tid=telegram_id)
+            result = session.run(cypher, tid=user_id)
             record = result.single()
             if not record:
                 return []
             return list(record["interesses"] or [])
 
-    def salvar_interesses_noticias(self, telegram_id: str, categorias: list[str]) -> None:
+    def salvar_interesses_noticias(self, user_id: str, categorias: list[str]) -> None:
         cypher = """
-        MERGE (u:Usuario {telegram_id: $tid})
+        MERGE (u:Usuario {user_id: $tid})
         SET u.interesses_noticias = $categorias
         """
         with self.driver.session() as session:
-            session.run(cypher, tid=telegram_id, categorias=categorias)
+            session.run(cypher, tid=user_id, categorias=categorias)
 
     # ─── Preferencias de notificacao ─────────────────────────────────────────
 
-    def get_preferencias_notificacao(self, telegram_id: str) -> dict:
+    def get_preferencias_notificacao(self, user_id: str) -> dict:
         """
         Retorna preferencias de notificacao do usuario.
         Defaults: digest ativo 8h, episodios ativo 20h, vagas/noticias desativados.
         """
         cypher = """
-        MATCH (u:Usuario {telegram_id: $tid})
+        MATCH (u:Usuario {user_id: $tid})
         RETURN
             coalesce(u.notif_digest_ativo, true)           AS digest_ativo,
             coalesce(u.notif_digest_hora, 8)               AS digest_hora,
@@ -1529,7 +1529,7 @@ class Neo4jClient:
             coalesce(u.notif_noticias_minuto, 0)           AS noticias_minuto
         """
         with self.driver.session() as session:
-            result = session.run(cypher, tid=telegram_id)
+            result = session.run(cypher, tid=user_id)
             record = result.single()
             if not record:
                 return {
@@ -1540,10 +1540,10 @@ class Neo4jClient:
                 }
             return dict(record)
 
-    def salvar_preferencias_notificacao(self, telegram_id: str, prefs: dict) -> None:
+    def salvar_preferencias_notificacao(self, user_id: str, prefs: dict) -> None:
         """Salva preferencias de notificacao do usuario."""
         cypher = """
-        MERGE (u:Usuario {telegram_id: $tid})
+        MERGE (u:Usuario {user_id: $tid})
         SET
             u.notif_digest_ativo     = $digest_ativo,
             u.notif_digest_hora      = $digest_hora,
@@ -1558,7 +1558,7 @@ class Neo4jClient:
         with self.driver.session() as session:
             session.run(
                 cypher,
-                tid=telegram_id,
+                tid=user_id,
                 digest_ativo=prefs.get("digest_ativo", True),
                 digest_hora=int(prefs.get("digest_hora", 8)),
                 episodios_ativo=prefs.get("episodios_ativo", True),
@@ -1581,7 +1581,7 @@ class Neo4jClient:
         MATCH (u:Usuario)
         WHERE coalesce(u.{campo_ativo}, $default_ativo) = true
           AND coalesce(u.{campo_hora}, $default_hora) = $hora
-        RETURN u.telegram_id AS tid
+        RETURN u.user_id AS tid
         """
         defaults_ativo = {"digest": True, "episodios": True, "vagas": False, "noticias": False}
         defaults_hora = {"digest": 8, "episodios": 20, "vagas": 9, "noticias": 8}
@@ -1604,7 +1604,7 @@ class Neo4jClient:
         WHERE coalesce(u.notif_noticias_ativo, false) = true
           AND coalesce(u.notif_noticias_hora, 8) = $hora
           AND coalesce(u.notif_noticias_minuto, 0) = $minuto
-        RETURN u.telegram_id AS tid
+        RETURN u.user_id AS tid
         """
         with self.driver.session() as session:
             result = session.run(cypher, hora=hora, minuto=minuto)
@@ -1612,19 +1612,19 @@ class Neo4jClient:
 
     # ─── Documentos ──────────────────────────────────────────────────────────
 
-    def registrar_documento(self, telegram_id: str, doc_id: str, nome: str, tipo: str) -> None:
+    def registrar_documento(self, user_id: str, doc_id: str, nome: str, tipo: str) -> None:
         cypher = """
-        MERGE (u:Usuario {telegram_id: $tid})
+        MERGE (u:Usuario {user_id: $tid})
         MERGE (d:Documento {id: $doc_id})
         SET d.nome = $nome, d.tipo = $tipo, d.data_upload = datetime()
         MERGE (u)-[:ENVIOU]->(d)
         """
         with self.driver.session() as session:
-            session.run(cypher, tid=telegram_id, doc_id=doc_id, nome=nome, tipo=tipo)
+            session.run(cypher, tid=user_id, doc_id=doc_id, nome=nome, tipo=tipo)
 
     # ─── Perfil profissional ──────────────────────────────────────────────────
 
-    def salvar_perfil_profissional(self, telegram_id: str, dados: dict) -> None:
+    def salvar_perfil_profissional(self, user_id: str, dados: dict) -> None:
         """Salva perfil completo extraido de curriculo."""
         with self.driver.session() as session:
             # Campos diretos no usuario
@@ -1646,8 +1646,8 @@ class Neo4jClient:
             if campos:
                 set_clause = ", ".join(f"u.{k} = ${k}" for k in campos)
                 session.run(
-                    f"MERGE (u:Usuario {{telegram_id: $tid}}) SET {set_clause}",
-                    tid=telegram_id, **campos,
+                    f"MERGE (u:Usuario {{user_id: $tid}}) SET {set_clause}",
+                    tid=user_id, **campos,
                 )
 
             # Habilidades
@@ -1655,7 +1655,7 @@ class Neo4jClient:
                 if not hab or not hab.get("nome"):
                     continue
                 self.upsert_habilidade(
-                    telegram_id, hab["nome"],
+                    user_id, hab["nome"],
                     hab.get("nivel", 3), hab.get("anos_exp", 0)
                 )
 
@@ -1664,11 +1664,11 @@ class Neo4jClient:
                 if not exp or not exp.get("empresa"):
                     continue
                 session.run("""
-                    MERGE (u:Usuario {telegram_id: $tid})
+                    MERGE (u:Usuario {user_id: $tid})
                     MERGE (e:Empresa {nome: $empresa})
                     MERGE (u)-[r:TRABALHOU_EM {cargo: $cargo}]->(e)
                     SET r.inicio = $inicio, r.fim = $fim, r.descricao = $desc
-                """, tid=telegram_id, empresa=exp.get("empresa", ""),
+                """, tid=user_id, empresa=exp.get("empresa", ""),
                     cargo=exp.get("cargo", ""), inicio=exp.get("inicio", ""),
                     fim=exp.get("fim", "atual"), desc=exp.get("descricao", ""))
 
@@ -1677,11 +1677,11 @@ class Neo4jClient:
                 if not form or not form.get("curso"):
                     continue
                 session.run("""
-                    MERGE (u:Usuario {telegram_id: $tid})
+                    MERGE (u:Usuario {user_id: $tid})
                     MERGE (f:Formacao {curso: $curso, instituicao: $inst})
                     SET f.nivel = $nivel, f.ano = $ano
                     MERGE (u)-[:CURSOU]->(f)
-                """, tid=telegram_id, curso=form.get("curso", ""),
+                """, tid=user_id, curso=form.get("curso", ""),
                     inst=form.get("instituicao", ""), nivel=form.get("nivel", ""),
                     ano=form.get("ano", ""))
 
@@ -1689,44 +1689,44 @@ class Neo4jClient:
             for idioma in (dados.get("idiomas") or []):
                 if idioma and idioma.get("idioma"):
                     session.run("""
-                        MERGE (u:Usuario {telegram_id: $tid})
+                        MERGE (u:Usuario {user_id: $tid})
                         SET u.idiomas = coalesce(u.idiomas, []) + [$idioma_nivel]
-                    """, tid=telegram_id,
+                    """, tid=user_id,
                         idioma_nivel=f"{idioma['idioma']}:{idioma.get('nivel', '')}")
 
-        logger.info("Neo4j: perfil profissional salvo user=%s", telegram_id)
+        logger.info("Neo4j: perfil profissional salvo user=%s", user_id)
 
-    def upsert_habilidade(self, telegram_id: str, nome: str, nivel: int = 3, anos_exp: int = 0) -> None:
+    def upsert_habilidade(self, user_id: str, nome: str, nivel: int = 3, anos_exp: int = 0) -> None:
         cypher = """
-        MERGE (u:Usuario {telegram_id: $tid})
+        MERGE (u:Usuario {user_id: $tid})
         MERGE (h:Habilidade {nome: $nome})
         MERGE (u)-[r:TEM_HABILIDADE]->(h)
         SET r.nivel = $nivel, r.anos_exp = $anos_exp
         """
         with self.driver.session() as session:
-            session.run(cypher, tid=telegram_id, nome=nome.lower(), nivel=nivel, anos_exp=anos_exp)
+            session.run(cypher, tid=user_id, nome=nome.lower(), nivel=nivel, anos_exp=anos_exp)
 
-    def salvar_preferencias_emprego(self, telegram_id: str, prefs: dict) -> None:
+    def salvar_preferencias_emprego(self, user_id: str, prefs: dict) -> None:
         campos = {k: v for k, v in prefs.items() if v}
         if not campos:
             return
         set_clause = ", ".join(f"u.{k} = ${k}" for k in campos)
-        cypher = f"MERGE (u:Usuario {{telegram_id: $tid}}) SET {set_clause}"
+        cypher = f"MERGE (u:Usuario {{user_id: $tid}}) SET {set_clause}"
         with self.driver.session() as session:
-            session.run(cypher, tid=telegram_id, **campos)
+            session.run(cypher, tid=user_id, **campos)
 
-    def adicionar_cargo_desejado(self, telegram_id: str, cargo: str) -> None:
+    def adicionar_cargo_desejado(self, user_id: str, cargo: str) -> None:
         cypher = """
-        MERGE (u:Usuario {telegram_id: $tid})
+        MERGE (u:Usuario {user_id: $tid})
         MERGE (c:Cargo {titulo: $cargo})
         MERGE (u)-[:QUER_CARGO]->(c)
         """
         with self.driver.session() as session:
-            session.run(cypher, tid=telegram_id, cargo=cargo)
+            session.run(cypher, tid=user_id, cargo=cargo)
 
-    def get_perfil_profissional(self, telegram_id: str) -> dict:
+    def get_perfil_profissional(self, user_id: str) -> dict:
         cypher = """
-        MATCH (u:Usuario {telegram_id: $tid})
+        MATCH (u:Usuario {user_id: $tid})
         OPTIONAL MATCH (u)-[th:TEM_HABILIDADE]->(h:Habilidade)
         OPTIONAL MATCH (u)-[tr:TRABALHOU_EM]->(e:Empresa)
         OPTIONAL MATCH (u)-[:CURSOU]->(f:Formacao)
@@ -1738,7 +1738,7 @@ class Neo4jClient:
                collect(DISTINCT c.titulo) AS cargos_desejados
         """
         with self.driver.session() as session:
-            result = session.run(cypher, tid=telegram_id)
+            result = session.run(cypher, tid=user_id)
             record = result.single()
             if not record:
                 return {}
@@ -1771,9 +1771,9 @@ class Neo4jClient:
                 result.append({"idioma": parts[0], "nivel": parts[1]})
         return result
 
-    def get_score_completude_perfil(self, telegram_id: str) -> int:
+    def get_score_completude_perfil(self, user_id: str) -> int:
         """Retorna score de completude do perfil profissional (0-100)."""
-        perfil = self.get_perfil_profissional(telegram_id)
+        perfil = self.get_perfil_profissional(user_id)
         score = 0
         if len(perfil.get("habilidades", [])) >= 3:
             score += 20
@@ -1820,13 +1820,13 @@ class Neo4jClient:
                 descricao=dados.get("descricao", "")[:500],
             )
 
-    def get_ultima_vaga_visualizada(self, telegram_id: str) -> dict | None:
+    def get_ultima_vaga_visualizada(self, user_id: str) -> dict | None:
         cypher = """
-        MATCH (u:Usuario {telegram_id: $tid})-[r:VISUALIZOU|FAVORITOU]->(v:Vaga)
+        MATCH (u:Usuario {user_id: $tid})-[r:VISUALIZOU|FAVORITOU]->(v:Vaga)
         RETURN v ORDER BY r.data DESC LIMIT 1
         """
         with self.driver.session() as session:
-            result = session.run(cypher, tid=telegram_id)
+            result = session.run(cypher, tid=user_id)
             record = result.single()
             if not record:
                 return None
@@ -1834,7 +1834,7 @@ class Neo4jClient:
 
     def registrar_candidatura(self, user_id: str, vaga_id: str, plataforma: str, status: str) -> None:
         cypher = """
-        MERGE (u:Usuario {telegram_id: $uid})
+        MERGE (u:Usuario {user_id: $uid})
         MERGE (v:Vaga {id: $vaga_id})
         MERGE (u)-[r:SE_CANDIDATOU {vaga_id: $vaga_id}]->(v)
         SET r.data = datetime(), r.plataforma = $plataforma, r.status = $status,
@@ -1844,48 +1844,82 @@ class Neo4jClient:
             session.run(cypher, uid=user_id, vaga_id=vaga_id,
                         plataforma=plataforma, status=status)
 
-    def get_candidaturas(self, telegram_id: str) -> list[dict]:
+    def get_todas_candidaturas(self) -> list[dict]:
+        """Retorna todas as candidaturas de todos os usuarios (para dashboard)."""
         cypher = """
-        MATCH (u:Usuario {telegram_id: $tid})-[r:SE_CANDIDATOU]->(v:Vaga)
+        MATCH (u:Usuario)-[r:SE_CANDIDATOU]->(v:Vaga)
+        RETURN
+            u.user_id AS user_id,
+            v.titulo AS titulo,
+            v.empresa AS empresa,
+            v.url AS url,
+            r.status AS status,
+            r.plataforma AS plataforma,
+            v.salario AS salario,
+            v.modalidade AS modalidade,
+            r.data AS data
+        ORDER BY r.data DESC
+        LIMIT 200
+        """
+        with self.driver.session() as session:
+            result = session.run(cypher)
+            candidaturas = []
+            for row in result:
+                candidaturas.append({
+                    "user_id": row.get("user_id", ""),
+                    "titulo": row.get("titulo", ""),
+                    "empresa": row.get("empresa", ""),
+                    "url": row.get("url", ""),
+                    "status": row.get("status", ""),
+                    "plataforma": row.get("plataforma", ""),
+                    "salario": row.get("salario", ""),
+                    "modalidade": row.get("modalidade", ""),
+                    "data": self._to_iso(row.get("data")),
+                })
+            return candidaturas
+
+    def get_candidaturas(self, user_id: str) -> list[dict]:
+        cypher = """
+        MATCH (u:Usuario {user_id: $tid})-[r:SE_CANDIDATOU]->(v:Vaga)
         RETURN v.titulo AS titulo, v.empresa AS empresa, v.url AS url,
                r.status AS status, r.plataforma AS plataforma,
                toString(r.data) AS data
         ORDER BY r.data DESC LIMIT 20
         """
         with self.driver.session() as session:
-            result = session.run(cypher, tid=telegram_id)
+            result = session.run(cypher, tid=user_id)
             return [dict(r) for r in result]
 
-    def ja_se_candidatou(self, telegram_id: str, vaga_id: str) -> bool:
+    def ja_se_candidatou(self, user_id: str, vaga_id: str) -> bool:
         cypher = """
-        MATCH (u:Usuario {telegram_id: $tid})-[r:SE_CANDIDATOU {vaga_id: $vaga_id}]->(v:Vaga)
+        MATCH (u:Usuario {user_id: $tid})-[r:SE_CANDIDATOU {vaga_id: $vaga_id}]->(v:Vaga)
         RETURN count(r) > 0 AS existe
         """
         with self.driver.session() as session:
-            result = session.run(cypher, tid=telegram_id, vaga_id=vaga_id)
+            result = session.run(cypher, tid=user_id, vaga_id=vaga_id)
             record = result.single()
             return record["existe"] if record else False
 
-    def contar_candidaturas_hoje(self, telegram_id: str) -> int:
+    def contar_candidaturas_hoje(self, user_id: str) -> int:
         cypher = """
-        MATCH (u:Usuario {telegram_id: $tid})-[r:SE_CANDIDATOU]->(v:Vaga)
+        MATCH (u:Usuario {user_id: $tid})-[r:SE_CANDIDATOU]->(v:Vaga)
         WHERE r.data >= datetime({year: date().year, month: date().month, day: date().day})
         RETURN count(r) AS total
         """
         with self.driver.session() as session:
-            result = session.run(cypher, tid=telegram_id)
+            result = session.run(cypher, tid=user_id)
             record = result.single()
             return record["total"] if record else 0
 
     # ─── Lembretes ────────────────────────────────────────────────────────────
 
     def criar_lembrete(
-        self, telegram_id: str, texto: str, datetime_iso: str, recorrente: bool = False
+        self, user_id: str, texto: str, datetime_iso: str, recorrente: bool = False
     ) -> str:
         import uuid
         lembrete_id = str(uuid.uuid4())
         cypher = """
-        MERGE (u:Usuario {telegram_id: $tid})
+        MERGE (u:Usuario {user_id: $tid})
         CREATE (l:Lembrete {
             id: $lid, texto: $texto,
             datetime_disparo: datetime($dt), recorrente: $rec,
@@ -1895,12 +1929,12 @@ class Neo4jClient:
         RETURN l.id AS id
         """
         with self.driver.session() as session:
-            session.run(cypher, tid=telegram_id, lid=lembrete_id, texto=texto, dt=datetime_iso, rec=recorrente)
+            session.run(cypher, tid=user_id, lid=lembrete_id, texto=texto, dt=datetime_iso, rec=recorrente)
         return lembrete_id
 
-    def listar_lembretes(self, telegram_id: str) -> list[dict]:
+    def listar_lembretes(self, user_id: str) -> list[dict]:
         cypher = """
-        MATCH (u:Usuario {telegram_id: $tid})-[:TEM_LEMBRETE]->(l:Lembrete)
+        MATCH (u:Usuario {user_id: $tid})-[:TEM_LEMBRETE]->(l:Lembrete)
         WHERE l.disparado = false
         RETURN l.id AS id, l.texto AS texto, toString(datetime(l.datetime_disparo)) AS datetime_disparo,
                l.recorrente AS recorrente
@@ -1908,14 +1942,14 @@ class Neo4jClient:
         LIMIT 20
         """
         with self.driver.session() as session:
-            return [dict(r) for r in session.run(cypher, tid=telegram_id)]
+            return [dict(r) for r in session.run(cypher, tid=user_id)]
 
     def get_lembretes_para_disparar(self, agora_iso: str) -> list[dict]:
         """Retorna lembretes de todos os usuarios que devem disparar agora."""
         cypher = """
         MATCH (u:Usuario)-[:TEM_LEMBRETE]->(l:Lembrete)
         WHERE l.disparado = false AND datetime(l.datetime_disparo) <= datetime($agora)
-        RETURN u.telegram_id AS user_id, l.id AS id, l.texto AS texto,
+        RETURN u.user_id AS user_id, l.id AS id, l.texto AS texto,
                l.recorrente AS recorrente, toString(datetime(l.datetime_disparo)) AS datetime_disparo
         ORDER BY datetime(l.datetime_disparo) ASC
         LIMIT 50
@@ -1931,26 +1965,26 @@ class Neo4jClient:
         with self.driver.session() as session:
             session.run(cypher, lid=lembrete_id)
 
-    def deletar_lembrete(self, telegram_id: str, lembrete_id: str) -> bool:
+    def deletar_lembrete(self, user_id: str, lembrete_id: str) -> bool:
         cypher = """
-        MATCH (u:Usuario {telegram_id: $tid})-[:TEM_LEMBRETE]->(l:Lembrete {id: $lid})
+        MATCH (u:Usuario {user_id: $tid})-[:TEM_LEMBRETE]->(l:Lembrete {id: $lid})
         DETACH DELETE l
         RETURN count(l) AS deletados
         """
         with self.driver.session() as session:
-            result = session.run(cypher, tid=telegram_id, lid=lembrete_id)
+            result = session.run(cypher, tid=user_id, lid=lembrete_id)
             record = result.single()
             return bool(record and record["deletados"] > 0)
 
     # ─── Financas ─────────────────────────────────────────────────────────────
 
     def registrar_gasto(
-        self, telegram_id: str, valor: float, categoria: str, descricao: str, data_iso: str
+        self, user_id: str, valor: float, categoria: str, descricao: str, data_iso: str
     ) -> str:
         import uuid
         gasto_id = str(uuid.uuid4())
         cypher = """
-        MERGE (u:Usuario {telegram_id: $tid})
+        MERGE (u:Usuario {user_id: $tid})
         CREATE (g:Gasto {
             id: $gid, valor: $valor, categoria: $categoria,
             descricao: $descricao, data: $data, data_criacao: datetime()
@@ -1959,18 +1993,18 @@ class Neo4jClient:
         RETURN g.id AS id
         """
         with self.driver.session() as session:
-            session.run(cypher, tid=telegram_id, gid=gasto_id, valor=valor,
+            session.run(cypher, tid=user_id, gid=gasto_id, valor=valor,
                         categoria=categoria, descricao=descricao, data=data_iso)
         return gasto_id
 
-    def get_gastos(self, telegram_id: str, mes: int | None = None, ano: int | None = None) -> list[dict]:
+    def get_gastos(self, user_id: str, mes: int | None = None, ano: int | None = None) -> list[dict]:
         filtro = ""
         if mes and ano:
             filtro = f"AND g.data STARTS WITH '{ano:04d}-{mes:02d}'"
         elif ano:
             filtro = f"AND g.data STARTS WITH '{ano:04d}'"
         cypher = f"""
-        MATCH (u:Usuario {{telegram_id: $tid}})-[:TEM_GASTO]->(g:Gasto)
+        MATCH (u:Usuario {{user_id: $tid}})-[:TEM_GASTO]->(g:Gasto)
         WHERE 1=1 {filtro}
         RETURN g.id AS id, g.valor AS valor, g.categoria AS categoria,
                g.descricao AS descricao, g.data AS data
@@ -1978,10 +2012,10 @@ class Neo4jClient:
         LIMIT 100
         """
         with self.driver.session() as session:
-            return [dict(r) for r in session.run(cypher, tid=telegram_id)]
+            return [dict(r) for r in session.run(cypher, tid=user_id)]
 
-    def resumo_gastos(self, telegram_id: str, mes: int, ano: int) -> dict:
-        gastos = self.get_gastos(telegram_id, mes, ano)
+    def resumo_gastos(self, user_id: str, mes: int, ano: int) -> dict:
+        gastos = self.get_gastos(user_id, mes, ano)
         total = sum(g["valor"] for g in gastos)
         por_cat: dict[str, float] = {}
         for g in gastos:
@@ -1989,27 +2023,27 @@ class Neo4jClient:
             por_cat[cat] = por_cat.get(cat, 0.0) + g["valor"]
         return {"total": total, "por_categoria": por_cat, "gastos": gastos, "mes": mes, "ano": ano}
 
-    def deletar_gasto(self, telegram_id: str, gasto_id: str) -> bool:
+    def deletar_gasto(self, user_id: str, gasto_id: str) -> bool:
         cypher = """
-        MATCH (u:Usuario {telegram_id: $tid})-[:TEM_GASTO]->(g:Gasto {id: $gid})
+        MATCH (u:Usuario {user_id: $tid})-[:TEM_GASTO]->(g:Gasto {id: $gid})
         DETACH DELETE g
         RETURN count(g) AS deletados
         """
         with self.driver.session() as session:
-            result = session.run(cypher, tid=telegram_id, gid=gasto_id)
+            result = session.run(cypher, tid=user_id, gid=gasto_id)
             record = result.single()
             return bool(record and record["deletados"] > 0)
 
     # ─── Treino ───────────────────────────────────────────────────────────────
 
     def registrar_treino(
-        self, telegram_id: str, exercicio: str, series: int | None, reps: int | None,
+        self, user_id: str, exercicio: str, series: int | None, reps: int | None,
         peso_kg: float | None, data_iso: str, observacao: str = ""
     ) -> str:
         import uuid
         treino_id = str(uuid.uuid4())
         cypher = """
-        MERGE (u:Usuario {telegram_id: $tid})
+        MERGE (u:Usuario {user_id: $tid})
         CREATE (t:Treino {
             id: $tid2, exercicio: $exercicio, series: $series, reps: $reps,
             peso_kg: $peso, data: $data, observacao: $obs, data_criacao: datetime()
@@ -2018,14 +2052,14 @@ class Neo4jClient:
         RETURN t.id AS id
         """
         with self.driver.session() as session:
-            session.run(cypher, tid=telegram_id, tid2=treino_id, exercicio=exercicio,
+            session.run(cypher, tid=user_id, tid2=treino_id, exercicio=exercicio,
                         series=series, reps=reps, peso=peso_kg, data=data_iso, obs=observacao)
         return treino_id
 
-    def get_treinos(self, telegram_id: str, exercicio: str | None = None, limit: int = 20) -> list[dict]:
+    def get_treinos(self, user_id: str, exercicio: str | None = None, limit: int = 20) -> list[dict]:
         filtro = "AND toLower(t.exercicio) CONTAINS toLower($ex)" if exercicio else ""
         cypher = f"""
-        MATCH (u:Usuario {{telegram_id: $tid}})-[:FEZ_TREINO]->(t:Treino)
+        MATCH (u:Usuario {{user_id: $tid}})-[:FEZ_TREINO]->(t:Treino)
         WHERE 1=1 {filtro}
         RETURN t.id AS id, t.exercicio AS exercicio, t.series AS series, t.reps AS reps,
                t.peso_kg AS peso_kg, t.data AS data, t.observacao AS observacao
@@ -2033,11 +2067,11 @@ class Neo4jClient:
         LIMIT $limit
         """
         with self.driver.session() as session:
-            return [dict(r) for r in session.run(cypher, tid=telegram_id, ex=exercicio or "", limit=limit)]
+            return [dict(r) for r in session.run(cypher, tid=user_id, ex=exercicio or "", limit=limit)]
 
-    def get_pr_pessoal(self, telegram_id: str, exercicio: str) -> dict | None:
+    def get_pr_pessoal(self, user_id: str, exercicio: str) -> dict | None:
         cypher = """
-        MATCH (u:Usuario {telegram_id: $tid})-[:FEZ_TREINO]->(t:Treino)
+        MATCH (u:Usuario {user_id: $tid})-[:FEZ_TREINO]->(t:Treino)
         WHERE toLower(t.exercicio) CONTAINS toLower($ex) AND t.peso_kg IS NOT NULL
         RETURN t.exercicio AS exercicio, t.peso_kg AS peso_kg,
                t.series AS series, t.reps AS reps, t.data AS data
@@ -2045,31 +2079,31 @@ class Neo4jClient:
         LIMIT 1
         """
         with self.driver.session() as session:
-            record = session.run(cypher, tid=telegram_id, ex=exercicio).single()
+            record = session.run(cypher, tid=user_id, ex=exercicio).single()
             return dict(record) if record else None
 
-    def get_progressao_treino(self, telegram_id: str, exercicio: str) -> list[dict]:
+    def get_progressao_treino(self, user_id: str, exercicio: str) -> list[dict]:
         cypher = """
-        MATCH (u:Usuario {telegram_id: $tid})-[:FEZ_TREINO]->(t:Treino)
+        MATCH (u:Usuario {user_id: $tid})-[:FEZ_TREINO]->(t:Treino)
         WHERE toLower(t.exercicio) CONTAINS toLower($ex)
         RETURN t.data AS data, t.peso_kg AS peso_kg, t.series AS series, t.reps AS reps
         ORDER BY t.data ASC
         LIMIT 30
         """
         with self.driver.session() as session:
-            return [dict(r) for r in session.run(cypher, tid=telegram_id, ex=exercicio)]
+            return [dict(r) for r in session.run(cypher, tid=user_id, ex=exercicio)]
 
     # ─── Flashcards (Estudos) ─────────────────────────────────────────────────
 
     def criar_flashcard(
-        self, telegram_id: str, frente: str, verso: str, topico: str
+        self, user_id: str, frente: str, verso: str, topico: str
     ) -> str:
         import uuid
         from datetime import date
         fc_id = str(uuid.uuid4())
         proximo = date.today().isoformat()
         cypher = """
-        MERGE (u:Usuario {telegram_id: $tid})
+        MERGE (u:Usuario {user_id: $tid})
         CREATE (f:Flashcard {
             id: $fid, frente: $frente, verso: $verso, topico: $topico,
             nivel: 0, proximo_review: $pr, data_criacao: datetime()
@@ -2078,15 +2112,15 @@ class Neo4jClient:
         RETURN f.id AS id
         """
         with self.driver.session() as session:
-            session.run(cypher, tid=telegram_id, fid=fc_id, frente=frente,
+            session.run(cypher, tid=user_id, fid=fc_id, frente=frente,
                         verso=verso, topico=topico, pr=proximo)
         return fc_id
 
-    def get_flashcards_para_revisar(self, telegram_id: str, limit: int = 10) -> list[dict]:
+    def get_flashcards_para_revisar(self, user_id: str, limit: int = 10) -> list[dict]:
         from datetime import date
         hoje = date.today().isoformat()
         cypher = """
-        MATCH (u:Usuario {telegram_id: $tid})-[:TEM_FLASHCARD]->(f:Flashcard)
+        MATCH (u:Usuario {user_id: $tid})-[:TEM_FLASHCARD]->(f:Flashcard)
         WHERE f.proximo_review <= $hoje AND f.nivel < 6
         RETURN f.id AS id, f.frente AS frente, f.verso AS verso,
                f.topico AS topico, f.nivel AS nivel
@@ -2094,7 +2128,7 @@ class Neo4jClient:
         LIMIT $limit
         """
         with self.driver.session() as session:
-            return [dict(r) for r in session.run(cypher, tid=telegram_id, hoje=hoje, limit=limit)]
+            return [dict(r) for r in session.run(cypher, tid=user_id, hoje=hoje, limit=limit)]
 
     def atualizar_flashcard_revisao(self, flashcard_id: str, acertou: bool) -> None:
         """Atualiza nivel e proximo_review baseado em revisao espacada simples."""
@@ -2115,10 +2149,10 @@ class Neo4jClient:
                 fid=flashcard_id, nv=nivel_novo, pr=proximo
             )
 
-    def listar_flashcards(self, telegram_id: str, topico: str | None = None) -> list[dict]:
+    def listar_flashcards(self, user_id: str, topico: str | None = None) -> list[dict]:
         filtro = "AND toLower(f.topico) CONTAINS toLower($topico)" if topico else ""
         cypher = f"""
-        MATCH (u:Usuario {{telegram_id: $tid}})-[:TEM_FLASHCARD]->(f:Flashcard)
+        MATCH (u:Usuario {{user_id: $tid}})-[:TEM_FLASHCARD]->(f:Flashcard)
         WHERE 1=1 {filtro}
         RETURN f.id AS id, f.frente AS frente, f.verso AS verso,
                f.topico AS topico, f.nivel AS nivel, f.proximo_review AS proximo_review
@@ -2126,28 +2160,28 @@ class Neo4jClient:
         LIMIT 50
         """
         with self.driver.session() as session:
-            return [dict(r) for r in session.run(cypher, tid=telegram_id, topico=topico or "")]
+            return [dict(r) for r in session.run(cypher, tid=user_id, topico=topico or "")]
 
-    def get_progresso_estudos(self, telegram_id: str) -> dict:
+    def get_progresso_estudos(self, user_id: str) -> dict:
         cypher = """
-        MATCH (u:Usuario {telegram_id: $tid})-[:TEM_FLASHCARD]->(f:Flashcard)
+        MATCH (u:Usuario {user_id: $tid})-[:TEM_FLASHCARD]->(f:Flashcard)
         RETURN count(f) AS total,
                sum(CASE WHEN f.nivel >= 4 THEN 1 ELSE 0 END) AS dominados,
                collect(DISTINCT f.topico) AS topicos
         """
         with self.driver.session() as session:
-            r = session.run(cypher, tid=telegram_id).single()
+            r = session.run(cypher, tid=user_id).single()
             return dict(r) if r else {"total": 0, "dominados": 0, "topicos": []}
 
     # ─── Notas (mini Obsidian) ────────────────────────────────────────────────
 
     def criar_nota(
-        self, telegram_id: str, titulo: str, conteudo: str, tags: list[str]
+        self, user_id: str, titulo: str, conteudo: str, tags: list[str]
     ) -> str:
         import uuid
         nota_id = str(uuid.uuid4())
         cypher = """
-        MERGE (u:Usuario {telegram_id: $tid})
+        MERGE (u:Usuario {user_id: $tid})
         CREATE (n:Nota {
             id: $nid, titulo: $titulo, conteudo: $conteudo,
             tags: $tags, data_criacao: datetime(), data_update: datetime()
@@ -2156,14 +2190,14 @@ class Neo4jClient:
         RETURN n.id AS id
         """
         with self.driver.session() as session:
-            session.run(cypher, tid=telegram_id, nid=nota_id, titulo=titulo,
+            session.run(cypher, tid=user_id, nid=nota_id, titulo=titulo,
                         conteudo=conteudo, tags=tags)
         return nota_id
 
-    def buscar_notas(self, telegram_id: str, query: str) -> list[dict]:
+    def buscar_notas(self, user_id: str, query: str) -> list[dict]:
         q = query.lower()
         cypher = """
-        MATCH (u:Usuario {telegram_id: $tid})-[:TEM_NOTA]->(n:Nota)
+        MATCH (u:Usuario {user_id: $tid})-[:TEM_NOTA]->(n:Nota)
         WHERE toLower(n.titulo) CONTAINS $q OR toLower(n.conteudo) CONTAINS $q
            OR any(t IN n.tags WHERE toLower(t) CONTAINS $q)
         RETURN n.id AS id, n.titulo AS titulo,
@@ -2172,21 +2206,21 @@ class Neo4jClient:
         LIMIT 10
         """
         with self.driver.session() as session:
-            return [dict(r) for r in session.run(cypher, tid=telegram_id, q=q)]
+            return [dict(r) for r in session.run(cypher, tid=user_id, q=q)]
 
-    def get_nota(self, telegram_id: str, nota_id: str | None = None, titulo: str | None = None) -> dict | None:
+    def get_nota(self, user_id: str, nota_id: str | None = None, titulo: str | None = None) -> dict | None:
         if nota_id:
             cypher = """
-            MATCH (u:Usuario {telegram_id: $tid})-[:TEM_NOTA]->(n:Nota {id: $nid})
+            MATCH (u:Usuario {user_id: $tid})-[:TEM_NOTA]->(n:Nota {id: $nid})
             RETURN n.id AS id, n.titulo AS titulo, n.conteudo AS conteudo,
                    n.tags AS tags, n.data_criacao AS data_criacao, n.data_update AS data_update
             """
             with self.driver.session() as session:
-                r = session.run(cypher, tid=telegram_id, nid=nota_id).single()
+                r = session.run(cypher, tid=user_id, nid=nota_id).single()
                 return dict(r) if r else None
         if titulo:
             cypher = """
-            MATCH (u:Usuario {telegram_id: $tid})-[:TEM_NOTA]->(n:Nota)
+            MATCH (u:Usuario {user_id: $tid})-[:TEM_NOTA]->(n:Nota)
             WHERE toLower(n.titulo) CONTAINS toLower($titulo)
             RETURN n.id AS id, n.titulo AS titulo, n.conteudo AS conteudo,
                    n.tags AS tags, n.data_criacao AS data_criacao, n.data_update AS data_update
@@ -2194,14 +2228,14 @@ class Neo4jClient:
             LIMIT 1
             """
             with self.driver.session() as session:
-                r = session.run(cypher, tid=telegram_id, titulo=titulo).single()
+                r = session.run(cypher, tid=user_id, titulo=titulo).single()
                 return dict(r) if r else None
         return None
 
-    def listar_notas(self, telegram_id: str, tag: str | None = None, limit: int = 20) -> list[dict]:
+    def listar_notas(self, user_id: str, tag: str | None = None, limit: int = 20) -> list[dict]:
         filtro = "AND any(t IN n.tags WHERE toLower(t) CONTAINS toLower($tag))" if tag else ""
         cypher = f"""
-        MATCH (u:Usuario {{telegram_id: $tid}})-[:TEM_NOTA]->(n:Nota)
+        MATCH (u:Usuario {{user_id: $tid}})-[:TEM_NOTA]->(n:Nota)
         WHERE 1=1 {filtro}
         RETURN n.id AS id, n.titulo AS titulo, n.tags AS tags,
                left(n.conteudo, 100) AS preview, n.data_update AS data_update
@@ -2209,14 +2243,14 @@ class Neo4jClient:
         LIMIT $limit
         """
         with self.driver.session() as session:
-            return [dict(r) for r in session.run(cypher, tid=telegram_id, tag=tag or "", limit=limit)]
+            return [dict(r) for r in session.run(cypher, tid=user_id, tag=tag or "", limit=limit)]
 
     def editar_nota(
-        self, telegram_id: str, nota_id: str,
+        self, user_id: str, nota_id: str,
         titulo: str | None = None, conteudo: str | None = None, tags: list[str] | None = None
     ) -> bool:
         sets = ["n.data_update = datetime()"]
-        params: dict = {"tid": telegram_id, "nid": nota_id}
+        params: dict = {"tid": user_id, "nid": nota_id}
         if titulo is not None:
             sets.append("n.titulo = $titulo")
             params["titulo"] = titulo
@@ -2227,7 +2261,7 @@ class Neo4jClient:
             sets.append("n.tags = $tags")
             params["tags"] = tags
         cypher = f"""
-        MATCH (u:Usuario {{telegram_id: $tid}})-[:TEM_NOTA]->(n:Nota {{id: $nid}})
+        MATCH (u:Usuario {{user_id: $tid}})-[:TEM_NOTA]->(n:Nota {{id: $nid}})
         SET {', '.join(sets)}
         RETURN count(n) AS ok
         """
@@ -2235,24 +2269,24 @@ class Neo4jClient:
             r = session.run(cypher, **params).single()
             return bool(r and r["ok"] > 0)
 
-    def deletar_nota(self, telegram_id: str, nota_id: str) -> bool:
+    def deletar_nota(self, user_id: str, nota_id: str) -> bool:
         cypher = """
-        MATCH (u:Usuario {telegram_id: $tid})-[:TEM_NOTA]->(n:Nota {id: $nid})
+        MATCH (u:Usuario {user_id: $tid})-[:TEM_NOTA]->(n:Nota {id: $nid})
         DETACH DELETE n
         RETURN count(n) AS deletados
         """
         with self.driver.session() as session:
-            r = session.run(cypher, tid=telegram_id, nid=nota_id).single()
+            r = session.run(cypher, tid=user_id, nid=nota_id).single()
             return bool(r and r["deletados"] > 0)
 
     # ─── Ranking pessoal (usa ASSISTIU existente) ─────────────────────────────
 
     def get_ranking_filtrado(
-        self, telegram_id: str, genero: str | None = None, ano: int | None = None,
+        self, user_id: str, genero: str | None = None, ano: int | None = None,
         tipo: str | None = None, limit: int = 10
     ) -> list[dict]:
         filtros = []
-        params: dict = {"tid": telegram_id, "limit": limit}
+        params: dict = {"tid": user_id, "limit": limit}
         if genero:
             filtros.append("ANY(g IN [(a)-[:TEM_GENERO]->(gn:Genero) | gn.nome] WHERE toLower(g) CONTAINS toLower($genero))")
             params["genero"] = genero
@@ -2264,7 +2298,7 @@ class Neo4jClient:
             params["tipo"] = tipo
         where_extra = " AND " + " AND ".join(filtros) if filtros else ""
         cypher = f"""
-        MATCH (u:Usuario {{telegram_id: $tid}})-[r:ASSISTIU]->(a:Anime)
+        MATCH (u:Usuario {{user_id: $tid}})-[r:ASSISTIU]->(a:Anime)
         WHERE r.nota IS NOT NULL {where_extra}
         RETURN a.titulo AS titulo, r.nota AS nota, a.ano AS ano,
                a.tipo AS tipo, a.episodios AS episodios

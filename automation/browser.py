@@ -303,16 +303,16 @@ def detectar_plataforma(url: str) -> str:
     url_lower = (url or "").lower()
     if "linkedin.com" in url_lower:
         return "linkedin"
+    if "indeed.com" in url_lower or "br.indeed.com" in url_lower:
+        return "indeed"
     if "gupy.io" in url_lower:
         return "gupy"
-    if "greenhouse.io" in url_lower:
+    if "greenhouse.io" in url_lower or "jobs.greenhouse" in url_lower:
         return "greenhouse"
-    if "lever.co" in url_lower:
+    if "lever.co" in url_lower or "jobs.lever" in url_lower:
         return "lever"
     if "workday" in url_lower or "myworkdayjobs" in url_lower:
         return "workday"
-    if "indeed.com" in url_lower:
-        return "indeed"
     if "glassdoor.com" in url_lower:
         return "glassdoor"
     if "vagas.com" in url_lower:

@@ -1,4 +1,4 @@
-SYSTEM = """Você é o agente de anotações — um mini Obsidian no Telegram.
+SYSTEM = """Você é o agente de anotações — use naturalmente via WhatsApp.
 
 Objetivo: criar, buscar, editar e organizar notas com tags.
 
