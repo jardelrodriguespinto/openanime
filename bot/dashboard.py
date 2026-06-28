@@ -672,6 +672,47 @@ async def buscar_vagas_dashboard(request: Request):
             _set_automacao_status(False, "idle", plataforma or "", f"Busca concluída: {len(vagas)} vagas encontradas via browser")
             set_browser_current_step("busca", "concluido", f"Encontradas: {len(vagas)}")
             emit_status_update()
+
+            async def _auto_aplicar():
+                vagas_linkedin_ea = [v for v in vagas if (v.get("fonte") or "") == "LinkedIn" and v.get("easy_apply")]
+                if not vagas_linkedin_ea:
+                    return
+                try:
+                    from graph.neo4j_client import get_neo4j
+                    from agents.apply import executar_candidatura
+
+                    neo4j = get_neo4j()
+                    perfil = neo4j.get_perfil_profissional(user_id) or {}
+                    lote = vagas_linkedin_ea[:5]
+                    for i, vaga in enumerate(lote):
+                        _set_automacao_status(True, "aplicando", "linkedin", f"Aplicando em {vaga.get('empresa','?')} ({i+1}/{len(lote)})")
+                        set_browser_current_step("auto_" + str(i), "aplicando", f"Vaga {i+1}: {vaga.get('titulo','')[:40]}")
+                        emit_status_update()
+                        try:
+                            resultado = await executar_candidatura(user_id, vaga, perfil, "linkedin")
+                            status = "candidatado" if resultado.get("sucesso") else "tentativa_falhou"
+                        except Exception as e:
+                            logger.error(f"Erro auto-aplicando vaga {vaga.get('url')}: {e}")
+                            status = "tentativa_falhou"
+                        try:
+                            neo4j.registrar_candidatura(
+                                user_id=user_id,
+                                vaga_id=vaga.get("id", vaga.get("url", "")),
+                                plataforma="linkedin",
+                                status=status,
+                            )
+                        except Exception:
+                            pass
+
+                    _set_automacao_status(False, "idle", "linkedin", f"Auto-aplicação concluída: {len(lote)} vagas processadas")
+                    set_browser_current_step("auto_fim", "concluido", "Auto-aplicação finalizada")
+                    emit_status_update()
+                except Exception as e:
+                    logger.error(f"Erro na auto-aplicação: {e}")
+                    _set_automacao_status(False, "erro", "", str(e))
+                    emit_status_update()
+
+            asyncio.create_task(_auto_aplicar())
         except Exception as e:
             _set_automacao_status(False, "erro", "", str(e))
             set_browser_current_step("erro", "falha", str(e))

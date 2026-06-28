@@ -37,6 +37,16 @@ _KEYWORDS_CANDIDATAR = [
     "candidata", "se candidatar", "me inscrev", "aplica para", "aplica na",
     "quero me candidatar", "quero aplicar", "manda curriculo", "me candidato",
 ]
+_KEYWORDS_AUTO_APLICAR = [
+    "candidatura simplificada", "easy apply", "aplica automatico",
+    "aplicacao automatica", "auto aplicar", "auto apply", "direto",
+    "sem confirmacao",
+]
+
+
+def _detectar_auto_aplicar(mensagem: str) -> bool:
+    txt = (mensagem or "").lower()
+    return any(kw in txt for kw in _KEYWORDS_AUTO_APLICAR)
 
 
 def apply_node(state: dict) -> dict:
@@ -82,6 +92,16 @@ def _iniciar_candidatura(state: dict) -> dict:
                 "Nao encontrei qual vaga voce quer se candidatar. "
                 "Usa /vagas para buscar vagas primeiro, depois me diz para qual quer se candidatar!"
             )
+        }
+
+    # Bloqueia qualquer vaga que não seja LinkedIn Easy Apply — todo o fluxo roda só nesse caminho
+    if (vaga.get("fonte") or "") != "LinkedIn" or not (vaga.get("easy_apply") is True):
+        return {
+            "response": (
+                "Para manter a automação segura, só processo vagas do LinkedIn com Candidatura simplificada (Easy Apply).\n"
+                f"Essa oportunidade ({vaga.get('titulo', '?')} — {vaga.get('empresa', '?')}) não atende a esse filtro.\n"
+                "Candidate-se manualmente se quiser."
+            ),
         }
 
     # Verifica candidatura duplicada
@@ -145,6 +165,39 @@ def _iniciar_candidatura(state: dict) -> dict:
 
     # Monta mensagem de confirmacao com score e detalhes
     confirmacao = _montar_confirmacao(vaga_enriquecida, perfil, plataforma, score)
+
+    # Modo auto-aplicacao: vai direto para candidatura quando for Easy Apply / linkedin
+    if _detectar_auto_aplicar(mensagem) and plataforma == "linkedin":
+        import asyncio
+        try:
+            loop = asyncio.new_event_loop()
+            resultado = loop.run_until_complete(
+                executar_candidatura(user_id, vaga_enriquecida, perfil, plataforma)
+            )
+            loop.close()
+        except Exception as e:
+            logger.error("apply: erro na auto-aplicacao: %s", e)
+            return {
+                "response": (
+                    f"Erro na aplicacao automatica para {vaga_enriquecida.get('titulo', '?')}. "
+                    f"Candidate-se manualmente: {vaga_enriquecida.get('url', '')}"
+                ),
+            }
+        if resultado and resultado.get("sucesso"):
+            return {
+                "response": (
+                    f"Candidatura automatica enviada com sucesso!\n"
+                    f"Vaga: <b>{vaga_enriquecida.get('titulo', '?')}</b> — {vaga_enriquecida.get('empresa', '?')}\n"
+                    f"Score: {int(score * 100)}% | Plataforma: LinkedIn Easy Apply\n"
+                    f"Status: {resultado.get('mensagem', '')}"
+                ),
+            }
+        return {
+            "response": (
+                f"Nao consegui aplicar automaticamente em {vaga_enriquecida.get('titulo', '?')}.\n"
+                f"Candidate-se manualmente: {vaga_enriquecida.get('url', '')}"
+            ),
+        }
 
     return {
         "response": confirmacao,

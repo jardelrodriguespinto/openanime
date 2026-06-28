@@ -93,6 +93,7 @@ class Vaga:
     fonte: str = ""
     data_publicacao: str = ""
     score_match: float = 0.0
+    easy_apply: bool = False
 
 
 def _normalizar_modalidade(texto: str) -> str:
@@ -595,14 +596,14 @@ def _buscar_trampos(query: str, limite: int = JOBS_LIMITE_POR_FONTE) -> list[Vag
 # ─── Fonte 5: LinkedIn Jobs (pagina publica) ──────────────────────────────────
 
 def _buscar_linkedin(query: str, localizacao: str = "", limite: int = JOBS_LIMITE_POR_FONTE) -> list[Vaga]:
-    """Scraping das vagas publicas do LinkedIn (sem login)."""
+    """Scraping das vagas publicas do LinkedIn (sem login). Apenas Easy Apply."""
     vagas: list[Vaga] = []
     try:
         q = quote_plus(query)
         loc = quote_plus(localizacao or "Brazil")
         url = (
             f"https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
-            f"?keywords={q}&location={loc}&start=0"
+            f"?keywords={q}&location={loc}&f_AL=true&start=0"
         )
         page = Fetcher.get(url, stealthy_headers=True, impersonate='chrome124', timeout=20)
         soup = BeautifulSoup(page.html, "html.parser")
@@ -627,6 +628,7 @@ def _buscar_linkedin(query: str, localizacao: str = "", limite: int = JOBS_LIMIT
                 modalidade=_normalizar_modalidade(local),
                 salario="A combinar", descricao="",
                 url=link, fonte="LinkedIn",
+                easy_apply=True,
             ))
 
         if vagas:

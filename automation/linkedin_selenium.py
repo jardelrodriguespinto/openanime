@@ -71,11 +71,13 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "") -> dict
         await asyncio.sleep(3)
         print(f"[LINKEDIN] Vaga carregada: {await get_title()}")
 
-        # Clica em Easy Apply
+        # Clica em Easy Apply (ingles ou portugues)
         await notify_browser_step("selenium_linkedin", "easy_apply", "Procurando Easy Apply...")
-        easy_btn = await wait_for_selector_visible("button.jobs-apply-button", timeout=10)
-        if not easy_btn:
-            easy_btn = await wait_for_selector_visible("button[data-control-name='apply_show_modal']", timeout=5)
+        easy_btn = await wait_for_selector_visible(
+            "button.jobs-apply-button, button[data-control-name='apply_show_modal'], "
+            "button:has-text('Easy Apply'), button:has-text('Candidatura simplificada')",
+            timeout=10
+        )
 
         if not easy_btn:
             print("[LINKEDIN] Botao Easy Apply NAO encontrado")

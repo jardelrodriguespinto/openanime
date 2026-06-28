@@ -56,6 +56,7 @@ async def buscar_vagas_browser_use(query: str) -> list[dict]:
                 "salario": v.salario,
                 "descricao": v.descricao or "",
                 "requisitos": v.requisitos or [],
+                "easy_apply": getattr(v, "easy_apply", False),
             })
         logger.info("browser_agent: %d vagas encontradas para '%s'", len(resultados), query)
         return resultados

@@ -17,6 +17,8 @@ _CAMPOS_PADRAO = {
     "telefone", "phone", "email", "nome", "name", "sobrenome", "lastname",
     "primeiro nome", "first name", "cidade", "city", "pais", "country",
     "endereco", "address", "cep", "zip", "estado", "state",
+    "país", "primeiro_nome", "ultimo_nome", "last_name", "first_name",
+    "numero", "number", "nacionalidade", "nacionalidade",
 }
 
 # Seletores do formulario Easy Apply em ordem de tentativa
