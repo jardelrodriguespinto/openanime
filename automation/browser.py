@@ -136,6 +136,12 @@ async def get_browser():
                         firefox_path = snap_firefox[0]
                         logger.info(f"Firefox snap detectado: {firefox_path}")
                 
+                # Chromium snap - caminho real dentro do snap
+                snap_chromium = glob.glob("/snap/chromium/*/usr/lib/chromium-browser/chromium-browser")
+                if snap_chromium:
+                    chrome_path = snap_chromium[0]
+                    logger.info(f"Chromium snap detectado: {chrome_path}")
+                
                 logger.info("browser: PLAYWRIGHT_HEADLESS=%s, chrome=%s, firefox=%s", 
                            PLAYWRIGHT_HEADLESS, bool(chrome_path), bool(firefox_path))
                 print(f"[BROWSER] PLAYWRIGHT_HEADLESS={PLAYWRIGHT_HEADLESS}, chrome={chrome_path}, firefox={firefox_path}")

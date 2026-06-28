@@ -299,24 +299,6 @@ async def executar_candidatura(user_id: str, vaga: dict, perfil: dict, plataform
     if not vaga_url:
         return {"sucesso": False, "mensagem": "URL da vaga nao encontrada. Envie o link da vaga ou use /vagas para buscar."}
 
-    import subprocess
-    import shutil
-    firefox_bin = shutil.which("firefox") or "/snap/firefox/8568/usr/lib/firefox/firefox"
-    print(f"[APPLY] ABRINDO BROWSER DO SISTEMA: {firefox_bin} -> {vaga_url}")
-    try:
-        subprocess.Popen([firefox_bin, "--new-window", vaga_url], 
-                        stdout=subprocess.DEVNULL, 
-                        stderr=subprocess.DEVNULL,
-                        env={**__import__('os').environ, 'DISPLAY': __import__('os').environ.get('DISPLAY', ':0')})
-        print("[APPLY] Browser aberto com sucesso!")
-    except Exception as e:
-        print(f"[APPLY] Falha ao abrir firefox subprocess: {e}")
-        import webbrowser
-        webbrowser.open(vaga_url)
-
-    import time
-    time.sleep(1)
-
     # Gera curriculo ATS personalizado para esta vaga
     curriculo_path = ""
     try:
@@ -340,21 +322,21 @@ async def executar_candidatura(user_id: str, vaga: dict, perfil: dict, plataform
     except Exception as e:
         logger.warning("apply: falha ao gerar curriculo ATS: %s — usando sem curriculo", e)
 
-    # Tenta aplicacao automatica com browser visivel (Playwright)
+    # Tenta aplicacao automatica com browser visivel (Selenium + Firefox)
     resultado = None
     try:
         await _notify_dashboard("aplicando", plataforma, f"Aplicando em {vaga.get('empresa', '')} via {plataforma}")
         from automation.browser import notify_browser_step, wait_if_paused
         await notify_browser_step("inicio", "aplicando", f"Plataforma: {plataforma} | URL: {vaga_url}")
         if plataforma == "linkedin":
-            from automation.linkedin_apply import aplicar
-            resultado = await aplicar(vaga_url, perfil, curriculo_path)
-        elif plataforma == "indeed":
-            from automation.indeed_apply import aplicar as indeed_aplicar
-            resultado = await indeed_aplicar(vaga_url, perfil, curriculo_path)
+            from automation.linkedin_selenium import aplicar as linkedin_aplicar
+            resultado = await linkedin_aplicar(vaga_url, perfil, curriculo_path)
         elif plataforma == "gupy":
-            from automation.gupy_apply import aplicar
-            resultado = await aplicar(vaga_url, perfil, curriculo_path)
+            from automation.gupy_selenium import aplicar as gupy_aplicar
+            resultado = await gupy_aplicar(vaga_url, perfil, curriculo_path)
+        elif plataforma == "indeed":
+            from automation.indeed_selenium import aplicar as indeed_aplicar
+            resultado = await indeed_aplicar(vaga_url, perfil, curriculo_path)
         elif plataforma in ("greenhouse", "lever"):
             resultado = await _aplicar_generico(vaga_url, perfil, curriculo_path, plataforma)
         else:
