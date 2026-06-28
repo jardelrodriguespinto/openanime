@@ -36,11 +36,12 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "") -> dict
     """
     Candidatura automática no Indeed.
     """
-    from automation.browser import nova_pagina, clicar_qualquer, esperar_navegacao, screenshot_debug
+    from automation.browser import nova_pagina, clicar_qualquer, esperar_navegacao, screenshot_debug, set_active_page, get_intervention_state, set_intervention_state, notify_browser_step, wait_if_paused
 
     page = None
     try:
         page = await nova_pagina(stealth=True)
+        await set_active_page(page)
         await page.goto(vaga_url)
         await esperar_navegacao(page, timeout=15000)
 
@@ -57,7 +58,28 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "") -> dict
 
         # Loop multi-step
         for step in range(12):
+            # Verifica pausa/intervencao
+            control = await get_intervention_state()
+            if control.get("paused") or control.get("intervention_type") == "manual":
+                logger.info("indeed_apply: pausado pelo usuario no step %d", step)
+                await notify_browser_step("step_"+str(step), "pausado", "Intervenção manual necessária")
+                return {
+                    "sucesso": False,
+                    "pausado": True,
+                    "mensagem": "Automação pausada pelo usuário — intervenção manual necessária",
+                    "acao_necessaria": "intervencao_manual",
+                    "step": step,
+                }
+
+            if control.get("current_action") == "pular":
+                logger.info("indeed_apply: usuario pediu para pular step %d", step)
+                await set_intervention_state("current_action", "rodando")
+                await notify_browser_step("step_"+str(step), "pulado", "Usuário pediu pular")
+                continue
+
             await asyncio.sleep(1)
+            await notify_browser_step("step_"+str(step), "preenchendo", "Preenchendo campos")
+            await wait_if_paused(page, "step_"+str(step))
 
             # Preenche campos comuns
             await _preencher_campos_indeed(page, perfil, curriculo_path)
@@ -65,15 +87,18 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "") -> dict
             # Tenta Submit
             if await clicar_qualquer(page, _BTN_SUBMIT, timeout=3000):
                 await asyncio.sleep(2)
+                await notify_browser_step("step_"+str(step), "enviando", "Submetendo candidatura")
                 html = await page.content()
                 if _detectar_sucesso_indeed(html, page.url):
                     logger.info("Indeed: candidatura enviada")
+                    await notify_browser_step("step_"+str(step), "sucesso", "Candidatura enviada!")
                     return {
                         "sucesso": True,
                         "mensagem": "Candidatura enviada com sucesso via Indeed!",
                     }
 
             # Next step
+            await notify_browser_step("step_"+str(step), "navegando", "Avançando step")
             if await clicar_qualquer(page, _BTN_NEXT, timeout=3000):
                 await esperar_navegacao(page, timeout=8000)
                 continue

@@ -46,13 +46,16 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "") -> dict
     from automation.browser import (
         detectar_bloqueio, nova_pagina_com_sessao,
         clicar_qualquer, esperar_navegacao, screenshot_debug,
-        salvar_sessao, sessao_existe, limpar_sessao,
+        salvar_sessao, sessao_existe, limpar_sessao, set_active_page,
+        get_intervention_state, set_intervention_state,
+        notify_browser_step, wait_if_paused,
     )
 
     page = None
     context = None
     try:
         page, context = await nova_pagina_com_sessao("gupy", stealth=True)
+        await set_active_page(page)
 
         await page.goto(vaga_url)
         await esperar_navegacao(page, timeout=15000)
@@ -192,14 +195,35 @@ async def _fazer_login_gupy(page, context=None) -> dict:
 
 async def _processar_formulario_gupy(page, perfil: dict, curriculo_path: str, vaga_url: str) -> dict:
     """Processa formulario Gupy multi-step com preenchimento automatico."""
-    from automation.browser import clicar_qualquer, esperar_navegacao, screenshot_debug
+    from automation.browser import clicar_qualquer, esperar_navegacao, screenshot_debug, notify_browser_step, wait_if_paused
     from automation.form_filler import responder_pergunta
 
     perguntas_respondidas = []
     max_steps = 10
 
     for step in range(max_steps):
+        # Verifica pausa/intervencao
+        control = await get_intervention_state()
+        if control.get("paused") or control.get("intervention_type") == "manual":
+            logger.info("gupy_apply: pausado pelo usuario no step %d", step)
+            await notify_browser_step("step_"+str(step), "pausado", "Intervenção manual necessária")
+            return {
+                "sucesso": False,
+                "pausado": True,
+                "mensagem": "Automação pausada pelo usuário — intervenção manual necessária",
+                "acao_necessaria": "intervencao_manual",
+                "step": step,
+            }
+
+        if control.get("current_action") == "pular":
+            logger.info("gupy_apply: usuario pediu para pular step %d", step)
+            await set_intervention_state("current_action", "rodando")
+            await notify_browser_step("step_"+str(step), "pulado", "Usuário pediu pular")
+            continue
+
         await asyncio.sleep(random.uniform(0.8, 1.5))
+        await notify_browser_step("step_"+str(step), "preenchendo", "Preenchendo dados pessoais")
+        await wait_if_paused(page, "step_"+str(step))
 
         # Preenche campos conhecidos
         await _preencher_dados_pessoais(page, perfil)
@@ -210,9 +234,13 @@ async def _processar_formulario_gupy(page, perfil: dict, curriculo_path: str, va
 
         # Responde perguntas customizadas com LLM
         perguntas = await _detectar_perguntas_gupy(page)
+        if perguntas:
+            await notify_browser_step("step_"+str(step), "respondendo", f"{len(perguntas)} pergunta(s) customizada(s)")
         for pergunta in perguntas:
             if pergunta not in perguntas_respondidas:
+                await wait_if_paused(page, "step_"+str(step))
                 resposta = responder_pergunta(pergunta, perfil)
+                await notify_browser_step("step_"+str(step), "respondendo", f"Pergunta: {pergunta[:40]}...")
                 await _preencher_resposta(page, pergunta, resposta)
                 perguntas_respondidas.append(pergunta)
                 await asyncio.sleep(random.uniform(0.3, 0.8))
@@ -220,8 +248,10 @@ async def _processar_formulario_gupy(page, perfil: dict, curriculo_path: str, va
         # Tenta submit (ultimo step)
         if await clicar_qualquer(page, _BTN_SUBMIT, timeout=3000):
             await asyncio.sleep(2)
+            await notify_browser_step("step_"+str(step), "enviando", "Submetendo candidatura")
             html = await page.content()
             if _detectar_sucesso_gupy(html, page.url):
+                await notify_browser_step("step_"+str(step), "sucesso", "Candidatura enviada!")
                 return {
                     "sucesso": True,
                     "perguntas_respondidas": perguntas_respondidas,
@@ -229,6 +259,7 @@ async def _processar_formulario_gupy(page, perfil: dict, curriculo_path: str, va
                 }
 
         # Avanca step
+        await notify_browser_step("step_"+str(step), "navegando", "Avançando para próximo step")
         avancou = await clicar_qualquer(page, _BTN_NEXT, timeout=4000)
         if not avancou:
             break

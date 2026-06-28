@@ -18,6 +18,7 @@ from ai.evolution import send_text
 from ai.openrouter import openrouter
 from data.anilist import anilist
 from data.jikan import jikan
+from telegram.ext import ContextTypes
 from data.reddit import reddit
 from data.rss import rss_news
 from data.tvmaze import tvmaze
@@ -398,7 +399,7 @@ async def enviar_diario_usuario(user_id: str) -> bool:
         return False
 
 
-async def verificar_novos_episodios() -> None:
+async def verificar_novos_episodios(context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Job de alerta de episodios - notifica series em progresso com
     episodios chegando nos proximos 2 dias. Sem LLM, direto ao ponto.
@@ -460,7 +461,7 @@ async def verificar_novos_episodios() -> None:
     logger.info("Notificador episodios: concluido - enviados=%d", enviados)
 
 
-async def coordinator_notificacoes() -> None:
+async def coordinator_notificacoes(context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Roda a cada minuto. Verifica quais usuarios querem notificacao agora
     e envia os tipos correspondentes (digest, episodios, vagas, noticias).
@@ -590,7 +591,7 @@ async def coordinator_notificacoes() -> None:
                 logger.warning("Coordinator: erro noticias user=%s: %s", user_id, e)
 
 
-async def verificar_lancamentos_culturais() -> None:
+async def verificar_lancamentos_culturais(context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Job semanal (sexta 12h) - notifica usuarios sobre novos lancamentos de artistas
     e autores favoritos: albums, turnes e novos livros.

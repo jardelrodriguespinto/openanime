@@ -3,9 +3,14 @@ Agente de vagas — busca, recomendacao personalizada e geracao de curriculo ATS
 """
 
 import logging
+import os
 import re
-import unicodedata
+import urllib.parse
+
 import difflib
+import httpx
+import requests
+import unicodedata
 from urllib.parse import urlparse
 
 from ai.openrouter import openrouter
@@ -15,6 +20,19 @@ import prompts.jobs as jobs_prompt
 from utils.webpage_reader import extrair_urls, ler_pagina
 
 logger = logging.getLogger(__name__)
+
+DASHBOARD_URL = os.getenv("DASHBOARD_URL", "http://anime-dashboard:8082")
+
+
+def _notify_dashboard(action: str, platform: str = "", mensagem: str = "", vagas_processadas: int = 0):
+    try:
+        requests.post(
+            f"{DASHBOARD_URL}/api/automacao/acao",
+            json={"action": action, "platform": platform, "mensagem": mensagem, "vagas_processadas": vagas_processadas},
+            timeout=3,
+        )
+    except Exception:
+        pass
 
 
 def _sem_acento(texto: str) -> str:
@@ -318,6 +336,8 @@ def jobs_node(state: dict) -> dict:
 
 def _modo_busca(state: dict) -> dict:
     """Busca e recomenda vagas."""
+    import asyncio
+
     user_id = state.get("user_id", "")
     mensagem = state.get("raw_input", "")
 
@@ -331,13 +351,14 @@ def _modo_busca(state: dict) -> dict:
 
     # Gera variantes PT/EN + skills do perfil para ampliar a busca
     top_skills = [h.get("nome", "") for h in perfil.get("habilidades", [])[:3] if h.get("nome")]
-    # Inclui senioridade na query principal para resultados mais relevantes
     query_com_nivel = f"{senioridade} {query}".strip() if senioridade else query
     variantes = gerar_variantes(query_com_nivel, top_skills)
     query_principal = variantes[0]
     queries_extras = variantes[1:] if len(variantes) > 1 else []
 
     logger.info("jobs: query='%s' senioridade='%s' variantes=%s", query_principal, senioridade, queries_extras)
+
+    _notify_dashboard("buscando", "", f"Buscando vagas: {query}")
 
     vagas = _buscar_vagas_em_cascata(
         query_principal=query_principal,
@@ -936,3 +957,6 @@ def _salvar_vagas_neo4j(vagas: list[Vaga]) -> None:
             })
     except Exception as e:
         logger.debug("jobs: erro ao salvar vagas: %s", e)
+
+
+

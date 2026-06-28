@@ -35,6 +35,8 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 LOG_FORMAT = "%(asctime)s %(levelname)-8s %(name)-30s %(message)s"
 LOG_DATE = "%Y-%m-%d %H:%M:%S"
 
+os.makedirs("/app/logs", exist_ok=True)
+
 logging.basicConfig(
     level=LOG_LEVEL,
     format=LOG_FORMAT,

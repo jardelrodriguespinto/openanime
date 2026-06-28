@@ -7,6 +7,9 @@ import logging
 import os
 import re
 import tempfile
+import urllib.parse
+
+import httpx
 
 from ai.openrouter import openrouter
 from automation.browser import detectar_plataforma
@@ -16,6 +19,18 @@ import prompts.apply as apply_prompt
 logger = logging.getLogger(__name__)
 
 APPLY_DAILY_LIMIT = int(os.getenv("APPLY_DAILY_LIMIT", "10"))
+DASHBOARD_URL = os.getenv("DASHBOARD_URL", "http://anime-dashboard:8082")
+
+
+async def _notify_dashboard(action: str, platform: str = "", mensagem: str = "", vagas_processadas: int = 0):
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(3.0)) as client:
+            await client.post(
+                f"{DASHBOARD_URL}/api/automacao/acao",
+                json={"action": action, "platform": platform, "mensagem": mensagem, "vagas_processadas": vagas_processadas},
+            )
+    except Exception:
+        pass
 
 _KEYWORDS_HISTORICO = ["minhas candidaturas", "candidaturas", "pipeline", "status candidatura"]
 _KEYWORDS_CANDIDATAR = [
@@ -310,6 +325,9 @@ async def executar_candidatura(user_id: str, vaga: dict, perfil: dict, plataform
     # Aplica na plataforma
     resultado = None
     try:
+        await _notify_dashboard("aplicando", plataforma, f"Aplicando em {vaga.get('empresa', '')} via {plataforma}")
+        from automation.browser import notify_browser_step, wait_if_paused
+        await notify_browser_step("inicio", "aplicando", f"Plataforma: {plataforma} | URL: {vaga_url}")
         if plataforma == "linkedin":
             from automation.linkedin_apply import aplicar
             resultado = await aplicar(vaga_url, perfil, curriculo_path)
@@ -332,8 +350,11 @@ async def executar_candidatura(user_id: str, vaga: dict, perfil: dict, plataform
                 ),
                 "pdf_curriculo_disponivel": bool(curriculo_path),
             }
+        await notify_browser_step("fim", "concluido", resultado.get("mensagem", ""))
     except Exception as e:
         logger.error("apply: erro na automacao %s: %s", plataforma, e)
+        from automation.browser import notify_browser_step
+        await notify_browser_step("erro", "falha", str(e))
         resultado = {
             "sucesso": False,
             "motivo_falha": "erro_automacao",
@@ -362,12 +383,17 @@ async def executar_candidatura(user_id: str, vaga: dict, perfil: dict, plataform
 
     logger.info("apply: candidatura user=%s vaga=%s plataforma=%s sucesso=%s",
                 user_id, vaga.get("titulo"), plataforma, resultado.get("sucesso"))
+    await _notify_dashboard(
+        "validando" if resultado.get("sucesso") else "finalizando",
+        plataforma,
+        f"{'Sucesso' if resultado.get('sucesso') else 'Falha'}: {vaga.get('titulo', '')} — {vaga.get('empresa', '')}",
+    )
     return resultado
 
 
 async def _aplicar_generico(vaga_url: str, perfil: dict, curriculo_path: str, plataforma: str) -> dict:
     """Tentativa generica de candidatura para Greenhouse, Lever e similares."""
-    from automation.browser import nova_pagina, clicar_qualquer, esperar_navegacao
+    from automation.browser import nova_pagina, clicar_qualquer, esperar_navegacao, set_active_page, notify_browser_step, wait_if_paused
     from automation.form_filler import responder_pergunta
 
     _BTN_APPLY = [
@@ -382,12 +408,15 @@ async def _aplicar_generico(vaga_url: str, perfil: dict, curriculo_path: str, pl
     page = None
     try:
         page = await nova_pagina(stealth=True)
+        await set_active_page(page)
         await page.goto(vaga_url)
         await esperar_navegacao(page)
+        await notify_browser_step("generico", "navegando", f"URL: {vaga_url}")
 
         # Clica em Apply
         await clicar_qualquer(page, _BTN_APPLY, timeout=10000)
         await esperar_navegacao(page)
+        await wait_if_paused(page, "generico_apply")
 
         # Preenche nome/email basicos
         campos = {
@@ -415,18 +444,23 @@ async def _aplicar_generico(vaga_url: str, perfil: dict, curriculo_path: str, pl
                 pass
 
         # Submit
+        await notify_browser_step("generico", "enviando", "Submetendo candidatura")
         if await clicar_qualquer(page, _BTN_SUBMIT, timeout=5000):
             await esperar_navegacao(page)
             await page.close()
+            await notify_browser_step("generico", "sucesso", "Candidatura enviada!")
             return {"sucesso": True, "mensagem": f"Candidatura enviada via {plataforma}!"}
 
         await page.close()
+        await notify_browser_step("generico", "falha", "Submit não encontrado")
         return {
             "sucesso": False,
             "motivo_falha": "submit_nao_encontrado",
             "mensagem": f"Nao consegui completar candidatura em {plataforma}. Acesse manualmente: {vaga_url}",
         }
     except Exception as e:
+        from automation.browser import notify_browser_step
+        await notify_browser_step("generico", "erro", str(e))
         if page:
             try:
                 await page.close()

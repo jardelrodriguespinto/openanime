@@ -41,3 +41,5 @@ scrapling
 python-socketio==5.11.0
 # PostgreSQL pgvector support
 psycopg2-binary==2.9.9
+# Browser-use — navegador visível com IA
+browser-use

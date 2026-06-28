@@ -14,6 +14,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgdk-pixbuf-xlib-2.0-0 \
     libffi-dev \
     shared-mime-info \
+    xvfb \
+    x11-utils \
+    libasound2 \
+    libgtk-3-0 \
+    libxss1 \
+    libx11-xcb1 \
+    libxcb1 \
+    libxrender1 \
+    libxtst6 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
@@ -25,4 +34,4 @@ COPY . .
 
 RUN mkdir -p /app/logs /tmp
 
-CMD ["python", "-m", "bot.main"]
+CMD ["xvfb-run", "--auto-servernum", "--server-num=1", "-a", "python", "-m", "bot.main"]

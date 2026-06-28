@@ -59,15 +59,18 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "") -> dict
         }
 
     from automation.browser import (
-        detectar_bloqueio, nova_pagina, nova_pagina_com_sessao,
+        detectar_bloqueio, nova_pagina_com_sessao,
         clicar_qualquer, esperar_navegacao, screenshot_debug,
-        salvar_sessao, sessao_existe, limpar_sessao,
+        salvar_sessao, sessao_existe, limpar_sessao, set_active_page,
+        get_intervention_state, set_intervention_state,
+        notify_browser_step, wait_if_paused,
     )
 
     page = None
     context = None
     try:
         page, context = await nova_pagina_com_sessao("linkedin", stealth=True)
+        await set_active_page(page)
 
         # --- LOGIN (pula se sessao valida) ---
         if sessao_existe("linkedin"):
@@ -123,8 +126,10 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "") -> dict
 
         await asyncio.sleep(random.uniform(1.5, 2.5))
 
+        await notify_browser_step("formulario", "iniciando", "Iniciando formulário Easy Apply")
         # --- LOOP MULTI-STEP ---
         resultado = await _processar_formulario_multistep(page, perfil, curriculo_path, vaga_url)
+        await notify_browser_step("fim", "concluido", resultado.get("mensagem", ""))
         await page.close()
         return resultado
 
@@ -204,7 +209,7 @@ async def _processar_formulario_multistep(page, perfil: dict, curriculo_path: st
     Navega por todas as etapas do formulario Easy Apply.
     Preenche campos automaticamente, responde perguntas com LLM, faz upload de curriculo.
     """
-    from automation.browser import clicar_qualquer, esperar_navegacao, screenshot_debug
+    from automation.browser import clicar_qualquer, esperar_navegacao, screenshot_debug, notify_browser_step, wait_if_paused
     from automation.form_filler import responder_pergunta
 
     perguntas_customizadas = []
@@ -212,7 +217,29 @@ async def _processar_formulario_multistep(page, perfil: dict, curriculo_path: st
     max_steps = 12  # Previne loop infinito
 
     for step in range(max_steps):
+        # Verifica pausa/intervencao
+        from automation.browser import get_intervention_state
+        control = await get_intervention_state()
+        if control.get("paused") or control.get("intervention_type") == "manual":
+            logger.info("linkedin_apply: pausado pelo usuario no step %d", step)
+            await notify_browser_step("step_"+str(step), "pausado", "Intervenção manual necessária")
+            return {
+                "sucesso": False,
+                "pausado": True,
+                "mensagem": "Automação pausada pelo usuário — intervenção manual necessária",
+                "acao_necessaria": "intervencao_manual",
+                "step": step,
+            }
+
+        if control.get("current_action") == "pular":
+            logger.info("linkedin_apply: usuario pediu para pular step %d", step)
+            await set_intervention_state("current_action", "rodando")
+            await notify_browser_step("step_"+str(step), "pulado", "Usuário pediu pular")
+            continue
+
         await asyncio.sleep(random.uniform(0.8, 1.5))
+        await notify_browser_step("step_"+str(step), "preenchendo", "Preenchendo campos do formulário")
+        await wait_if_paused(page, "step_"+str(step))
 
         # Preenche campos visiveis neste step
         await _preencher_step(page, perfil, curriculo_path, respostas_geradas)
@@ -220,15 +247,18 @@ async def _processar_formulario_multistep(page, perfil: dict, curriculo_path: st
         # Detecta perguntas customizadas neste step
         perguntas_step = await _detectar_perguntas_nao_respondidas(page)
         if perguntas_step:
+            await notify_browser_step("step_"+str(step), "respondendo", f"{len(perguntas_step)} pergunta(s) customizada(s)")
             # Responde cada pergunta com LLM
             for pergunta in perguntas_step:
                 if pergunta not in respostas_geradas:
+                    await wait_if_paused(page, "step_"+str(step))
                     resposta = responder_pergunta(
                         pergunta, perfil,
                         vaga_titulo="vaga LinkedIn",
                         vaga_empresa=""
                     )
                     respostas_geradas[pergunta] = resposta
+                    await notify_browser_step("step_"+str(step), "respondendo", f"Pergunta: {pergunta[:40]}...")
                     await _preencher_resposta_customizada(page, pergunta, resposta)
                     perguntas_customizadas.append(pergunta)
                     await asyncio.sleep(random.uniform(0.5, 1.0))
@@ -236,9 +266,11 @@ async def _processar_formulario_multistep(page, perfil: dict, curriculo_path: st
         # Tenta clicar Submit (ultimo step)
         if await clicar_qualquer(page, _BTN_SUBMIT, timeout=3000):
             await asyncio.sleep(2)
+            await notify_browser_step("step_"+str(step), "enviando", "Submetendo candidatura")
             html = await page.content()
             if _detectar_sucesso(html, page.url):
                 logger.info("linkedin_apply: candidatura enviada com sucesso")
+                await notify_browser_step("step_"+str(step), "sucesso", "Candidatura enviada!")
                 return {
                     "sucesso": True,
                     "perguntas_respondidas": perguntas_customizadas,
@@ -249,6 +281,7 @@ async def _processar_formulario_multistep(page, perfil: dict, curriculo_path: st
                 await asyncio.sleep(2)
                 html = await page.content()
                 if _detectar_sucesso(html, page.url):
+                    await notify_browser_step("step_"+str(step), "sucesso", "Candidatura enviada!")
                     return {
                         "sucesso": True,
                         "perguntas_respondidas": perguntas_customizadas,
@@ -256,6 +289,7 @@ async def _processar_formulario_multistep(page, perfil: dict, curriculo_path: st
                     }
 
         # Avanca para proximo step
+        await notify_browser_step("step_"+str(step), "navegando", "Avançando para próximo step")
         if await clicar_qualquer(page, _BTN_NEXT, timeout=3000):
             await esperar_navegacao(page, timeout=8000)
             continue
