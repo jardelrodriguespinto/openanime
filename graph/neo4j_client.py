@@ -6,7 +6,9 @@ import datetime
 
 from neo4j import GraphDatabase
 
-from data.franchise_routes import get_franchise_route
+def _get_franchise_route(titulo: str) -> dict | None:
+    """Stub for franchise route lookup - returns None by default."""
+    return None
 
 logger = logging.getLogger(__name__)
 
@@ -655,7 +657,7 @@ class Neo4jClient:
         return desafio
 
     def get_franchise_timeline(self, titulo: str) -> dict | None:
-        route = get_franchise_route(titulo)
+        route = _get_franchise_route(titulo)
         if route:
             return route
 
@@ -1264,7 +1266,7 @@ class Neo4jClient:
                 estudio=estudio,
             )
 
-            route = get_franchise_route(titulo or anime_id)
+            route = _get_franchise_route(titulo or anime_id)
             if route:
                 session.run(
                     """

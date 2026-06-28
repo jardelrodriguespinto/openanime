@@ -61,7 +61,7 @@ services:
     restart: unless-stopped
 
   postgres:
-    image: pgvector/pgvector:16
+    image: pgvector/pgvector:pg16
     container_name: anime-postgres
     labels:
       service: postgres
