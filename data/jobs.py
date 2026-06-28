@@ -186,9 +186,9 @@ def _buscar_indeed(query: str, localizacao: str = "", limite: int = JOBS_LIMITE_
                 if link_el:
                     href = link_el.get("href", "")
                     if href.startswith("/"):
-                        link = f"https://br.indeed.com{href.split('?')[0]}"
+                        link = f"https://br.indeed.com{href}"
                     elif href.startswith("http"):
-                        link = href.split("?")[0]
+                        link = href
 
                 if not titulo:
                     continue

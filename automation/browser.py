@@ -33,6 +33,58 @@ _intervention_state = {
     "intervention_selector": None,
 }
 _intervention_lock = asyncio.Lock()
+_REDIS_INTERVENTION_KEY = "automacao:intervencao"
+
+
+def _get_redis():
+    try:
+        import redis
+        return redis.Redis(
+            host=os.getenv("REDIS_HOST", "redis"),
+            port=int(os.getenv("REDIS_PORT", 6379)),
+            username=os.getenv("REDIS_USER", "open-anime"),
+            password=os.getenv("REDIS_PASSWORD", "open-anime"),
+            db=int(os.getenv("REDIS_DB", 0)),
+            decode_responses=True,
+            socket_connect_timeout=2,
+            socket_timeout=2,
+        )
+    except Exception:
+        return None
+
+
+_screenshot_loop_task = None
+_screenshot_loop_running = False
+
+
+async def _bot_screenshot_loop():
+    """Loop que envia screenshots periodicamente via Socket.IO quando ha pagina ativa."""
+    global _screenshot_loop_running
+    _screenshot_loop_running = True
+    while True:
+        try:
+            page = await get_active_page()
+            if page:
+                img = await screenshot_base64(page)
+                if img:
+                    asyncio.create_task(_send_screenshot_via_sio({
+                        "screenshot": img,
+                        "url": page.url,
+                        "title": await page.title(),
+                        "step": "",
+                        "action": "rodando",
+                    }))
+        except Exception:
+            pass
+        await asyncio.sleep(1)
+
+
+async def start_bot_screenshot_loop():
+    """Garante que o loop de screenshots do bot esta rodando."""
+    global _screenshot_loop_task, _screenshot_loop_running
+    if not _screenshot_loop_running:
+        _screenshot_loop_running = True
+        _screenshot_loop_task = asyncio.create_task(_bot_screenshot_loop())
 
 _USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -72,33 +124,51 @@ async def get_browser():
                 from playwright.async_api import async_playwright
                 _playwright_instance = await async_playwright().start()
                 
-                # Tenta encontrar navegador instalado no sistema
+                # Se firefox for snap, pega o caminho real
                 import shutil
-                chrome_path = shutil.which("google-chrome") or shutil.which("chromium-browser")
+                import glob
+                chrome_path = shutil.which("google-chrome") or shutil.which("chromium-browser") or shutil.which("chromium")
                 firefox_path = shutil.which("firefox")
                 
-                launch_opts = {
-                    "headless": PLAYWRIGHT_HEADLESS,
-                }
+                if firefox_path and "snap" not in firefox_path:
+                    snap_firefox = glob.glob("/snap/firefox/*/usr/lib/firefox/firefox")
+                    if snap_firefox:
+                        firefox_path = snap_firefox[0]
+                        logger.info(f"Firefox snap detectado: {firefox_path}")
                 
-                if chrome_path:
-                    logger.info(f"Usando Chrome do sistema: {chrome_path}")
-                    _browser = await _playwright_instance.chromium.launch(
-                        headless=PLAYWRIGHT_HEADLESS,
-                        executable_path=chrome_path,
-                    )
-                elif firefox_path:
+                logger.info("browser: PLAYWRIGHT_HEADLESS=%s, chrome=%s, firefox=%s", 
+                           PLAYWRIGHT_HEADLESS, bool(chrome_path), bool(firefox_path))
+                print(f"[BROWSER] PLAYWRIGHT_HEADLESS={PLAYWRIGHT_HEADLESS}, chrome={chrome_path}, firefox={firefox_path}")
+                
+                if firefox_path:
                     logger.info(f"Usando Firefox do sistema: {firefox_path}")
+                    print(f"[BROWSER] Lancando Firefox: {firefox_path}")
                     _browser = await _playwright_instance.firefox.launch(
                         headless=PLAYWRIGHT_HEADLESS,
                         executable_path=firefox_path,
                     )
+                    logger.info("browser: Firefox lancado com sucesso!")
+                    print("[BROWSER] Firefox lancado com sucesso!")
+                elif chrome_path:
+                    logger.info(f"Usando Chrome do sistema: {chrome_path}")
+                    chrome_args = [
+                        "--start-maximized",
+                        "--no-first-run",
+                        "--no-default-browser-check",
+                    ]
+                    if not PLAYWRIGHT_HEADLESS:
+                        chrome_args.append("--start-maximized")
+                    _browser = await _playwright_instance.chromium.launch(
+                        headless=PLAYWRIGHT_HEADLESS,
+                        executable_path=chrome_path,
+                        args=chrome_args,
+                    )
+                    logger.info("browser: Chrome lancado com sucesso!")
+                    print("[BROWSER] Chrome lancado com sucesso!")
                 else:
-                    # Tenta chromium/webkith sem instalacao
-                    try:
-                        _browser = await _playwright_instance.chromium.launch(headless=PLAYWRIGHT_HEADLESS)
-                    except Exception:
-                        _browser = await _playwright_instance.webkit.launch(headless=PLAYWRIGHT_HEADLESS)
+                    print("[BROWSER] Nenhum navegador do sistema encontrado!")
+                    logger.error("browser: Nenhum navegador do sistema encontrado")
+                    raise RuntimeError("Nenhum navegador (Chrome/Firefox) encontrado no sistema")
                 logger.info("browser: Playwright iniciado | headless=%s", PLAYWRIGHT_HEADLESS)
             except ImportError:
                 raise RuntimeError("playwright nao instalado. Execute: pip install playwright")
@@ -114,6 +184,8 @@ async def set_active_page(page):
     global _active_page
     async with _active_page_lock:
         _active_page = page
+    if page:
+        await start_bot_screenshot_loop()
 
 
 async def get_active_page():
@@ -217,13 +289,31 @@ async def get_current_step() -> dict:
 
 
 async def set_intervention_state(key: str, value):
-    """Atualiza estado de intervencao (pausa, acao manual)."""
+    """Atualiza estado de intervencao (pausa, acao manual) — tenta Redis, fallback memoria."""
     async with _intervention_lock:
         _intervention_state[key] = value
+    try:
+        r = _get_redis()
+        if r:
+            full = await get_intervention_state()
+            r.setex(_REDIS_INTERVENTION_KEY, 3600, json.dumps(full, default=str))
+    except Exception:
+        pass
 
 
 async def get_intervention_state() -> dict:
-    """Retorna copia do estado de intervencao."""
+    """Retorna copia do estado de intervencao — prioriza Redis, fallback memoria."""
+    try:
+        r = _get_redis()
+        if r:
+            raw = r.get(_REDIS_INTERVENTION_KEY)
+            if raw:
+                parsed = json.loads(raw)
+                async with _intervention_lock:
+                    _intervention_state.update(parsed)
+                return dict(_intervention_state)
+    except Exception:
+        pass
     async with _intervention_lock:
         return dict(_intervention_state)
 
@@ -233,6 +323,7 @@ async def nova_pagina(stealth: bool = True):
     browser = await get_browser()
     user_agent = random.choice(_USER_AGENTS)
     viewport = random.choice(_VIEWPORTS)
+    print(f"[BROWSER] Nova pagina criada | stealth={stealth}")
 
     context = await browser.new_context(
         user_agent=user_agent,

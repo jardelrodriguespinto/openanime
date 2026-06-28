@@ -27,6 +27,9 @@ from bot.handlers import (
     handle_start,
     handle_stats,
     handle_vagas,
+    handle_pausar,
+    handle_continuar,
+    handle_pular,
 )
 
 load_dotenv()
@@ -147,6 +150,9 @@ def main():
     app.add_handler(CommandHandler("perfil_pro", handle_perfil_pro))
     app.add_handler(CommandHandler("candidaturas", handle_candidaturas))
     app.add_handler(CommandHandler("notificacoes", handle_notificacoes))
+    app.add_handler(CommandHandler("pausar", handle_pausar))
+    app.add_handler(CommandHandler("continuar", handle_continuar))
+    app.add_handler(CommandHandler("pular", handle_pular))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_audio))

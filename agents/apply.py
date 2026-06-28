@@ -295,9 +295,27 @@ async def executar_candidatura(user_id: str, vaga: dict, perfil: dict, plataform
     2. Aplica na plataforma com Playwright
     3. Registra no Neo4j
     """
-    vaga_url = vaga.get("url", "")
+    vaga_url = vaga.get("url", "").strip()
     if not vaga_url:
-        return {"sucesso": False, "mensagem": "URL da vaga nao encontrada."}
+        return {"sucesso": False, "mensagem": "URL da vaga nao encontrada. Envie o link da vaga ou use /vagas para buscar."}
+
+    import subprocess
+    import shutil
+    firefox_bin = shutil.which("firefox") or "/snap/firefox/8568/usr/lib/firefox/firefox"
+    print(f"[APPLY] ABRINDO BROWSER DO SISTEMA: {firefox_bin} -> {vaga_url}")
+    try:
+        subprocess.Popen([firefox_bin, "--new-window", vaga_url], 
+                        stdout=subprocess.DEVNULL, 
+                        stderr=subprocess.DEVNULL,
+                        env={**__import__('os').environ, 'DISPLAY': __import__('os').environ.get('DISPLAY', ':0')})
+        print("[APPLY] Browser aberto com sucesso!")
+    except Exception as e:
+        print(f"[APPLY] Falha ao abrir firefox subprocess: {e}")
+        import webbrowser
+        webbrowser.open(vaga_url)
+
+    import time
+    time.sleep(1)
 
     # Gera curriculo ATS personalizado para esta vaga
     curriculo_path = ""
@@ -322,7 +340,7 @@ async def executar_candidatura(user_id: str, vaga: dict, perfil: dict, plataform
     except Exception as e:
         logger.warning("apply: falha ao gerar curriculo ATS: %s — usando sem curriculo", e)
 
-    # Aplica na plataforma
+    # Tenta aplicacao automatica com browser visivel (Playwright)
     resultado = None
     try:
         await _notify_dashboard("aplicando", plataforma, f"Aplicando em {vaga.get('empresa', '')} via {plataforma}")
@@ -348,8 +366,11 @@ async def executar_candidatura(user_id: str, vaga: dict, perfil: dict, plataform
                     f"Acesse manualmente: {vaga_url}\n\n"
                     f"Seu curriculo ATS foi gerado e ja esta otimizado para esta vaga!"
                 ),
-                "pdf_curriculo_disponivel": bool(curriculo_path),
             }
+    except Exception as e:
+        logger.error("apply: erro na aplicacao %s: %s", vaga_url, e)
+        resultado = None
+
         await notify_browser_step("fim", "concluido", resultado.get("mensagem", ""))
     except Exception as e:
         logger.error("apply: erro na automacao %s: %s", plataforma, e)

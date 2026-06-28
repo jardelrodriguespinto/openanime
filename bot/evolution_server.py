@@ -118,6 +118,39 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
 
 
 async def _handle_text(user_id: str, text: str, history: list) -> None:
+    text_lower = (text or "").lower().strip()
+
+    if text_lower in {"/pausar", "pausar", "pausa"}:
+        try:
+            from automation.browser import set_intervention_state
+            asyncio.create_task(set_intervention_state("paused", True))
+            asyncio.create_task(set_intervention_state("current_action", "pausado"))
+            await send_text(user_id, "⏸ Automacao pausada. Use /continuar para retomar.")
+        except Exception as e:
+            await send_text(user_id, f"Erro ao pausar: {e}")
+        return
+
+    if text_lower in {"/continuar", "continuar", "continuar automacao", "resumir"}:
+        try:
+            from automation.browser import set_intervention_state
+            asyncio.create_task(set_intervention_state("paused", False))
+            asyncio.create_task(set_intervention_state("current_action", "rodando"))
+            asyncio.create_task(set_intervention_state("intervention_type", None))
+            asyncio.create_task(set_intervention_state("intervention_selector", None))
+            await send_text(user_id, "▶ Automacao retomada!")
+        except Exception as e:
+            await send_text(user_id, f"Erro ao continuar: {e}")
+        return
+
+    if text_lower in {"/pular", "pular", "pula", "skip"}:
+        try:
+            from automation.browser import set_intervention_state
+            asyncio.create_task(set_intervention_state("current_action", "pular"))
+            await send_text(user_id, "⏭ Step atual serah pulado.")
+        except Exception as e:
+            await send_text(user_id, f"Erro ao pular: {e}")
+        return
+
     result = await processar_mensagem(user_id, text, history)
     response = result.get("response", "")
     history2 = (history or []) + [

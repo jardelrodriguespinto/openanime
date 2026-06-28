@@ -620,13 +620,12 @@ async def buscar_vagas_dashboard(request: Request):
             set_browser_current_step("buscando", "navegando", f"Query: {query}")
             emit_status_update()
 
-            from automation.browser_agent import buscar_vagas_browser_use, BROWSER_USE_AVAILABLE
+            from automation.browser_agent import buscar_vagas_browser_use
             vagas = []
-            if BROWSER_USE_AVAILABLE:
-                try:
-                    vagas = await buscar_vagas_browser_use(query)
-                except Exception as e:
-                    logger.warning(f"browser-use falhou: {e}")
+            try:
+                vagas = await buscar_vagas_browser_use(query)
+            except Exception as e:
+                logger.warning(f"busca falhou: {e}")
 
             if vagas:
                 from graph.neo4j_client import get_neo4j
@@ -637,7 +636,7 @@ async def buscar_vagas_dashboard(request: Request):
                         "titulo": vaga.get("titulo", ""),
                         "empresa": vaga.get("empresa", ""),
                         "url": vaga.get("url", ""),
-                        "fonte": plataforma or "browser-use",
+                        "fonte": vaga.get("fonte", "busca"),
                         "descricao": vaga.get("descricao", "")[:500],
                     })
 
@@ -665,6 +664,59 @@ async def parar_automacao():
     return JSONResponse({"success": True, "message": "Automação parada"})
 
 
+@fastapi_app.post("/api/automacao/aplicar-em-lote")
+async def aplicar_vagas_lote(request: Request):
+    """Aplica automaticamente as vagas com score acima do limiar."""
+    body = await request.json()
+    user_id = body.get("user_id", os.getenv("DASHBOARD_USER_ID", "admin"))
+    limiar_score = float(body.get("limiar_score", 0.5))  # 50% default
+    limite_vagas = int(body.get("limite_vagas", 5))
+    plataforma_filtro = body.get("plataforma", "")
+    
+    async def _run_aplicacao_lote():
+        try:
+            vagas_aplicar = []
+            try:
+                neo4j = get_neo4j()
+                candidaturas = neo4j.get_todas_candidaturas()
+                for c in candidaturas[:limite_vagas]:
+                    score = c.get("score", 0) or _estimar_score(c)
+                    if score >= limiar_score:
+                        vagas_aplicar.append(c)
+            except Exception:
+                pass
+            
+            for i, vaga in enumerate(vagas_aplicar):
+                plataforma = plataforma_filtro or _detectar_plataforma(vaga.get("url", ""))
+                _set_automacao_status(True, "aplicando", plataforma, f"Aplicando em {vaga.get('empresa','?')} ({i+1}/{len(vagas_aplicar)})")
+                set_browser_current_step("lote", "aplicando", f"Vaga {i+1}: {vaga.get('titulo','')[:40]}")
+                emit_status_update()
+                
+                try:
+                    from agents.apply import executar_candidatura
+                    perfil = neo4j.get_perfil_profissional(user_id) if 'neo4j' in dir() else {}
+                    await executar_candidatura(user_id, vaga, perfil, plataforma)
+                except Exception as e:
+                    logger.error(f"Erro aplicando vaga {vaga.get('url')}: {e}")
+                    
+            _set_automacao_status(False, "idle", "", f"Lote concluído: {len(vagas_aplicar)} candidaturas enviadas")
+            emit_status_update()
+        except Exception as e:
+            _set_automacao_status(False, "erro", "", str(e))
+            emit_status_update()
+    
+    asyncio.create_task(_run_aplicacao_lote())
+    return JSONResponse({"success": True, "message": f"Iniciando aplicação automática para vagas com score ≥ {int(limiar_score*100)}%"})
+
+
+def _estimar_score(vaga: dict) -> float:
+    """Estima score baseado em palavras-chave no título."""
+    titulo = (vaga.get("titulo") or "").lower()
+    requisitos = vaga.get("requisitos", []) or []
+    scores = {"python": 0.8, "backend": 0.7, "fullstack": 0.7, "senior": 0.6}
+    return max((scores.get(r, 0) for r in requisitos), default=0.5)
+
+
 @fastapi_app.post("/api/automacao/aplicar-vaga")
 async def aplicar_vaga_dashboard(request: Request):
     """Dispara aplicacao automatica para uma vaga selecionada no dashboard."""
@@ -677,7 +729,7 @@ async def aplicar_vaga_dashboard(request: Request):
         try:
             from agents.apply import executar_candidatura
             from automation.browser import set_active_page, get_intervention_state
-            from automation.browser_agent import aplicar_vaga_browser_use, BROWSER_USE_AVAILABLE
+            from automation.browser_agent import aplicar_vaga_browser_use
             from graph.neo4j_client import get_neo4j
 
             neo4j = get_neo4j()
@@ -688,10 +740,20 @@ async def aplicar_vaga_dashboard(request: Request):
             set_browser_current_step("inicio", "aplicando", f"URL: {vaga.get('url','')}")
             emit_status_update()
 
-            if BROWSER_USE_AVAILABLE:
+            from automation.browser import notify_browser_step
+
+            resultado = None
+            if plataforma != "desconhecido":
+                try:
+                    from agents.apply import executar_candidatura
+                    resultado = await executar_candidatura(user_id, vaga, perfil, plataforma)
+                except Exception as e:
+                    logger.warning("executar_candidatura falhou no dashboard: %s", e)
+                    resultado = None
+
+            if not resultado:
+                from automation.browser_agent import aplicar_vaga_browser_use
                 resultado = await aplicar_vaga_browser_use(vaga.get("url", ""), perfil)
-            else:
-                resultado = await executar_candidatura(user_id, vaga, perfil, plataforma)
 
             status = "candidatado" if resultado.get("sucesso") else "tentativa_falhou"
             _set_automacao_status(False, "finalizando", plataforma, f"{'Sucesso' if resultado.get('sucesso') else 'Falha'}: {vaga.get('titulo','')}")

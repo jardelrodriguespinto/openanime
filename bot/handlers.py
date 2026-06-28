@@ -53,6 +53,9 @@ def _build_help_text() -> str:
         "/perfil_pro - seu perfil profissional\n"
         "/candidaturas - pipeline de candidaturas\n"
         "/notificacoes - configura horario e tipo de alertas\n"
+        "/pausar - pausa automacao em andamento\n"
+        "/continuar - continua automacao pausada\n"
+        "/pular - pula step atual da automacao\n"
         "/limpar - limpa o historico da conversa\n\n"
         "Comandos naturais de notas (mini Obsidian):\n"
         "- \"anota que [texto]\" ou \"crianota [texto]\"\n"
@@ -781,6 +784,58 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _telegram_call_with_retry(
             "edit_text_pdf_erro",
             lambda: msg.edit_text("Erro ao processar o PDF. Tenta novamente!"),
+        )
+
+
+async def handle_pausar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /pausar — pausa a automacao de candidatura em andamento."""
+    try:
+        from automation.browser import set_intervention_state
+        asyncio.create_task(set_intervention_state("paused", True))
+        asyncio.create_task(set_intervention_state("current_action", "pausado"))
+        await _telegram_call_with_retry(
+            "reply_text_pausar",
+            lambda: update.message.reply_text("⏸ Automacao pausada. Use /continuar para retomar."),
+        )
+    except Exception as e:
+        await _telegram_call_with_retry(
+            "reply_text_pausar_erro",
+            lambda: update.message.reply_text(f"Erro ao pausar: {e}"),
+        )
+
+
+async def handle_continuar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /continuar — continua a automacao pausada."""
+    try:
+        from automation.browser import set_intervention_state
+        asyncio.create_task(set_intervention_state("paused", False))
+        asyncio.create_task(set_intervention_state("current_action", "rodando"))
+        asyncio.create_task(set_intervention_state("intervention_type", None))
+        asyncio.create_task(set_intervention_state("intervention_selector", None))
+        await _telegram_call_with_retry(
+            "reply_text_continuar",
+            lambda: update.message.reply_text("▶ Automacao retomada!"),
+        )
+    except Exception as e:
+        await _telegram_call_with_retry(
+            "reply_text_continuar_erro",
+            lambda: update.message.reply_text(f"Erro ao continuar: {e}"),
+        )
+
+
+async def handle_pular(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /pular — pula o step atual da automacao."""
+    try:
+        from automation.browser import set_intervention_state
+        asyncio.create_task(set_intervention_state("current_action", "pular"))
+        await _telegram_call_with_retry(
+            "reply_text_pular",
+            lambda: update.message.reply_text("⏭ Step atual serah pulado."),
+        )
+    except Exception as e:
+        await _telegram_call_with_retry(
+            "reply_text_pular_erro",
+            lambda: update.message.reply_text(f"Erro ao pular: {e}"),
         )
 
 
