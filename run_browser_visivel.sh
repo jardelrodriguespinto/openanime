@@ -1,8 +1,11 @@
 #!/bin/bash
 # Script para rodar browser visível localmente
+set -a
+[ -f .env ] && source .env
+set +a
 export PLAYWRIGHT_HEADLESS=false
 export DASHBOARD_URL=http://localhost:8082
-python -m bot.dashboard &
+python3 -m bot.dashboard &
 DASHBOARD_PID=$!
-python -m bot.main
+python3 -m bot.main
 kill $DASHBOARD_PID 2>/dev/null

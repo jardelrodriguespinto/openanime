@@ -35,7 +35,12 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 LOG_FORMAT = "%(asctime)s %(levelname)-8s %(name)-30s %(message)s"
 LOG_DATE = "%Y-%m-%d %H:%M:%S"
 
-os.makedirs("/app/logs", exist_ok=True)
+try:
+    os.makedirs("/app/logs", exist_ok=True)
+except PermissionError:
+    os.makedirs("/tmp/logs", exist_ok=True)
+
+LOG_FILE = "/app/logs/bot.log" if os.path.exists("/app/logs") else "/tmp/logs/bot.log"
 
 logging.basicConfig(
     level=LOG_LEVEL,
@@ -44,7 +49,7 @@ logging.basicConfig(
     handlers=[
         logging.StreamHandler(),
         logging.handlers.RotatingFileHandler(
-            "/app/logs/bot.log",
+            LOG_FILE,
             maxBytes=10 * 1024 * 1024,
             backupCount=5,
             encoding="utf-8",

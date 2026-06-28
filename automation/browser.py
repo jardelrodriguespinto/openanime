@@ -71,13 +71,37 @@ async def get_browser():
             try:
                 from playwright.async_api import async_playwright
                 _playwright_instance = await async_playwright().start()
-                _browser = await _playwright_instance.chromium.launch(
-                    headless=PLAYWRIGHT_HEADLESS,
-                    args=_STEALTH_ARGS,
-                )
+                
+                # Tenta encontrar navegador instalado no sistema
+                import shutil
+                chrome_path = shutil.which("google-chrome") or shutil.which("chromium-browser")
+                firefox_path = shutil.which("firefox")
+                
+                launch_opts = {
+                    "headless": PLAYWRIGHT_HEADLESS,
+                }
+                
+                if chrome_path:
+                    logger.info(f"Usando Chrome do sistema: {chrome_path}")
+                    _browser = await _playwright_instance.chromium.launch(
+                        headless=PLAYWRIGHT_HEADLESS,
+                        executable_path=chrome_path,
+                    )
+                elif firefox_path:
+                    logger.info(f"Usando Firefox do sistema: {firefox_path}")
+                    _browser = await _playwright_instance.firefox.launch(
+                        headless=PLAYWRIGHT_HEADLESS,
+                        executable_path=firefox_path,
+                    )
+                else:
+                    # Tenta chromium/webkith sem instalacao
+                    try:
+                        _browser = await _playwright_instance.chromium.launch(headless=PLAYWRIGHT_HEADLESS)
+                    except Exception:
+                        _browser = await _playwright_instance.webkit.launch(headless=PLAYWRIGHT_HEADLESS)
                 logger.info("browser: Playwright iniciado | headless=%s", PLAYWRIGHT_HEADLESS)
             except ImportError:
-                raise RuntimeError("playwright nao instalado. Execute: pip install playwright && playwright install chromium")
+                raise RuntimeError("playwright nao instalado. Execute: pip install playwright")
             except Exception as e:
                 logger.error("browser: erro ao iniciar Playwright: %s", e)
                 raise

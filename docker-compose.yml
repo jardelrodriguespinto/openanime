@@ -1,5 +1,3 @@
-version: '3.8'
-
 x-logging: &default-logging
   driver: "json-file"
   options:
@@ -8,6 +6,7 @@ x-logging: &default-logging
     labels: "service"
 
 services:
+
   neo4j:
     image: neo4j:5
     container_name: anime-neo4j
@@ -35,120 +34,6 @@ services:
       start_period: 45s
     logging: *default-logging
     restart: unless-stopped
-    command: ["python", "-m", "bot.main"]
-
-  redis:
-    image: redis/redis-stack-server:7.2.0-v13
-    container_name: anime-redis
-    labels:
-      service: redis
-    ports:
-      - "${REDIS_PORT:-6379}:6379"
-    volumes:
-      - ${HOST_REDIS_DIR:-./data/redis}:/data
-      - ./users.acl:/usr/local/etc/redis/users.acl:ro
-    command: >
-      redis-server
-      --aclfile /usr/local/etc/redis/users.acl
-      --save 60 1000
-      --appendonly yes
-      --appendfsync everysec
-    healthcheck:
-      test: ["CMD-SHELL", "redis-cli --no-auth-warning --user open-anime -a open-anime ping | grep PONG"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 15s
-    logging: *default-logging
-    restart: unless-stopped
-
-  postgres:
-    image: pgvector/pgvector:pg16
-    container_name: anime-postgres
-    labels:
-      service: postgres
-    ports:
-      - "${POSTGRES_PORT:-5432}:5432"
-    volumes:
-      - ${HOST_PG_DATA_DIR:-./data/postgres}:/var/lib/postgresql/data
-      - ./init-pgvector.sql:/docker-entrypoint-initdb.d/init.sql:ro
-    environment:
-      - POSTGRES_DB=${POSTGRES_DB:-anime}
-      - POSTGRES_USER=${POSTGRES_USER:-anime}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-anime} -d ${POSTGRES_DB:-anime}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
-    logging: *default-logging
-    restart: unless-stopped
-
-  bot:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: anime-bot
-    labels:
-      service: bot
-    depends_on:
-      neo4j:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-    env_file: .env
-    volumes:
-      - ./:/app
-      - ${HOST_SESSIONS_DIR:-./data/sessions}:/app/data/sessions
-      - /tmp/.X11-unix:/tmp/.X11-unix:rw
-    environment:
-      - PYTHONUNBUFFERED=1
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - DISPLAY=${DISPLAY:-:99}
-    ports:
-      - "${BOT_WEBHOOK_PORT:-8081}:8081"
-    healthcheck:
-      test: ["CMD", "python", "-c", "import bot.main; print('ok')"]
-      interval: 60s
-      timeout: 15s
-      retries: 3
-      start_period: 45s
-    logging: *default-logging
-    restart: unless-stopped
-    command: ["xvfb-run", "-a", "python", "-m", "bot.main"]
-
-  dashboard:
-    build:
-      context: .
-      dockerfile: Dockerfile.dashboard
-    container_name: anime-dashboard
-    labels:
-      service: dashboard
-    depends_on:
-      neo4j:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-    env_file: .env
-    volumes:
-      - ./:/app
-    environment:
-      - PYTHONUNBUFFERED=1
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - DISPLAY=${DISPLAY:-:99}
-    ports:
-      - "${DASHBOARD_PORT:-8082}:8082"
-    healthcheck:
-      test: ["CMD", "python", "-c", "import bot.dashboard; print('ok')"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
-    logging: *default-logging
-    restart: unless-stopped
 
   redis:
     image: redis/redis-stack-server:7.2.0-v13
@@ -229,7 +114,6 @@ services:
       start_period: 45s
     logging: *default-logging
     restart: unless-stopped
-    command: ["python", "-m", "bot.main"]
 
   dashboard:
     build:
