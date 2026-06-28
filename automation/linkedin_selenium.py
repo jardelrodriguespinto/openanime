@@ -6,18 +6,33 @@ Substitui Playwright que não funciona no Ubuntu 26.04.
 import asyncio
 import logging
 import os
-import time
+import re
 
 from automation.selenium_browser import (
     nova_pagina, navegar, wait_for_selector, wait_for_selector_visible,
-    click, digitar, digitar_com_delay, screenshot_base64, fechar, get_driver
+    click, digitar, digitar_com_delay, screenshot_base64, fechar, get_driver, get_title
 )
-from automation.browser import notify_browser_step, get_intervention_state, wait_if_paused
+from automation.browser import notify_browser_step
+from selenium.webdriver.common.by import By
 
 logger = logging.getLogger(__name__)
 
 LINKEDIN_EMAIL = os.getenv("LINKEDIN_EMAIL", "")
 LINKEDIN_PASSWORD = os.getenv("LINKEDIN_PASSWORD", "")
+
+
+def _find_element_by_text(driver, tag: str, text: str, timeout: int = 10):
+    """Encontra elemento por texto usando XPath (compatibilidade Selenium)."""
+    xpath = f"//{tag}[contains(., '{text}')]"
+    try:
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+        el = WebDriverWait(driver, timeout).until(
+            EC.presence_of_element_located((By.XPATH, xpath))
+        )
+        return el
+    except Exception:
+        return None
 
 
 async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "") -> dict:
@@ -30,7 +45,7 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "") -> dict
         }
 
     try:
-        await notify_browser_step("selenium_linkedin", "iniciando", f"Abrindo LinkedIn")
+        await notify_browser_step("selenium_linkedin", "iniciando", "Abrindo LinkedIn")
         print("[LINKEDIN] Iniciando aplicacao com Selenium")
 
         # Abre LinkedIn
@@ -38,28 +53,23 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "") -> dict
         await asyncio.sleep(2)
         driver = await get_driver()
         current_url = driver.current_url
-        title = driver.title
-        print(f"[LINKEDIN] URL: {current_url} | Title: {title}")
+        print(f"[LINKEDIN] URL: {current_url} | Title: {await get_title()}")
 
         # Verifica se precisa login
-        if "login" in current_url.lower() or "sign in" in title.lower():
+        if "login" in current_url.lower() or "sign in" in (await get_title()).lower():
             await notify_browser_step("selenium_linkedin", "login", "Fazendo login...")
             print("[LINKEDIN] Fazendo login...")
-            await digitar_com_delay("#username", LINKEDIN_EMAIL, delay_min=30, delay_max=80)
-            await digitar_com_delay("#password", LINKEDIN_PASSWORD, delay_min=30, delay_max=80)
-            await click("[type='submit']")
+            await digitar("#username", LINKEDIN_EMAIL)
+            await digitar("#password", LINKEDIN_PASSWORD)
+            await click("button[type='submit'], input[type='submit']")
             await asyncio.sleep(4)
             print(f"[LINKEDIN] Login enviado. URL: {driver.current_url}")
 
         # Navega para a vaga
         await notify_browser_step("selenium_linkedin", "navegando", f"Abrindo vaga")
-        print(f"[LINKEDIN] Navegando para vaga: {vaga_url}")
         await navegar(vaga_url)
         await asyncio.sleep(3)
-        print(f"[LINKEDIN] Vaga carregada: {driver.title[:80]}")
-
-        # Verifica pause
-        await wait_if_paused("antes_easy_apply")
+        print(f"[LINKEDIN] Vaga carregada: {await get_title()}")
 
         # Clica em Easy Apply
         await notify_browser_step("selenium_linkedin", "easy_apply", "Procurando Easy Apply...")
@@ -77,9 +87,6 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "") -> dict
         await click("button.jobs-apply-button, button[data-control-name='apply_show_modal']")
         print("[LINKEDIN] Clicou em Easy Apply")
         await asyncio.sleep(3)
-
-        # Verifica pause
-        await wait_if_paused("apos_easy_apply")
 
         # Verifica se modal abriu
         modal = await wait_for_selector_visible(".jobs-easy-apply-modal", timeout=10)
@@ -115,9 +122,6 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "") -> dict
                 print(f"[LINKEDIN] Preencheu: {seletor[:50]} = {texto[:30]}")
 
         await notify_browser_step("selenium_linkedin", "preenchido", f"Campos preenchidos: {campos}")
-
-        # Verifica pause
-        await wait_if_paused("antes_enviar")
 
         # Clica em Enviar
         await notify_browser_step("selenium_linkedin", "enviando", "Enviando candidatura...")

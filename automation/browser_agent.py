@@ -12,6 +12,15 @@ logger = logging.getLogger(__name__)
 BROWSER_USE_AVAILABLE = True
 
 
+async def _get_driver_title() -> str:
+    """Retorna o titulo da pagina atual do driver Selenium."""
+    from automation.selenium_browser import get_driver, get_title
+    try:
+        return await get_title()
+    except Exception:
+        return ""
+
+
 async def buscar_vagas_browser_use(query: str) -> list[dict]:
     """
     Busca vagas em multiplas plataformas (Indeed, Gupy, etc.)
@@ -64,7 +73,7 @@ async def _aplicar_linkedin_selenium(vaga_url: str, perfil: dict) -> dict:
     """Aplica no LinkedIn Easy Apply usando Selenium + Firefox."""
     from automation.browser import notify_browser_step
     from automation.selenium_browser import (
-        nova_pagina, wait_for_selector, wait_for_selector_visible,
+        nova_pagina, navegar, wait_for_selector, wait_for_selector_visible,
         click, digitar, digitar_com_delay, screenshot_base64, fechar, get_driver
     )
     from urllib.parse import urlparse, parse_qs
@@ -79,7 +88,7 @@ async def _aplicar_linkedin_selenium(vaga_url: str, perfil: dict) -> dict:
         print(f"[SELENIUM] LinkedIn carregado: {current_url}")
 
         # Verifica se precisa de login
-        if "login" in current_url.lower() or "sign in" in (await get_driver().title).lower():
+        if "login" in current_url.lower() or "sign in" in (await _get_driver_title()).lower():
             await notify_browser_step("selenium_linkedin", "login", "Fazendo login...")
             email = os.getenv("LINKEDIN_EMAIL", "")
             password = os.getenv("LINKEDIN_PASSWORD", "")
@@ -93,11 +102,11 @@ async def _aplicar_linkedin_selenium(vaga_url: str, perfil: dict) -> dict:
             await asyncio.sleep(3)
             print("[SELENIUM] Login enviado")
 
-        # Navega para a vaga
+        # Navega para a vaga (na mesma janela, nao cria nova)
         await notify_browser_step("selenium_linkedin", "navegando", f"Abrindo vaga: {vaga_url}")
-        await nova_pagina(vaga_url)
+        await navegar(vaga_url)
         await asyncio.sleep(3)
-        print(f"[SELENIUM] Vaga aberta: {await get_driver().title}")
+        print(f"[SELENIUM] Vaga aberta: {await _get_driver_title()}")
 
         # Tenta encontrar e clicar em Easy Apply
         await notify_browser_step("selenium_linkedin", "easy_apply", "Procurando Easy Apply...")

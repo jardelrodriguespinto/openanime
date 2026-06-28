@@ -1880,6 +1880,42 @@ class Neo4jClient:
                 })
             return candidaturas
 
+    def get_todas_vagas(self) -> list[dict]:
+        """Retorna todas as vagas indexadas (para dashboard de aplicacao)."""
+        cypher = """
+        MATCH (v:Vaga)
+        RETURN
+            v.id AS id,
+            v.titulo AS titulo,
+            v.empresa AS empresa,
+            v.url AS url,
+            v.fonte AS fonte,
+            v.salario AS salario,
+            v.modalidade AS modalidade,
+            v.descricao AS descricao,
+            v.status AS status,
+            v.data_indexacao AS data_indexacao
+        ORDER BY v.data_indexacao DESC
+        LIMIT 200
+        """
+        with self.driver.session() as session:
+            result = session.run(cypher)
+            vagas = []
+            for row in result:
+                vagas.append({
+                    "id": row.get("id", ""),
+                    "titulo": row.get("titulo", ""),
+                    "empresa": row.get("empresa", ""),
+                    "url": row.get("url", ""),
+                    "fonte": row.get("fonte", ""),
+                    "salario": row.get("salario", ""),
+                    "modalidade": row.get("modalidade", ""),
+                    "descricao": row.get("descricao", ""),
+                    "status": row.get("status", "aberta"),
+                    "data": self._to_iso(row.get("data_indexacao")),
+                })
+            return vagas
+
     def get_candidaturas(self, user_id: str) -> list[dict]:
         cypher = """
         MATCH (u:Usuario {user_id: $tid})-[r:SE_CANDIDATOU]->(v:Vaga)

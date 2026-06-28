@@ -8,9 +8,9 @@ import os
 
 from automation.selenium_browser import (
     nova_pagina, navegar, wait_for_selector, wait_for_selector_visible,
-    click, digitar, digitar_com_delay, screenshot_base64, fechar, get_driver
+    click, digitar, digitar_com_delay, screenshot_base64, fechar, get_driver, get_title
 )
-from automation.browser import notify_browser_step, wait_if_paused
+from automation.browser import notify_browser_step
 
 logger = logging.getLogger(__name__)
 
@@ -24,15 +24,11 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "") -> dict
         await nova_pagina(vaga_url)
         await asyncio.sleep(3)
         driver = await get_driver()
-        print(f"[INDEED] Carregado: {driver.title[:80]} | URL: {driver.current_url[:100]}")
-
-        await wait_if_paused("indeed_carregado")
+        print(f"[INDEED] Carregado: {await get_title()[:80]} | URL: {driver.current_url[:100]}")
 
         # Indeed redireciona para continuar aplicacao
-        if "apply" in driver.current_url.lower() or "candidatura" in driver.title.lower():
+        if "apply" in driver.current_url.lower() or "candidatura" in (await get_title()).lower():
             print("[INDEED] Ja esta na pagina de aplicacao")
-
-            await wait_if_paused("indeed_antes_preencher")
 
             campos = 0
             nome = perfil.get("nome", "")
@@ -53,14 +49,13 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "") -> dict
             print(f"[INDEED] Campos preenchidos: {campos}")
 
             await notify_browser_step("selenium_indeed", "enviando", "Enviando candidatura...")
-            await wait_if_paused("indeed_antes_enviar")
 
             submit = await wait_for_selector_visible(
-                "button[type='submit'], button:has-text('Enviar'), button:has-text('Submit'), button:has-text('Aplicar')",
+                "button[type='submit'], button.apply-button, .apply-button",
                 timeout=10
             )
             if submit:
-                await click("button[type='submit'], button:has-text('Enviar'), button:has-text('Submit'), button:has-text('Aplicar')")
+                await click("button[type='submit'], button.apply-button, .apply-button")
                 await asyncio.sleep(3)
                 print("[INDEED] Candidatura enviada!")
                 await notify_browser_step("selenium_indeed", "sucesso", "Candidatura enviada!")
@@ -76,11 +71,11 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "") -> dict
         else:
             # Pagina de detalhes da vaga - procura botao aplicar
             aplicar_btn = await wait_for_selector_visible(
-                "button:has-text('Aplicar'), button:has-text('Apply'), a[href*='apply'], button[data-testid*='apply']",
+                "button.apply-button, .jobs-apply-button, a[href*='apply'], button[data-testid*='apply']",
                 timeout=10
             )
             if aplicar_btn:
-                await click("button:has-text('Aplicar'), button:has-text('Apply'), a[href*='apply']")
+                await click("button.apply-button, .jobs-apply-button, a[href*='apply'], button[data-testid*='apply']")
                 await asyncio.sleep(3)
                 print("[INDEED] Clicou em Aplicar")
                 await notify_browser_step("selenium_indeed", "clicou_aplicar", "Clicou em Aplicar")

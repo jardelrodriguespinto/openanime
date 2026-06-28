@@ -54,6 +54,12 @@ async def _run_in_thread(fn, *args, **kwargs):
     return await loop.run_in_executor(None, lambda: fn(*args, **kwargs))
 
 
+async def _run_in_thread_no_args(fn):
+    """Executa funcao Selenium sem argumentos em thread separada."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, fn)
+
+
 async def nova_pagina(url: str = "about:blank") -> webdriver.Firefox:
     """Abre uma nova aba/guia no Firefox e navega para a URL."""
     def _open():
@@ -83,15 +89,34 @@ async def navegar(url: str):
     await _run_in_thread(driver.get, url)
 
 
+_HAS_TEXT_PATTERN = r":has-text\(['\"](.+?)['\"]\)"
+
+
+def _convert_has_text_to_xpath(selector: str) -> tuple[str, str]:
+    """Converte selectors com :has-text() para XPath. Retorna (type, value)."""
+    import re
+    match = re.search(_HAS_TEXT_PATTERN, selector)
+    if match:
+        text = match.group(1)
+        base_selector = selector[:match.start()]
+        if base_selector and base_selector != "*":
+            xpath = f"//{base_selector[1:]}[contains(., '{text}')]"
+        else:
+            xpath = f"//*[contains(., '{text}')]"
+        return (By.XPATH, xpath)
+    return (By.CSS_SELECTOR, selector)
+
+
 async def wait_for_selector(selector: str, timeout: int = 10):
     """Aguarda elemento aparecer. Retorna elemento ou None."""
     driver = await get_driver()
     if not driver:
         return None
+    by, value = _convert_has_text_to_xpath(selector)
     try:
         return await _run_in_thread(
             WebDriverWait(driver, timeout).until,
-            EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+            EC.presence_of_element_located((by, value))
         )
     except TimeoutException:
         return None
@@ -102,10 +127,11 @@ async def wait_for_selector_visible(selector: str, timeout: int = 10):
     driver = await get_driver()
     if not driver:
         return None
+    by, value = _convert_has_text_to_xpath(selector)
     try:
         return await _run_in_thread(
             WebDriverWait(driver, timeout).until,
-            EC.visibility_of_element_located((By.CSS_SELECTOR, selector))
+            EC.visibility_of_element_located((by, value))
         )
     except TimeoutException:
         return None
@@ -116,10 +142,11 @@ async def click(selector: str, timeout: int = 10) -> bool:
     driver = await get_driver()
     if not driver:
         return False
+    by, value = _convert_has_text_to_xpath(selector)
     try:
         el = await _run_in_thread(
             WebDriverWait(driver, timeout).until,
-            EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
+            EC.element_to_be_clickable((by, value))
         )
         await _run_in_thread(el.click)
         return True

@@ -351,18 +351,16 @@ async def executar_candidatura(user_id: str, vaga: dict, perfil: dict, plataform
             }
     except Exception as e:
         logger.error("apply: erro na aplicacao %s: %s", vaga_url, e)
-        resultado = None
-
-        await notify_browser_step("fim", "concluido", resultado.get("mensagem", ""))
-    except Exception as e:
-        logger.error("apply: erro na automacao %s: %s", plataforma, e)
-        from automation.browser import notify_browser_step
-        await notify_browser_step("erro", "falha", str(e))
         resultado = {
             "sucesso": False,
             "motivo_falha": "erro_automacao",
             "mensagem": f"Erro tecnico na automacao. Candidate-se manualmente: {vaga_url}",
         }
+        try:
+            from automation.browser import notify_browser_step
+            await notify_browser_step("erro", "falha", str(e))
+        except Exception:
+            pass
 
     # Limpa arquivo temporario
     if curriculo_path:
@@ -396,16 +394,14 @@ async def executar_candidatura(user_id: str, vaga: dict, perfil: dict, plataform
 
 async def _aplicar_generico(vaga_url: str, perfil: dict, curriculo_path: str, plataforma: str) -> dict:
     """Tentativa generica de candidatura para Greenhouse, Lever e similares."""
-    from automation.browser import nova_pagina, clicar_qualquer, esperar_navegacao, set_active_page, notify_browser_step, wait_if_paused
+    from automation.browser import nova_pagina, set_active_page, notify_browser_step, esperar_navegacao, clicar_qualquer
     from automation.form_filler import responder_pergunta
 
     _BTN_APPLY = [
-        'a:has-text("Apply")', 'a:has-text("Apply now")', 'button:has-text("Apply")',
-        'a:has-text("Candidatar")', 'a[class*="apply"]',
+        'a[href*="apply"], .jobs-apply-button, [class*="apply"]',
     ]
     _BTN_SUBMIT = [
-        'button[type="submit"]', 'input[type="submit"]',
-        'button:has-text("Submit")', 'button:has-text("Send")',
+        'button[type="submit"], input[type="submit"]',
     ]
 
     page = None
@@ -419,7 +415,6 @@ async def _aplicar_generico(vaga_url: str, perfil: dict, curriculo_path: str, pl
         # Clica em Apply
         await clicar_qualquer(page, _BTN_APPLY, timeout=10000)
         await esperar_navegacao(page)
-        await wait_if_paused(page, "generico_apply")
 
         # Preenche nome/email basicos
         campos = {

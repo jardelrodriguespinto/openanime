@@ -6,11 +6,11 @@ import asyncio
 import logging
 import os
 
+from automation.browser import notify_browser_step
 from automation.selenium_browser import (
     nova_pagina, navegar, wait_for_selector, wait_for_selector_visible,
-    click, digitar, digitar_com_delay, screenshot_base64, fechar, get_driver
+    click, digitar, digitar_com_delay, screenshot_base64, fechar, get_driver, get_title
 )
-from automation.browser import notify_browser_step, wait_if_paused
 
 logger = logging.getLogger(__name__)
 GUPY_EMAIL = os.getenv("GUPY_EMAIL", "")
@@ -26,21 +26,17 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "") -> dict
         await nova_pagina(vaga_url)
         await asyncio.sleep(3)
         driver = await get_driver()
-        print(f"[GUPY] Carregado: {driver.title[:80]} | URL: {driver.current_url[:100]}")
-
-        await wait_if_paused("gupy_carregado")
+        print(f"[GUPY] Carregado: {await get_title()[:80]} | URL: {driver.current_url[:100]}")
 
         # Tenta encontrar botao de candidatura
         aplicar_btn = await wait_for_selector_visible(
-            "button[data-testid='apply-button'], button:has-text('Candidatar'), button:has-text('Apply'), a[href*='apply']",
+            "button[data-testid='apply-button'], .jobs-apply-button",
             timeout=10
         )
         if aplicar_btn:
-            await click("button[data-testid='apply-button'], button:has-text('Candidatar'), button:has-text('Apply')")
+            await click("button[data-testid='apply-button'], .jobs-apply-button")
             await asyncio.sleep(3)
             print("[GUPY] Clicou em Candidatar")
-
-            await wait_if_paused("gupy_apos_clique")
 
             # Preenche campos basicos se aparecerem
             campos = 0
@@ -63,14 +59,13 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "") -> dict
 
             # Tenta enviar
             await notify_browser_step("selenium_gupy", "enviando", "Enviando candidatura...")
-            await wait_if_paused("gupy_antes_enviar")
 
             submit = await wait_for_selector_visible(
-                "button[type='submit'], button:has-text('Enviar'), button:has-text('Submit'), button:has-text('Finalizar')",
+                "button[type='submit'], button.submit-button, .submit-button",
                 timeout=10
             )
             if submit:
-                await click("button[type='submit'], button:has-text('Enviar'), button:has-text('Submit')")
+                await click("button[type='submit'], button.submit-button, .submit-button")
                 await asyncio.sleep(3)
                 print("[GUPY] Candidatura enviada!")
                 await notify_browser_step("selenium_gupy", "sucesso", "Candidatura enviada!")

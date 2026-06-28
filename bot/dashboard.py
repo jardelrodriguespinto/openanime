@@ -248,7 +248,7 @@ VUE_DASHBOARD = """
             </div>
         </div>
 
-        <div class="apply-flow-bar" v-if="candidaturasFiltradas.length">
+        <div class="apply-flow-bar" v-if="vagas.length">
             <div style="display:flex;align-items:center;gap:10px;">
                 <strong style="color:#00d4ff">🧪 Fluxo de Aplicação</strong>
                 <select v-model="plataformaAplicacao" style="padding: 6px; border-radius: 4px; background: #1a1a2e; color: #fff; border: 1px solid #00d4ff;">
@@ -259,7 +259,7 @@ VUE_DASHBOARD = """
                 </select>
                 <select v-model="vagaSelecionada" style="max-width:300px;">
                     <option value="">Selecione uma vaga para aplicar...</option>
-                    <option v-for="c in candidaturasFiltradas" :key="c.id" :value="c">{{c.titulo || 'Vaga'}} — {{c.empresa}}</option>
+                    <option v-for="v in vagas" :key="v.id" :value="v">{{v.titulo || 'Vaga'}} — {{v.empresa}}</option>
                 </select>
             </div>
             <button @click="aplicarVagaSelecionada" :disabled="!vagaSelecionada">🤖 Aplicar Agora (Browser Visível)</button>
@@ -323,6 +323,7 @@ VUE_DASHBOARD = """
         data() {
             return {
                 candidaturas: [],
+                vagas: [],
                 stats: {total: 0, sucesso: 0, falha: 0, hoje: 0, processando: 0},
                 automacao: {running: false, action: 'idle', platform: '', vagas_processadas: 0, ultima_mensagem: '', updated_at: ''},
                 history: [],
@@ -362,6 +363,7 @@ VUE_DASHBOARD = """
         },
         mounted() {
             this.carregar();
+            this.carregarVagas();
             this.initSocket();
             this.carregarAutomacao();
             this.carregarBrowser();
@@ -378,6 +380,13 @@ VUE_DASHBOARD = """
                 const d = await r.json();
                 this.candidaturas = d.candidaturas || [];
                 this.stats = {total: d.total, sucesso: d.sucesso, falha: d.falha, hoje: d.hoje, processando: d.processando || 0};
+            },
+            async carregarVagas() {
+                try {
+                    const r = await fetch('/api/vagas');
+                    const d = await r.json();
+                    this.vagas = d.vagas || [];
+                } catch(e) {}
             },
             async carregarAutomacao() {
                 try {
@@ -432,6 +441,7 @@ VUE_DASHBOARD = """
                     body: JSON.stringify({query: this.busca || 'desenvolvedor', platform: this.plataformaSelecionada})
                 });
                 this.carregar();
+                this.carregarVagas();
             },
             async pararAutomacao() {
                 await fetch('/api/automacao/parar', {method: 'POST'});
@@ -586,6 +596,20 @@ async def get_candidaturas():
         "falha": falha_count,
         "hoje": hoje_count,
         "processando": processando_count,
+    })
+
+
+@fastapi_app.get("/api/vagas")
+async def get_vagas():
+    try:
+        neo4j = get_neo4j()
+        vagas = neo4j.get_todas_vagas()
+    except Exception as e:
+        return JSONResponse({"error": str(e), "vagas": []})
+
+    return JSONResponse({
+        "vagas": vagas,
+        "total": len(vagas),
     })
 
 
