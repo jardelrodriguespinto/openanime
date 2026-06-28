@@ -71,11 +71,11 @@ async def buscar_vagas_com_browser_visivel(query: str) -> list[dict]:
 
 
 async def _aplicar_linkedin_selenium(vaga_url: str, perfil: dict) -> dict:
-    """Aplica no LinkedIn Easy Apply usando Selenium + Firefox."""
+    """Aplica no LinkedIn Easy Apply usando Selenium + Firefox - reutiliza browser se existir."""
     from automation.browser import notify_browser_step
     from automation.selenium_browser import (
         nova_pagina, navegar, wait_for_selector, wait_for_selector_visible,
-        click, digitar, digitar_com_delay, screenshot_base64, fechar, get_driver
+        click, digitar, digitar_com_delay, screenshot_base64, fechar, get_driver, _run_in_thread
     )
     from urllib.parse import urlparse, parse_qs
 
@@ -83,7 +83,22 @@ async def _aplicar_linkedin_selenium(vaga_url: str, perfil: dict) -> dict:
         await notify_browser_step("selenium_linkedin", "iniciando", f"Aplicando com Selenium em: {vaga_url}")
         print(f"[SELENIUM] Aplicando em: {vaga_url}")
 
-        await nova_pagina("https://www.linkedin.com")
+        # Verifica sessão existente e válida
+        driver = await get_driver()
+        if driver and await _verifica_sessao_valida():
+            print("[SELENIUM] Reutilizando browser existente")
+            await navegar("https://www.linkedin.com")
+            await asyncio.sleep(2)
+        else:
+            if driver:
+                print("[SELENIUM] Sessão inválida - fechando browser antigo")
+                try:
+                    await fechar()
+                except Exception:
+                    pass
+            print("[SELENIUM] Abrindo novo browser")
+            await nova_pagina("https://www.linkedin.com")
+        
         driver = await get_driver()
         current_url = driver.current_url
         print(f"[SELENIUM] LinkedIn carregado: {current_url}")
@@ -127,7 +142,7 @@ async def _aplicar_linkedin_selenium(vaga_url: str, perfil: dict) -> dict:
         if not clicked:
             await notify_browser_step("selenium_linkedin", "erro", "Botao Easy Apply nao encontrado")
             print("[SELENIUM] Easy Apply nao encontrado")
-            await fechar()
+            await navegar("https://www.linkedin.com")  # Mantém browser aberto
             return {"sucesso": False, "mensagem": "Easy Apply nao encontrado. Vaga pode exigir aplicacao externa."}
 
         await asyncio.sleep(2)
@@ -137,7 +152,7 @@ async def _aplicar_linkedin_selenium(vaga_url: str, perfil: dict) -> dict:
         if not modal:
             await notify_browser_step("selenium_linkedin", "erro", "Modal Easy Apply nao apareceu")
             print("[SELENIUM] Modal nao apareceu")
-            await fechar()
+            await navegar("https://www.linkedin.com")  # Mantém browser aberto
             return {"sucesso": False, "mensagem": "Modal Easy Apply nao apareceu"}
 
         print("[SELENIUM] Modal Easy Apply aberto")
@@ -190,13 +205,13 @@ async def _aplicar_linkedin_selenium(vaga_url: str, perfil: dict) -> dict:
             await notify_browser_step("selenium_linkedin", "sucesso", "Candidatura enviada!")
             print("[SELENIUM] Candidatura enviada!")
             b64 = await screenshot_base64()
-            await fechar()
+            await navegar("https://www.linkedin.com")  # Volta para feed, mantém browser aberto
             return {"sucesso": True, "mensagem": "Candidatura enviada com Selenium!", "screenshot": b64[:100] if b64 else ""}
         else:
             await notify_browser_step("selenium_linkedin", "erro", "Botao enviar nao encontrado")
             print("[SELENIUM] Botao enviar nao encontrado")
             b64 = await screenshot_base64()
-            await fechar()
+            await navegar("https://www.linkedin.com")  # Volta para feed, mantém browser aberto
             return {"sucesso": False, "mensagem": "Botao enviar nao encontrado. Complete manualmente.", "screenshot": b64[:100] if b64 else ""}
 
     except Exception as e:
@@ -204,10 +219,35 @@ async def _aplicar_linkedin_selenium(vaga_url: str, perfil: dict) -> dict:
         await notify_browser_step("selenium_linkedin", "erro", str(e))
         print(f"[SELENIUM] ERRO: {e}")
         try:
-            await fechar()
+            await navegar("https://www.linkedin.com")  # Mantém browser aberto apesar do erro
         except Exception:
             pass
         return {"sucesso": False, "mensagem": str(e)}
+
+
+async def _verifica_sessao_valida() -> bool:
+    """Verifica se o driver Selenium tem uma sessão ativa válida."""
+    try:
+        from automation.selenium_browser import get_driver
+        driver = await get_driver()
+        if driver is None:
+            return False
+        await _run_in_thread(lambda: driver.current_url)
+        return True
+    except Exception:
+        return False
+
+
+async def fechar_browser_linkedin():
+    """Fecha o browser Selenium após terminar todas as candidaturas do lote."""
+    from automation.selenium_browser import fechar as selenium_fechar, get_driver
+    driver = await get_driver()
+    if driver:
+        try:
+            await selenium_fechar()
+            print("[SELENIUM] Browser fechado após lote")
+        except Exception as ex:
+            print(f"[SELENIUM] Erro ao fechar browser: {ex}")
 
 
 async def aplicar_vaga_browser_use(vaga_url: str, perfil: dict) -> dict:
@@ -216,19 +256,16 @@ async def aplicar_vaga_browser_use(vaga_url: str, perfil: dict) -> dict:
     senao abre o browser para preenchimento manual.
     """
     from automation.browser import notify_browser_step
-
     try:
         await notify_browser_step("aplicacao_browser", "aplicando", f"Analisando: {vaga_url}")
 
-        # Se for LinkedIn, tenta aplicar automaticamente com Selenium
         if "linkedin.com" in vaga_url.lower():
             print("[BROWSER_AGENT] LinkedIn detectado - usando Selenium auto-apply")
-            resultado = await _aplicar_linkedin_selenium(vaga_url, perfil)
+            from automation.linkedin_selenium import aplicar as linkedin_aplicar
+            resultado = await linkedin_aplicar(vaga_url, perfil)
             if resultado.get("sucesso"):
                 return resultado
-            # Se falhar, continua para fallback manual
 
-        # Fallback: abre browser do sistema para aplicacao manual
         import webbrowser
         import subprocess
         import shutil
@@ -257,4 +294,19 @@ async def aplicar_vaga_browser_use(vaga_url: str, perfil: dict) -> dict:
             await notify_browser_step("aplicacao_browser", "falha", str(e))
         except Exception:
             pass
+        return {"sucesso": False, "mensagem": str(e)}
+
+
+async def aplicar_vagas_visiveis_linkedin(perfil: dict, max_vagas: int = 5) -> dict:
+    """
+    Aplica em vagas visíveis na página de busca do LinkedIn (Easy Apply).
+    Útil após usar 'iniciar busca' no dashboard.
+    """
+    try:
+        await notify_browser_step("selenium_linkedin", "iniciando", "Buscando vagas Easy Apply visíveis")
+        from automation.linkedin_selenium import aplicar_vagas_visiveis_na_pagina
+        resultado = await aplicar_vagas_visiveis_na_pagina(perfil, max_vagas)
+        return resultado
+    except Exception as e:
+        logger.error("aplicar_vagas_visiveis_linkedin erro: %s", e)
         return {"sucesso": False, "mensagem": str(e)}

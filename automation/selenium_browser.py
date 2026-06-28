@@ -17,7 +17,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from selenium.common.exceptions import TimeoutException, NoSuchElementException, InvalidSessionIdException
 
 logger = logging.getLogger(__name__)
 
@@ -60,8 +60,38 @@ async def _run_in_thread_no_args(fn):
     return await loop.run_in_executor(None, fn)
 
 
-async def nova_pagina(url: str = "about:blank") -> webdriver.Firefox:
-    """Abre uma nova aba/guia no Firefox e navega para a URL."""
+async def _driver_session_valida() -> bool:
+    """Verifica se o driver Selenium tem uma sessão ativa válida."""
+    try:
+        driver = await get_driver()
+        if driver is None:
+            return False
+        # Tenta acessar uma propriedade que requer sessão ativa
+        await _run_in_thread(lambda: driver.current_url)
+        return True
+    except Exception:
+        return False
+
+
+async def nova_pagina(url: str = "about:blank", reutilizar: bool = False) -> webdriver.Firefox:
+    """Abre uma nova aba/guia no Firefox e navega para a URL.
+    Se reutilizar=True e já existe um driver com sessão ativa, apenas navega para a URL na mesma aba.
+    """
+    driver = getattr(nova_pagina, "_driver", None)
+    
+    # Verifica se o driver existe e tem sessão válida
+    if reutilizar and driver:
+        sessao_ok = await _driver_session_valida()
+        if sessao_ok:
+            await _run_in_thread(driver.get, url)
+            return driver
+        # Sessão inválida - limpa driver antigo
+        nova_pagina._driver = None
+        try:
+            await _run_in_thread(driver.quit)
+        except Exception:
+            pass
+    
     def _open():
         driver = _get_driver()
         driver.get(url)
@@ -266,7 +296,19 @@ async def fechar():
     if driver:
         try:
             await _run_in_thread(driver.quit)
-        except Exception:
+        except (InvalidSessionIdException, Exception):
             pass
         nova_pagina._driver = None
         logger.info("selenium_browser: Firefox fechado")
+
+
+async def _ensure_driver_alive():
+    """Verifica se o driver está ativo e retorna True, ou recria o driver."""
+    try:
+        driver = await get_driver()
+        if driver:
+            await _run_in_thread(lambda: driver.current_url)
+            return True
+    except (InvalidSessionIdException, Exception):
+        nova_pagina._driver = None
+    return False

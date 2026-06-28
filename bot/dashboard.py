@@ -221,6 +221,15 @@ VUE_DASHBOARD = """
             </div>
         </div>
 
+        <div class="linkedin-bar" style="background:#16213e;padding:12px 15px;border-radius:8px;margin-bottom:15px;display:flex;align-items:center;justify-content:space-between;gap:15px;">
+            <div style="display:flex;align-items:center;gap:10px;">
+                <strong style="color:#00d4ff">🔗 LinkedIn</strong>
+                <span style="color:#aaa;font-size:0.85rem;">Abra o LinkedIn no browser e clique em extrair</span>
+            </div>
+            <button @click="extrairVagasLinkedin" style="padding:8px 16px;background:#00d4ff;border:none;border-radius:4px;color:#0f0f23;font-weight:bold;cursor:pointer;">📥 Extrair Vagas da Página</button>
+            <button @click="aplicarVagasVisiveisLinkedin" style="padding:8px 16px;background:#00ff88;border:none;border-radius:4px;color:#0f0f23;font-weight:bold;cursor:pointer;">🤖 Aplicar Vagas Visíveis</button>
+        </div>
+
         <div class="browser-panel" v-if="browser.screenshot || browserControl.paused || browserStep.step">
             <h4>🖥️ Browser em Tempo Real | {{browserStep.step || 'Monitoramento'}}</h4>
             <div class="browser-viewport">
@@ -232,13 +241,13 @@ VUE_DASHBOARD = """
                     <span v-if="browserStep.detail">| {{browserStep.detail}}</span>
                 </div>
             </div>
-            <div class="browser-controls">
-                <button @click="browserPausar" :class="{pausado: browserControl.paused}">⏸️ Pausar</button>
-                <button @click="browserContinuar">▶️ Continuar</button>
-                <button @click="browserPular">⏭️ Pular Step</button>
-                <button @click="browserIntervirManual">✋ Intervir Manualmente</button>
-                <button @click="browserRetomarAuto" v-if="browserControl.intervention_type === 'manual'">🔄 Retomar Auto</button>
-            </div>
+<div class="browser-controls">
+                  <button @click="browserPausar" :class="{pausado: browserControl.paused}">⏸️ Pausar</button>
+                  <button @click="browserContinuar">▶️ Continuar</button>
+                  <button @click="browserPular">⏭️ Pular Step</button>
+                  <button @click="browserIntervirManual">✋ Intervir Manualmente</button>
+                  <button @click="browserRetomarAuto" v-if="browserControl.intervention_type === 'manual'">🔄 Retomar Auto</button>
+              </div>
             <div class="intervention-bar" v-if="browserControl.paused || browserControl.intervention_type === 'manual'">
                 <input v-model="browserManualText" placeholder="Texto para digitar..." :disabled="browserControl.intervention_type !== 'digitar'">
                 <input v-model="browserManualSelector" placeholder="Seletor CSS (ex: input[name='email'])" :disabled="browserControl.intervention_type !== 'digitar'">
@@ -535,6 +544,40 @@ VUE_DASHBOARD = """
                 if (u.includes('linkedin.com')) return 'linkedin';
                 if (u.includes('indeed.com') || u.includes('br.indeed.com')) return 'indeed';
                 return '';
+            },
+            async extrairVagasLinkedin() {
+                try {
+                    const r = await fetch('/api/automacao/extrair-vagas-linkedin', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({max_vagas: 20})
+                    });
+                    const d = await r.json();
+                    if (d.success) {
+                        alert('Extração iniciada! Veja o status e atualize a lista de vagas.');
+                    } else {
+                        alert('Erro: ' + (d.message || 'Falha ao extrair'));
+                    }
+                } catch(e) {
+                    alert('Erro de conexão');
+                }
+            },
+            async aplicarVagasVisiveisLinkedin() {
+                try {
+                    const r = await fetch('/api/automacao/aplicar-vagas-visiveis', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({max_vagas: 5})
+                    });
+                    const d = await r.json();
+                    if (d.success) {
+                        alert('Aplicação em vagas visíveis iniciada! Veja o browser em tempo real.');
+                    } else {
+                        alert('Erro: ' + (d.message || 'Falha ao iniciar'));
+                    }
+                } catch(e) {
+                    alert('Erro de conexão');
+                }
             }
         }
     }).mount('#app');
@@ -680,6 +723,7 @@ async def buscar_vagas_dashboard(request: Request):
                 try:
                     from graph.neo4j_client import get_neo4j
                     from agents.apply import executar_candidatura
+                    from automation.browser_agent import fechar_browser_linkedin
 
                     neo4j = get_neo4j()
                     perfil = neo4j.get_perfil_profissional(user_id) or {}
@@ -706,6 +750,10 @@ async def buscar_vagas_dashboard(request: Request):
 
                     _set_automacao_status(False, "idle", "linkedin", f"Auto-aplicação concluída: {len(lote)} vagas processadas")
                     set_browser_current_step("auto_fim", "concluido", "Auto-aplicação finalizada")
+                    try:
+                        await fechar_browser_linkedin()
+                    except Exception:
+                        pass
                     emit_status_update()
                 except Exception as e:
                     logger.error(f"Erro na auto-aplicação: {e}")
@@ -739,6 +787,8 @@ async def aplicar_vagas_lote(request: Request):
     plataforma_filtro = body.get("plataforma", "")
     
     async def _run_aplicacao_lote():
+        from automation.browser_agent import fechar_browser_linkedin
+        
         try:
             vagas_aplicar = []
             try:
@@ -759,11 +809,16 @@ async def aplicar_vagas_lote(request: Request):
                 
                 try:
                     from agents.apply import executar_candidatura
-                    perfil = neo4j.get_perfil_profissional(user_id) if 'neo4j' in dir() else {}
+                    neo4j = get_neo4j()
+                    perfil = neo4j.get_perfil_profissional(user_id)
                     await executar_candidatura(user_id, vaga, perfil, plataforma)
                 except Exception as e:
                     logger.error(f"Erro aplicando vaga {vaga.get('url')}: {e}")
-                    
+
+            try:
+                await fechar_browser_linkedin()
+            except Exception:
+                pass
             _set_automacao_status(False, "idle", "", f"Lote concluído: {len(vagas_aplicar)} candidaturas enviadas")
             emit_status_update()
         except Exception as e:
@@ -838,6 +893,100 @@ async def aplicar_vaga_dashboard(request: Request):
 
     asyncio.create_task(_run_apply())
     return JSONResponse({"success": True, "message": "Aplicação iniciada em background"})
+
+
+@fastapi_app.post("/api/automacao/extrair-vagas-linkedin")
+async def extrair_vagas_linkedin(request: Request):
+    """Extrai vagas da página de busca do LinkedIn que o usuário tem aberta."""
+    body = await request.json()
+    max_vagas = int(body.get("max_vagas", 20))
+    user_id = os.getenv("DASHBOARD_USER_ID", "admin")
+
+    async def _run_extracao():
+        try:
+            from graph.neo4j_client import get_neo4j
+            from automation.linkedin_selenium import extrair_vagas_da_busca
+
+            neo4j = get_neo4j()
+            perfil = neo4j.get_perfil_profissional(user_id) or {}
+
+            _set_automacao_status(True, "extraindo", "linkedin", "Extraindo vagas da página aberta")
+            set_browser_current_step("extracao", "extraindo", f"Buscando até {max_vagas} vagas")
+            emit_status_update()
+
+            resultado = await extrair_vagas_da_busca(perfil, max_vagas=max_vagas)
+
+            if resultado.get("sucesso"):
+                vagas = resultado.get("vagas", [])
+                for vaga in vagas:
+                    try:
+                        neo4j.upsert_vaga({
+                            "id": vaga.get("id", ""),
+                            "titulo": vaga.get("titulo", ""),
+                            "empresa": vaga.get("empresa", ""),
+                            "url": vaga.get("url", ""),
+                            "fonte": vaga.get("fonte", "LinkedIn"),
+                            "salario": vaga.get("salario", ""),
+                            "modalidade": vaga.get("modalidade", ""),
+                            "descricao": vaga.get("descricao", "")[:500],
+                        })
+                    except Exception:
+                        pass
+
+                _set_automacao_status(False, "idle", "linkedin", f"Extraídas {len(vagas)} vagas da página")
+                set_browser_current_step("extracao_fim", "concluido", f"{len(vagas)} vagas salvas")
+            else:
+                _set_automacao_status(False, "idle", "linkedin", resultado.get("mensagem", "Falha na extração"))
+                set_browser_current_step("extracao_fim", "falha", resultado.get("mensagem", ""))
+
+            emit_status_update()
+        except Exception as e:
+            logger.error(f"Erro em extrair_vagas_linkedin: {e}")
+            _set_automacao_status(False, "erro", "linkedin", str(e))
+            set_browser_current_step("extracao_fim", "falha", str(e))
+            emit_status_update()
+
+    asyncio.create_task(_run_extracao())
+    return JSONResponse({"success": True, "message": f"Extraindo até {max_vagas} vagas da página do LinkedIn"})
+
+
+@fastapi_app.post("/api/automacao/aplicar-vagas-visiveis")
+async def aplicar_vagas_visiveis_linkedin_endpoint(request: Request):
+    """Aplica em vagas visíveis na página de busca do LinkedIn."""
+    body = await request.json()
+    max_vagas = int(body.get("max_vagas", 5))
+    user_id = os.getenv("DASHBOARD_USER_ID", "admin")
+
+    async def _run_apply_visiveis():
+        try:
+            from automation.linkedin_selenium import aplicar_vagas_visiveis_na_pagina
+            from graph.neo4j_client import get_neo4j
+
+            neo4j = get_neo4j()
+            perfil = neo4j.get_perfil_profissional(user_id) or {}
+
+            _set_automacao_status(True, "aplicando", "linkedin", f"Aplicando em até {max_vagas} vagas visíveis")
+            set_browser_current_step("visiveis", "aplicando", "Buscando vagas na página")
+            emit_status_update()
+
+            resultado = await aplicar_vagas_visiveis_na_pagina(perfil, max_vagas)
+
+            _set_automacao_status(
+                False,
+                "finalizando",
+                "linkedin",
+                f"Concluído: {len(resultado.get('aplicacoes', []))} vagas processadas"
+            )
+            set_browser_current_step("visiveis_fim", "concluido", resultado.get("mensagem", ""))
+            emit_status_update()
+
+        except Exception as e:
+            logger.error(f"Erro em aplicar_vagas_visiveis: {e}")
+            _set_automacao_status(False, "erro", "linkedin", str(e))
+            emit_status_update()
+
+    asyncio.create_task(_run_apply_visiveis())
+    return JSONResponse({"success": True, "message": f"Iniciando aplicação em até {max_vagas} vagas visíveis no LinkedIn"})
 
 
 def _detectar_plataforma(url: str) -> str:
