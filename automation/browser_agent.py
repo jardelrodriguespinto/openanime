@@ -79,7 +79,7 @@ async def _aplicar_linkedin_selenium(vaga_url: str, perfil: dict) -> dict:
     from automation.browser import notify_browser_step
     from automation.selenium_browser import (
         nova_pagina, navegar, wait_for_selector, wait_for_selector_visible,
-        click, digitar, digitar_com_delay, screenshot_base64, fechar, get_driver, _run_in_thread,
+        click, digitar, digitar_com_delay, digitar_robusto, screenshot_base64, fechar, get_driver, _run_in_thread,
         clicar_entrar_com_email
     )
     from urllib.parse import urlparse, parse_qs
@@ -302,20 +302,22 @@ async def _fazer_login_selenium(email: str, password: str) -> bool:
                 return False
             return False
 
-        email_ok = await digitar("#username", email)
+        email_ok = await digitar_robusto("#username", email)
         if not email_ok:
-            email_ok = await digitar("input[name='session_key']", email)
+            email_ok = await digitar_robusto("input[name='session_key']", email)
         if not email_ok:
-            email_ok = await digitar("input[type='email']", email)
+            email_ok = await digitar_robusto("input[type='email']", email)
+        if not email_ok:
+            email_ok = await digitar_robusto("input[autocomplete='username']", email)
         print(f"[SELENIUM] Email digitado: {email_ok}")
 
         await asyncio.sleep(0.5)
 
-        pass_ok = await digitar("#password", password)
+        pass_ok = await digitar_robusto("#password", password)
         if not pass_ok:
-            pass_ok = await digitar("input[name='session_password']", password)
+            pass_ok = await digitar_robusto("input[name='session_password']", password)
         if not pass_ok:
-            pass_ok = await digitar("input[type='password']", password)
+            pass_ok = await digitar_robusto("input[type='password']", password)
         print(f"[SELENIUM] Senha digitada: {pass_ok}")
 
         await asyncio.sleep(0.3)

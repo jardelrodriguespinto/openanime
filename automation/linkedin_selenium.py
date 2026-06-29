@@ -15,11 +15,12 @@ load_dotenv()
 
 from automation.selenium_browser import (
     nova_pagina, navegar, wait_for_selector, wait_for_selector_visible,
-    click, digitar, digitar_com_delay, screenshot_base64, fechar, get_driver, get_title, _run_in_thread,
-    clicar_entrar_com_email
+    click, digitar, digitar_com_delay, digitar_robusto, digitar_no_elemento, screenshot_base64, fechar, get_driver, get_title, _run_in_thread, _wait_for_login_form_visible,
+    clicar_entrar_com_email, forcar_formulario_login, _scroll_and_focus_element
 )
 from automation.browser import notify_browser_step, get_intervention_state
 from selenium.webdriver.common.by import By
+from selenium.common.exceptions import InvalidSessionIdException, WebDriverException
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,10 @@ def _find_element_by_text(driver, tag: str, text: str, timeout: int = 10):
 async def _garantir_login() -> bool:
     """Garante que o browser Selenium está logado no LinkedIn.
     Usa as credenciais do .env. Retorna True se logado com sucesso."""
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.webdriver.common.by import By
+    
     driver = await get_driver()
     if not driver:
         await nova_pagina("https://www.linkedin.com", reutilizar=False)
@@ -101,20 +106,19 @@ async def _garantir_login() -> bool:
 
     for tentativa in range(3):
         try:
-            from selenium.webdriver.common.by import By
-            from selenium.webdriver.support import expected_conditions as EC
-
             el_username = await _run_in_thread(
                 lambda: WebDriverWait(driver, 10).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR,
-                        "#username, input[name='session_key'], input[type='email'], input[autocomplete='username']"
+                        "#username, input[name='session_key'], input[type='email'], input[autocomplete='username'], "
+                        "input[placeholder*='Email or phone'], input[placeholder*='Email'], input[aria-label*='Email']"
                     ))
                 )
             )
             el_username = await _run_in_thread(
                 lambda: WebDriverWait(driver, 5).until(
                     EC.element_to_be_clickable((By.CSS_SELECTOR,
-                        "#username, input[name='session_key'], input[type='email'], input[autocomplete='username']"
+                        "#username, input[name='session_key'], input[type='email'], input[autocomplete='username'], "
+                        "input[placeholder*='Email or phone'], input[placeholder*='Email'], input[aria-label*='Email']"
                     ))
                 )
             )
@@ -123,50 +127,112 @@ async def _garantir_login() -> bool:
             try:
                 el_username = await _run_in_thread(
                     lambda: driver.find_element(By.CSS_SELECTOR,
-                        "#username, input[name='session_key'], input[type='email'], input[autocomplete='username']"
+                        "#username, input[name='session_key'], input[type='email'], input[autocomplete='username'], "
+                        "input[placeholder*='Email or phone'], input[placeholder*='Email'], input[aria-label*='Email']"
                     )
                 )
-                print(f"[LINKEDIN] Campo username presente (tentativa {tentativa+1})")
+                try:
+                    visivel = await _run_in_thread(lambda e=el_username: e.is_displayed())
+                    if not visivel:
+                        print(f"[LINKEDIN] Campo username encontrado mas não visível (tentativa {tentativa+1})")
+                        try:
+                            await _run_in_thread(
+                                lambda e=el_username, d=driver: d.execute_script("arguments[0].scrollIntoView({block:'center'});", e)
+                            )
+                            await asyncio.sleep(0.5)
+                            visivel = await _run_in_thread(lambda e=el_username: e.is_displayed())
+                            if visivel:
+                                print(f"[LINKEDIN] Campo visível após scroll")
+                            else:
+                                el_username = None
+                        except Exception:
+                            el_username = None
+                    else:
+                        print(f"[LINKEDIN] Campo username presente (tentativa {tentativa+1})")
+                except Exception:
+                    el_username = None
             except Exception:
                 el_username = None
 
         if not el_username:
-            google_btn = await _run_in_thread(
-                lambda: driver.find_elements(By.CSS_SELECTOR,
-                    "button[data-litms-control='google_sign_in'], "
-                    "button[aria-label*='Google'], "
-                    "button[aria-label*='google'], "
-                    "a[href*='google'], "
-                    "a[href*='google.com']"
+            form_ok = await forcar_formulario_login(driver)
+            if form_ok:
+                el_username = await _run_in_thread(
+                    lambda: WebDriverWait(driver, 10).until(
+                        EC.element_to_be_clickable((By.CSS_SELECTOR,
+                            "#username, input[name='session_key'], input[type='email'], input[autocomplete='username'], "
+                            "input[placeholder*='Email or phone'], input[placeholder*='Email'], input[aria-label*='Email']"
+                        ))
+                    )
                 )
-            )
-            if google_btn:
-                print("[LINKEDIN] Detectado botão Google — procurando alternativa email/senha")
-                await clicar_entrar_com_email(driver)
-                await asyncio.sleep(2)
-
-            if tentativa < 2:
-                await navegar("https://www.linkedin.com/login")
-                await asyncio.sleep(2)
-                continue
-            print("[LINKEDIN] ERRO: Campo username não ficou disponível")
-            return False
+                if el_username:
+                    print("[LINKEDIN] Campos encontrados após forçar formulário")
+                else:
+                    print("[LINKEDIN] Formulário forçado mas campos ainda não encontrados")
+            
+            if not el_username:
+                google_btn = await _run_in_thread(
+                    lambda: driver.find_elements(By.CSS_SELECTOR,
+                        "button[data-litms-control='google_sign_in'], "
+                        "button[aria-label*='Google'], "
+                        "button[aria-label*='google'], "
+                        "a[href*='google'], "
+                        "a[href*='google.com']"
+                    )
+                )
+                if google_btn:
+                    print("[LINKEDIN] Detectado botão Google — procurando alternativa email/senha")
+                    try:
+                        await clicar_entrar_com_email(driver)
+                        await asyncio.sleep(3)
+                        driver = await get_driver()
+                        if driver:
+                            el_username = await _run_in_thread(
+                                lambda: WebDriverWait(driver, 10).until(
+                                    EC.element_to_be_clickable((By.CSS_SELECTOR,
+                                        "#username, input[name='session_key'], input[type='email'], input[autocomplete='username'], "
+                                        "input[placeholder*='Email or phone'], input[placeholder*='Email'], input[aria-label*='Email']"
+                                    ))
+                                )
+                            )
+                            if el_username:
+                                print("[LINKEDIN] Campos apareceram após clicar 'entrar com email'")
+                    except (InvalidSessionIdException, WebDriverException) as e:
+                        print(f"[LINKEDIN] Sessão inválida ao clicar 'entrar com email': {e}")
+                        await nova_pagina("https://www.linkedin.com/login", reutilizar=False)
+                        await asyncio.sleep(3)
+                        driver = await get_driver()
+            
+            if not el_username:
+                if tentativa < 2:
+                    print(f"[LINKEDIN] Tentativa {tentativa+1} falhou - reiniciando")
+                    await navegar("https://www.linkedin.com/login")
+                    await asyncio.sleep(2)
+                    continue
+                print("[LINKEDIN] ERRO: Campo username não ficou disponível após 3 tentativas")
+                return False
 
         try:
-            email_ok = await digitar("#username", email)
+            email_ok = await digitar_robusto("#username", email)
             if not email_ok:
-                email_ok = await digitar("input[name='session_key']", email)
+                email_ok = await digitar_robusto("input[name='session_key']", email)
             if not email_ok:
-                email_ok = await digitar("input[type='email']", email)
+                email_ok = await digitar_robusto("input[type='email']", email)
+            if not email_ok:
+                email_ok = await digitar_robusto("input[placeholder*='Email or phone']", email)
+            if not email_ok:
+                email_ok = await digitar_robusto("input[placeholder*='Email']", email)
+            if not email_ok:
+                email_ok = await digitar_robusto("input[aria-label*='Email']", email)
             print(f"[LINKEDIN] Email digitado: {email_ok}")
 
             await asyncio.sleep(0.5)
 
-            pass_ok = await digitar("#password", password)
+            pass_ok = await digitar_robusto("#password", password)
             if not pass_ok:
-                pass_ok = await digitar("input[name='session_password']", password)
+                pass_ok = await digitar_robusto("input[name='session_password']", password)
             if not pass_ok:
-                pass_ok = await digitar("input[type='password']", password)
+                pass_ok = await digitar_robusto("input[type='password']", password)
             print(f"[LINKEDIN] Senha digitada: {pass_ok}")
 
             await asyncio.sleep(0.3)
@@ -352,8 +418,8 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "") -> dict
         campos_nomes = [
             ("input[name='firstName'], #first-name, input[id*='firstName']", primeiro_nome),
             ("input[name='lastName'], #last-name, input[id*='lastName']", ultimo_nome),
-            ("input[name='email'], #email, input[type='email']", perfil.get("email", _get_linkedin_email())),
-            ("input[name='phone'], #phone, input[type='tel']", str(perfil.get("telefone", perfil.get("phone", "")))),
+            ("input[name='email'], #email, input[type='email'], input[placeholder*='Email']", perfil.get("email", _get_linkedin_email())),
+            ("input[name='phone'], #phone, input[type='tel'], input[placeholder*='Phone'], input[aria-label*='Phone Number']", str(perfil.get("telefone", perfil.get("phone", "")))),
         ]
         for seletor, texto in campos_nomes:
             if texto and await digitar_com_delay(seletor, str(texto), delay_min=20, delay_max=60):

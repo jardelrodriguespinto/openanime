@@ -17,7 +17,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException, InvalidSessionIdException
+from selenium.common.exceptions import TimeoutException, NoSuchElementException, InvalidSessionIdException, WebDriverException
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +39,8 @@ def _get_driver():
     options.set_preference("network.http.use-cache", False)
     options.set_preference("browser.cache.disk.enable", False)
     options.set_preference("browser.cache.memory.enable", False)
+    options.set_preference("dom.webdriver.enabled", False)
+    options.set_preference("browser.selfsupport.autostart", False)
 
     service = Service(GECKODRIVER_PATH)
     driver = webdriver.Firefox(service=service, options=options)
@@ -112,11 +114,16 @@ async def _set_driver(driver):
 
 
 async def navegar(url: str):
-    """Navega para URL na pagina atual."""
+    """Navega para URL na pagina atual. Reabre o browser se a sessão for inválida."""
+    from selenium.common.exceptions import InvalidSessionIdException, WebDriverException
     driver = await get_driver()
     if not driver:
         raise RuntimeError("Browser nao inicializado")
-    await _run_in_thread(driver.get, url)
+    try:
+        await _run_in_thread(driver.get, url)
+    except (InvalidSessionIdException, WebDriverException):
+        print(f"[SELENIUM] Sessão inválida ao navegar para {url} - necessário reabrir")
+        raise
 
 
 _HAS_TEXT_PATTERN = r":has-text\(['\"](.+?)['\"]\)"
@@ -140,6 +147,12 @@ def _try_convert_selector(selector: str) -> tuple[str, str] | None:
 
 
 def _iter_selectors(selector: str):
+    selector = selector.strip()
+    # XPath selectors (starting with //) should not be split by comma
+    if selector.startswith("//"):
+        if selector:
+            yield (By.XPATH, selector)
+        return
     for part in selector.split(","):
         part = part.strip()
         if not part:
@@ -197,7 +210,7 @@ async def click(selector: str, timeout: int = 10) -> bool:
             )
             await _run_in_thread(el.click)
             return True
-        except TimeoutException:
+        except Exception:
             continue
     return False
 
@@ -217,6 +230,129 @@ async def digitar(selector: str, texto: str, clear: bool = True, delay: int = 50
         return True
     except Exception:
         return False
+
+
+async def digitar_no_elemento(el, texto: str, clear: bool = True) -> bool:
+    """Digita texto em um elemento já encontrado."""
+    if not el:
+        return False
+    try:
+        visivel = await _run_in_thread(lambda e=el: e.is_displayed())
+        habilitado = await _run_in_thread(lambda e=el: e.is_enabled())
+        print(f"[DIGITAR_NO_ELEMENTO] elemento visivel={visivel}, habilitado={habilitado}")
+        if not visivel or not habilitado:
+            return False
+        await _run_in_thread(lambda e=el: e.click())
+        await asyncio.sleep(0.2)
+        if clear:
+            try:
+                await _run_in_thread(lambda e=el: e.clear())
+            except Exception:
+                pass
+        await _run_in_thread(lambda e=el, t=texto: e.send_keys(t))
+        return True
+    except Exception as e:
+        print(f"[DIGITAR_NO_ELEMENTO] erro: {e}")
+        return False
+
+
+async def digitar_robusto(selector: str, texto: str, clear: bool = True) -> bool:
+    """Digita texto com garantias: espera visível, dá foco, usa JS como fallback."""
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+
+    driver = await get_driver()
+    if not driver:
+        return False
+
+    is_xpath = selector.strip().startswith("//")
+    if is_xpath:
+        partes = [selector.strip()]
+    else:
+        partes = [p.strip() for p in selector.split(",") if p.strip()]
+    
+    el = None
+    for parte in partes:
+        try:
+            if is_xpath or parte.startswith("//"):
+                by, value = (By.XPATH, parte)
+            else:
+                by, value = _try_convert_selector(parte)
+            el = await _run_in_thread(
+                lambda b=by, v=value: WebDriverWait(driver, 15).until(
+                    EC.presence_of_element_located((b, v))
+                )
+            )
+            if el:
+                break
+        except Exception:
+            continue
+
+    if not el:
+        try:
+            el = await _run_in_thread(lambda: driver.find_element(By.CSS_SELECTOR, partes[0]))
+        except Exception:
+            return False
+
+    try:
+        visivel = await _run_in_thread(lambda e=el: e.is_displayed())
+        habilitado = await _run_in_thread(lambda e=el: e.is_enabled())
+        print(f"[DIGITAR_ROBUSTO] elemento visivel={visivel}, habilitado={habilitado}, selector={selector[:60]}")
+        
+        if not visivel:
+            try:
+                await _run_in_thread(
+                    lambda e=el, d=driver: d.execute_script(
+                        "arguments[0].scrollIntoView({block:'center', inline:'nearest'});", e
+                    )
+                )
+                await asyncio.sleep(0.5)
+                visivel = await _run_in_thread(lambda e=el: e.is_displayed())
+                print(f"[DIGITAR_ROBUSTO] após scroll visivel={visivel}")
+            except Exception:
+                pass
+        
+        if not habilitado:
+            try:
+                await _run_in_thread(
+                    lambda e=el, d=driver: d.execute_script("arguments[0].removeAttribute('disabled');", e)
+                )
+                await asyncio.sleep(0.2)
+            except Exception:
+                pass
+
+        await _run_in_thread(lambda e=el: e.click())
+        await asyncio.sleep(0.2)
+
+        if clear:
+            try:
+                await _run_in_thread(lambda e=el: e.clear())
+            except Exception:
+                try:
+                    await _run_in_thread(lambda e=el: driver.execute_script("arguments[0].value='';", e))
+                except Exception:
+                    pass
+
+        await _run_in_thread(lambda e=el, t=texto: e.send_keys(t))
+
+        valor_final = await _run_in_thread(lambda e=el: e.get_attribute("value") or "")
+        sucesso = valor_final == texto or valor_final.strip() == texto.strip()
+        print(f"[DIGITAR_ROBUSTO] digitado='{texto[:30]}' | valor_final='{valor_final[:30]}' | sucesso={sucesso}")
+        return sucesso
+    except Exception as e:
+        print(f"[DIGITAR_ROBUSTO] excecao: {e}")
+        try:
+            await _run_in_thread(
+                lambda e=el, t=texto, d=driver: d.execute_script(
+                    "arguments[0].scrollIntoView({block:'center'}); arguments[0].focus(); arguments[0].value = arguments[1]; arguments[0].dispatchEvent(new Event('input', {bubbles:true}));",
+                    e, t
+                )
+            )
+            return True
+        except Exception as e2:
+            print(f"[DIGITAR_ROBUSTO] fallback JS falhou: {e2}")
+            return False
 
 
 async def digitar_com_delay(selector: str, texto: str, delay_min: int = 30, delay_max: int = 90):
@@ -317,32 +453,154 @@ async def _ensure_driver_alive():
     return False
 
 
+async def _wait_for_login_form_visible(driver, timeout: int = 10):
+    """Aguarda o formulário de login de email ficar visível (não apenas presente)."""
+    try:
+        el = await _run_in_thread(
+            lambda d=driver: WebDriverWait(d, timeout).until(
+                EC.visibility_of_element_located((By.CSS_SELECTOR,
+                    "#username, input[name='session_key'], input[type='email'], input[autocomplete='username'], "
+                    "input[placeholder*='Email or phone'], input[placeholder*='Email'], input[aria-label*='Email'], "
+                    "input[placeholder*='Phone'], input[aria-label*='Phone Number']"
+                ))
+            )
+        )
+        return el
+    except Exception:
+        return None
+
+
+async def _scroll_and_focus_element(driver, el):
+    """Rola a página para fazer elemento visível e chama scrollIntoView."""
+    try:
+        await _run_in_thread(
+            lambda e=el: driver.execute_script("arguments[0].scrollIntoView({block:'center', inline:'nearest'});", e)
+        )
+        await asyncio.sleep(0.5)
+    except Exception:
+        pass
+
+
 async def clicar_entrar_com_email(driver):
     """Tenta clicar em link/botão para usar email/senha ao invés de Google."""
     from selenium.webdriver.common.by import By
+    from selenium.common.exceptions import InvalidSessionIdException, WebDriverException, NoSuchElementException, StaleElementReferenceException
+    
     seletores = [
         "a[href*='email-sign-in']",
         "a[href*='sign-in-email']",
         "a[href*='traditional-auth']",
         "button[data-litms-control='sign_in_with_email']",
-        "button[aria-label*='Entrar com email']",
-        "button[aria-label*='Sign in with email']",
-        "a[aria-label*='Entrar com email']",
-        "a[aria-label*='Sign in with email']",
-        "//a[contains(text(), 'Entrar com email')]",
-        "//a[contains(text(), 'Sign in with email')]",
-        "//button[contains(text(), 'Entrar com email')]",
-        "//button[contains(text(), 'Sign in with email')]",
+        "button[data-litms-control='email_sign_in']",
+        "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'sign in with email')]",
+        "//a[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'sign in with email')]",
+        "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'entre com email')]",
+        "//a[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'entre com email')]",
+        "//button[.//span[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'email')] and not(contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'google'))]",
+        "//a[.//span[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'email')] and not(contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'google'))]",
+        "button[type='email']",
+        ".sign-in-form__sign-in-button",
+        "[data-litms-control='google_sign_in']",
+        "//button[contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'sign in with email')]",
+        "//button[contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'email') and not(contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'google'))]",
+        ".sign-in-alternate-button",
+        ".sign-in-form__sign-in-button",
     ]
     for sel in seletores:
         try:
+            if not driver:
+                return False
             el = await _run_in_thread(
                 lambda s=sel: driver.find_element(By.CSS_SELECTOR, s) if not s.startswith("//") else driver.find_element(By.XPATH, s)
             )
-            if el and await _run_in_thread(lambda e=el: e.is_displayed()):
-                await _run_in_thread(lambda e=el: e.click())
-                print("[SELENIUM] Clicou em 'Entrar com email'")
-                return True
+            if el:
+                visivel = await _run_in_thread(lambda e=el: e.is_displayed())
+                if visivel:
+                    texto = await _run_in_thread(lambda e=el: e.text or "")
+                    aria = await _run_in_thread(lambda e=el: e.get_attribute("aria-label") or "")
+                    href = await _run_in_thread(lambda e=el: e.get_attribute("href") or "")
+                    if "google" not in texto.lower() and "google" not in aria.lower() and "google" not in href.lower():
+                        await _run_in_thread(lambda e=el: e.click())
+                        print(f"[SELENIUM] Clicou em 'Entrar com email': {sel}")
+                        await asyncio.sleep(2)
+                        return True
+                elif await _run_in_thread(lambda e=el: e.is_enabled()):
+                    await _run_in_thread(lambda e=el: driver.execute_script("arguments[0].scrollIntoView(true); arguments[0].click();", el))
+                    print(f"[SELENIUM] Clicou via JS em 'Entrar com email': {sel}")
+                    await asyncio.sleep(2)
+                    return True
+        except (InvalidSessionIdException, WebDriverException) as e:
+            print(f"[SELENIUM] Sessão inválida ao clicar em {sel}: {type(e).__name__}")
+            nova_pagina._driver = None
+            raise
+        except StaleElementReferenceException:
+            continue
+        except NoSuchElementException:
+            continue
+        except Exception:
+            continue
+    return False
+
+
+async def forcar_formulario_login(driver):
+    """Força a exibição do formulário de login usando navegação direta."""
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+
+    selectors = [
+        "https://www.linkedin.com/login",
+        "https://www.linkedin.com/login/?trk=sign_in_with-email",
+        "https://www.linkedin.com/uas/login",
+        "https://www.linkedin.com/checkpoint/lg/sign-in-unique-email",
+    ]
+    for url in selectors:
+        try:
+            await _run_in_thread(driver.get, url)
+            await asyncio.sleep(3)
+            
+            try:
+                await _run_in_thread(
+                    lambda d=driver: d.execute_script("window.scrollTo(0, 200);")
+                )
+            except Exception:
+                pass
+            
+            google_btn = await _run_in_thread(
+                lambda d=driver: d.find_elements(By.CSS_SELECTOR,
+                    "button[data-litms-control='google_sign_in'], "
+                    "button[aria-label*='Google'], "
+                    "button[aria-label*='google'], "
+                    "a[href*='google'], "
+                    "a[href*='google.com']"
+                )
+            )
+            if google_btn:
+                print(f"[SELENIUM] Google button detectado em {url}, tentando entrar com email")
+                await clicar_entrar_com_email(driver)
+                await asyncio.sleep(2)
+            el = await _run_in_thread(
+                lambda d=driver: WebDriverWait(d, 10).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR,
+                        "#username, input[name='session_key'], input[type='email'], input[autocomplete='username'], "
+                        "input[placeholder*='Email or phone'], input[placeholder*='Email'], input[aria-label*='Email']"
+                    ))
+                )
+            )
+            if el:
+                try:
+                    visivel = await _run_in_thread(lambda e=el: e.is_displayed())
+                    if not visivel:
+                        await _run_in_thread(
+                            lambda d=driver: d.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                        )
+                        await asyncio.sleep(0.5)
+                        visivel = await _run_in_thread(lambda e=el: e.is_displayed())
+                    if visivel:
+                        print(f"[SELENIUM] Formulário visível após navegar para {url}")
+                        return True
+                except Exception:
+                    pass
         except Exception:
             continue
     return False
