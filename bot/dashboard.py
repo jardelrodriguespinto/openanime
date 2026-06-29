@@ -1094,16 +1094,31 @@ async def get_browser_screenshot():
     """Retorna screenshot base64 da pagina ativa (Playwright ou Selenium)."""
     try:
         from automation.browser import get_active_page, screenshot_base64
-        page = await get_active_page()
+        page = None
+        try:
+            page = await get_active_page()
+        except Exception:
+            page = None
         if page:
-            img = await screenshot_base64(page)
-            if img:
-                return JSONResponse({"success": True, "screenshot": img, "url": page.url})
+            try:
+                img = await screenshot_base64(page)
+                if img:
+                    try:
+                        url = page.url
+                    except Exception:
+                        url = ""
+                    return JSONResponse({"success": True, "screenshot": img, "url": url})
+            except Exception:
+                pass
         from automation.selenium_browser import screenshot_base64 as sel_screenshot
         img = await sel_screenshot()
         if img:
-            driver = await get_driver()
-            url = driver.current_url if driver else ""
+            try:
+                from automation.selenium_browser import get_driver
+                driver = await get_driver()
+                url = driver.current_url if driver else ""
+            except Exception:
+                url = ""
             return JSONResponse({"success": True, "screenshot": img, "url": url})
         return JSONResponse({"success": False, "message": "Nenhuma pagina ativa"}, status_code=404)
     except Exception as e:

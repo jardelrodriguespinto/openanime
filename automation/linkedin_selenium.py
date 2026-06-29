@@ -367,7 +367,13 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "", user_id
         print(f"[LINKEDIN] Iniciando aplicacao com Selenium para: {vaga_url}")
 
         driver = await get_driver()
-        if driver and await _driver_session_valida():
+        title_ok = False
+        if driver:
+            try:
+                title_ok = bool(await get_title())
+            except Exception:
+                pass
+        if driver and await _driver_session_valida() and title_ok:
             print(f"[LINKEDIN] Reutilizando browser existente: {driver.current_url}")
         else:
             if driver:
@@ -388,16 +394,43 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "", user_id
                 "mensagem": "Não foi possível fazer login no LinkedIn. Verifique as credenciais no .env ou se há verificação de segurança.",
             }
 
-        driver = await get_driver()
         current_url = driver.current_url if driver else ""
         print(f"[LINKEDIN] Logado com sucesso. URL: {current_url}")
 
-        if vaga_url not in current_url:
+        vaga_url_limpa = _limpar_url_vaga(vaga_url)
+        current_url = driver.current_url if driver else ""
+
+        if "/jobs/view/" not in current_url:
             await notify_browser_step("selenium_linkedin", "navegando", f"Abrindo vaga")
-            await navegar(vaga_url)
-            await asyncio.sleep(3)
+            await navegar(vaga_url_limpa)
+            await asyncio.sleep(5)
+            current_url = driver.current_url if driver else ""
+            if "checkpoint" in current_url.lower() or "challenge" in current_url.lower():
+                print("[LINKEDIN] Bloqueio detectado (checkpoint/challenge)")
+                b64 = await screenshot_base64()
+                await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
+                return {"sucesso": False, "mensagem": "Verificação de segurança detectada. Candidate-se manualmente.", "screenshot": b64[:100] if b64 else ""}
         else:
             print(f"[LINKEDIN] Já está na página da vaga")
+
+        try:
+            await _dismissar_cookie_banner(driver)
+        except Exception:
+            pass
+
+        html_check = None
+        try:
+            html_check = driver.page_source.lower()
+        except Exception:
+            pass
+        sinais_bloqueio = ["verify you're a human", "unusual activity", "captcha",
+            "security check", "robot", "bot detection", "access denied",
+            "forbidden", "cloudflare", "just a moment", "checking your browser"]
+        if html_check and any(sinal in html_check for sinal in sinais_bloqueio):
+            print("[LINKEDIN] Bloqueio detectado (HTML)")
+            b64 = await screenshot_base64()
+            await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
+            return {"sucesso": False, "mensagem": "Verificação de segurança detectada. Candidate-se manualmente.", "screenshot": b64[:100] if b64 else ""}
 
         print(f"[LINKEDIN] Vaga carregada: {await get_title()}")
 
@@ -405,7 +438,8 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "", user_id
         easy_btn = await wait_for_selector_visible(
             "button.jobs-apply-button, button[data-control-name='apply_show_modal'], "
             "button[aria-label*='Easy Apply'], button[aria-label*='Candidatura simplificada'], "
-            "button:has-text('Easy Apply'), button:has-text('Candidatura simplificada')",
+            ".jobs-apply-button, [data-control-name='apply_show_modal'], "
+            "[aria-label*='Easy Apply'], [aria-label*='Candidatura simplificada']",
             timeout=10
         )
 
@@ -416,7 +450,44 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "", user_id
             await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
             return {"sucesso": False, "mensagem": "Easy Apply nao encontrado nesta vaga.", "screenshot": b64[:100] if b64 else ""}
 
-        await click("button.jobs-apply-button, button[data-control-name='apply_show_modal']")
+        clicou = await click(
+            "button.jobs-apply-button, button[data-control-name='apply_show_modal'], "
+            "button[aria-label*='Easy Apply'], button[aria-label*='Candidatura simplificada'], "
+            ".jobs-apply-button, [data-control-name='apply_show_modal'], "
+            "[aria-label*='Easy Apply'], [aria-label*='Candidatura simplificada']"
+        )
+
+        if not clicou:
+            print("[LINKEDIN] Falhou clique CSS, tentando JavaScript...")
+            driver = await get_driver()
+            if driver:
+                clicou = await _clicar_easy_apply_js(driver)
+
+        if not clicou:
+            print("[LINKEDIN] JavaScript tambem falhou, aguardando e tentando novamente...")
+            await asyncio.sleep(3)
+            easy_btn = await wait_for_selector_visible(
+                "button.jobs-apply-button, button[data-control-name='apply_show_modal'], "
+                "button[aria-label*='Easy Apply'], button[aria-label*='Candidatura simplificada'], "
+                ".jobs-apply-button, [data-control-name='apply_show_modal'], "
+                "[aria-label*='Easy Apply'], [aria-label*='Candidatura simplificada']",
+                timeout=10
+            )
+            if easy_btn:
+                clicou = await click(
+                    "button.jobs-apply-button, button[data-control-name='apply_show_modal'], "
+                    "button[aria-label*='Easy Apply'], button[aria-label*='Candidatura simplificada'], "
+                    ".jobs-apply-button, [data-control-name='apply_show_modal'], "
+                    "[aria-label*='Easy Apply'], [aria-label*='Candidatura simplificada']"
+                )
+
+        if not clicou:
+            print("[LINKEDIN] Botao Easy Apply NAO encontrado")
+            await notify_browser_step("selenium_linkedin", "erro", "Easy Apply nao encontrado")
+            b64 = await screenshot_base64()
+            await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
+            return {"sucesso": False, "mensagem": "Easy Apply nao encontrado nesta vaga.", "screenshot": b64[:100] if b64 else ""}
+
         print("[LINKEDIN] Clicou em Easy Apply")
         await asyncio.sleep(3)
 
@@ -690,10 +761,6 @@ async def _clicar_submit_selenium(driver, timeout: int = 5) -> bool:
         "button[aria-label='Enviar candidatura']",
         "button[data-control-name='submit_apply']",
         "button[type='submit']",
-        "button:has-text('Submit application')",
-        "button:has-text('Enviar candidatura')",
-        "button:has-text('Enviar')",
-        "button:has-text('Finalizar')",
     ]
     return await click_qualquer_selenium(driver, seletores, timeout)
 
@@ -704,9 +771,6 @@ async def _clicar_next_selenium(driver, timeout: int = 5) -> bool:
         "button[aria-label='Continue to next step']",
         "button[aria-label='Continuar para a proxima etapa']",
         "button[data-easy-apply-next-button]",
-        "button:has-text('Next')",
-        "button:has-text('Continuar')",
-        "button:has-text('Proximo')",
         "footer button.artdeco-button--primary",
     ]
     return await click_qualquer_selenium(driver, seletores, timeout)
@@ -877,6 +941,73 @@ def _extrair_vaga_id(url: str) -> str:
     return url
 
 
+def _limpar_url_vaga(url: str) -> str:
+    if not url:
+        return url
+    vaga_id = _extrair_vaga_id(url)
+    if vaga_id:
+        return f"https://www.linkedin.com/jobs/view/{vaga_id}/"
+    return url
+
+
+async def _dismissar_cookie_banner(driver) -> None:
+    try:
+        seletores = [
+            'button[data-control-name="ga_cookie_consent.accept"]',
+            'button[data-control-name="cookie_banner_dismiss"]',
+            'button.artdeco-button--primary[data-control-name="cookie_banner_dismiss"]',
+            'button[aria-label*="Aceitar"]',
+            'button[aria-label*="Accept"]',
+            '[data-test-id="cookie-banner-accept"]',
+            '.cookie-banner-accept',
+        ]
+        for sel in seletores:
+            try:
+                btn = driver.find_element(By.CSS_SELECTOR, sel)
+                if btn.is_displayed() and btn.is_enabled():
+                    await _run_in_thread(btn.click)
+                    await asyncio.sleep(0.5)
+                    return
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+
+_JS_CLICK_EASY_APPLY = """
+(() => {
+    const textos = ['Candidatura simplificada', 'Easy Apply'];
+    const seletor = 'button, a, [role="button"], span[role="button"], div[role="button"]';
+    const elementos = document.querySelectorAll(seletor);
+    for (const el of elementos) {
+        for (const texto of textos) {
+            const aria = (el.getAttribute('aria-label') || '').toLowerCase();
+            const inner = (el.textContent || el.innerText || '').toLowerCase();
+            if (aria.includes(texto.toLowerCase()) || inner.includes(texto.toLowerCase())) {
+                const rect = el.getBoundingClientRect();
+                if (rect.width > 0 && rect.height > 0) {
+                    el.click();
+                    return 'clicou:' + texto;
+                }
+            }
+        }
+    }
+    return null;
+})()
+"""
+
+
+async def _clicar_easy_apply_js(driver) -> bool:
+    try:
+        resultado = await _run_in_thread(driver.execute_script, _JS_CLICK_EASY_APPLY)
+        if resultado and resultado.startswith('clicou:'):
+            print(f"[LINKEDIN] Clicou via JS em: {resultado.split(':')[1]}")
+            return True
+    except Exception as e:
+        print(f"[LINKEDIN] JS click falhou: {e}")
+    return False
+
+
 async def _driver_session_valida() -> bool:
     """Verifica se o driver Selenium tem uma sessão ativa válida."""
     try:
@@ -923,7 +1054,7 @@ async def _extrair_primeira_vaga_da_busca() -> str | None:
 
             # Estratégia 1: Procura por botão Easy Apply e obtém o link da vaga associada
             try:
-                buttons = driver.find_elements(By.XPATH, "//button[contains(@class,'jobs-apply-button') and contains(@aria-label,'Easy Apply')]")
+                buttons = driver.find_elements(By.XPATH, "//*[contains(@class,'jobs-apply-button') and contains(@aria-label,'Easy Apply')]")
                 for btn in buttons[:5]:
                     try:
                         link_elem = btn.find_element(By.XPATH, "./ancestor::a[contains(@href,'/jobs/view/')]")
@@ -940,7 +1071,7 @@ async def _extrair_primeira_vaga_da_busca() -> str | None:
                 job_cards = driver.find_elements(By.CSS_SELECTOR, ".job-card-container, .jobs-search__result-card, .base-card, .job-card")
                 for card in job_cards[:15]:
                     try:
-                        apply_btn = card.find_element(By.CSS_SELECTOR, "button.jobs-apply-button, button[data-control-name='apply_show_modal']")
+                        apply_btn = card.find_element(By.CSS_SELECTOR, "button.jobs-apply-button, button[data-control-name='apply_show_modal'], .jobs-apply-button, [data-control-name='apply_show_modal']")
                         link_elem = card.find_element(By.XPATH, ".//a[contains(@href, '/jobs/view/')]")
                         href = link_elem.get_attribute("href")
                         if href:
@@ -1097,7 +1228,9 @@ async def _extrair_vagas_playwright(page, max_vagas: int = 20) -> dict:
                 try:
                     ea_btn = await card.query_selector(
                         "button.jobs-apply-button, button[data-control-name='apply_show_modal'], "
-                        "button[aria-label*='Easy Apply'], button[aria-label*='Candidatura simplificada']"
+                        "button[aria-label*='Easy Apply'], button[aria-label*='Candidatura simplificada'], "
+                        ".jobs-apply-button, [data-control-name='apply_show_modal'], "
+                        "[aria-label*='Easy Apply'], [aria-label*='Candidatura simplificada']"
                     )
                     if ea_btn:
                         ea_text = (await ea_btn.inner_text()).strip().lower()
@@ -1204,7 +1337,9 @@ async def _extrair_cards_vaga(max_vagas: int = 20) -> list[dict]:
                 try:
                     ea_btn = card.find_element(By.CSS_SELECTOR,
                         "button.jobs-apply-button, button[data-control-name='apply_show_modal'], "
-                        "button[aria-label*='Easy Apply'], button[aria-label*='Candidatura simplificada']"
+                        "button[aria-label*='Easy Apply'], button[aria-label*='Candidatura simplificada'], "
+                        ".jobs-apply-button, [data-control-name='apply_show_modal'], "
+                        "[aria-label*='Easy Apply'], [aria-label*='Candidatura simplificada']"
                     )
                     if ea_btn and ea_btn.is_displayed():
                         ea_text = (ea_btn.text or "").strip().lower()

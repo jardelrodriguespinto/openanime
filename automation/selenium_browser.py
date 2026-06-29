@@ -140,7 +140,7 @@ def _try_convert_selector(selector: str) -> tuple[str, str] | None:
     text = match.group(1)
     base_selector = selector[:match.start()].strip()
     if base_selector and base_selector != "*":
-        xpath = f"//{base_selector[1:]}[contains(., '{text}')]"
+        xpath = f"//{base_selector}[contains(., '{text}')]"
     else:
         xpath = f"//*[contains(., '{text}')]"
     return (By.XPATH, xpath)
