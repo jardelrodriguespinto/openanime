@@ -515,8 +515,8 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5) -> 
         current_url = driver.current_url
         url_lower = current_url.lower()
 
-        # Se NÃO está em uma página de jobs, navega para easy-apply
-        if "jobs" not in url_lower and "feed" not in url_lower:
+        # Se NÃO está na página de Easy Apply, navega para lá
+        if "jobs" not in url_lower:
             await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
             await asyncio.sleep(3)
 
