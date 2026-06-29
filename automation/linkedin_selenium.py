@@ -395,86 +395,61 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "", user_id
         current_url = await _run_in_thread(lambda: driver.current_url) if driver else ""
         print(f"[LINKEDIN] Logado com sucesso. URL: {current_url}")
 
-        vaga_url_limpa = _limpar_url_vaga(vaga_url)
-        current_url = await _run_in_thread(lambda: driver.current_url) if driver else ""
+        vaga_id = _extrair_vaga_id(vaga_url)
+        vaga_na_pagina = vaga_id and vaga_id in current_url
 
-        if "/jobs/view/" not in current_url:
-            await notify_browser_step("selenium_linkedin", "navegando", f"Abrindo vaga")
-            await navegar(vaga_url_limpa)
-            await asyncio.sleep(5)
-            current_url = driver.current_url if driver else ""
-            if "checkpoint" in current_url.lower() or "challenge" in current_url.lower():
-                print("[LINKEDIN] Bloqueio detectado (checkpoint/challenge)")
-                b64 = await screenshot_base64()
-                await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
-                return {"sucesso": False, "mensagem": "Verificação de segurança detectada. Candidate-se manualmente.", "screenshot": b64[:100] if b64 else ""}
+        if not vaga_na_pagina:
+            collection_url = f"https://www.linkedin.com/jobs/collections/easy-apply/?currentJobId={vaga_id}" if vaga_id else vaga_url
+            await notify_browser_step("selenium_linkedin", "navegando", f"Abrindo vaga {vaga_id}")
+            print(f"[LINKEDIN] Navegando para: {collection_url}")
+            await navegar(collection_url)
         else:
-            print(f"[LINKEDIN] Já está na página da vaga")
+            print(f"[LINKEDIN] Vaga {vaga_id} ja esta na pagina")
 
         try:
             await _dismissar_cookie_banner(driver)
         except Exception:
             pass
 
-        html_check = None
-        try:
-            html_check = driver.page_source.lower()
-        except Exception:
-            pass
-        sinais_bloqueio = ["verify you're a human", "unusual activity", "captcha",
-            "security check", "robot", "bot detection", "access denied",
-            "forbidden", "cloudflare", "just a moment", "checking your browser"]
-        if html_check and any(sinal in html_check for sinal in sinais_bloqueio):
-            print("[LINKEDIN] Bloqueio detectado (HTML)")
+        await notify_browser_step("selenium_linkedin", "easy_apply", "Aguardando pagina carregar...")
+
+        driver = await get_driver()
+        for wait_i in range(20):
+            await asyncio.sleep(1)
+            try:
+                n_btns = await _run_in_thread(lambda: driver.execute_script("return document.querySelectorAll('button').length"))
+                if n_btns and n_btns > 10:
+                    print(f"[LINKEDIN] SPA renderizado ({n_btns} botoes em {wait_i+1}s)")
+                    break
+            except Exception:
+                pass
+        else:
+            print("[LINKEDIN] SPA demorou para renderizar, tentando mesmo assim...")
+
+        current_url = await _run_in_thread(lambda: driver.current_url) if driver else ""
+        if "checkpoint" in current_url.lower() or "challenge" in current_url.lower():
+            print("[LINKEDIN] Bloqueio detectado")
             b64 = await screenshot_base64()
-            await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
-            return {"sucesso": False, "mensagem": "Verificação de segurança detectada. Candidate-se manualmente.", "screenshot": b64[:100] if b64 else ""}
+            return {"sucesso": False, "mensagem": "Verificação de segurança detectada.", "screenshot": b64[:100] if b64 else ""}
 
         print(f"[LINKEDIN] Vaga carregada: {await get_title()}")
-
         await notify_browser_step("selenium_linkedin", "easy_apply", "Procurando Easy Apply...")
 
         clicou = False
+        driver = await get_driver()
 
-        clicou = await click(
-            "button.jobs-apply-button, button[aria-label*='Easy Apply'], "
-            "button[aria-label*='Candidatura simplificada']",
-            timeout=5
-        )
+        if driver:
+            clicou = await _clicar_easy_apply_js(driver)
 
         if not clicou:
-            print("[LINKEDIN] CSS direto falhou, tentando JavaScript...")
-            driver = await get_driver()
-            if driver:
-                clicou = await _clicar_easy_apply_js(driver)
-
-        if not clicou:
-            print("[LINKEDIN] JS falhou, tentando XPath por texto...")
-            clicou = await click(
-                "//button[contains(., 'Candidatura simplificada')]",
-                timeout=5
-            )
-
-        if not clicou:
-            clicou = await click(
-                "//button[contains(., 'Easy Apply')]",
-                timeout=5
-            )
-
-        if not clicou:
-            print("[LINKEDIN] Todas tentativas falharam, aguardando pagina e tentando novamente...")
+            print("[LINKEDIN] 1a tentativa JS falhou, aguardando mais...")
             await asyncio.sleep(5)
             driver = await get_driver()
             if driver:
                 clicou = await _clicar_easy_apply_js(driver)
-            if not clicou:
-                clicou = await click(
-                    "//button[contains(., 'Candidatura simplificada') or contains(., 'Easy Apply')]",
-                    timeout=5
-                )
 
         if not clicou:
-            print("[LINKEDIN] Botao Easy Apply NAO encontrado apos todas tentativas")
+            print("[LINKEDIN] Botao Easy Apply NAO encontrado")
             await notify_browser_step("selenium_linkedin", "erro", "Easy Apply nao encontrado")
             b64 = await screenshot_base64()
             await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
@@ -593,9 +568,25 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
                         perguntas_customizadas.append(pergunta)
                         await asyncio.sleep(random.uniform(0.5, 1.0))
 
-            if await _clicar_submit_selenium(driver, timeout=3):
+            btn_text, btn_clicked = await _clicar_botao_primario_modal(driver)
+
+            if not btn_clicked:
+                print(f"[LINKEDIN] Step {step}: nenhum botão encontrado no modal")
+                break
+
+            print(f"[LINKEDIN] Step {step}: clicou botão '{btn_text}'")
+            btn_lower = btn_text.lower()
+
+            is_submit = any(s in btn_lower for s in [
+                "submit", "enviar", "send", "finalizar",
+            ])
+            is_review = any(s in btn_lower for s in [
+                "review", "revisar",
+            ])
+
+            if is_submit or is_review:
                 await asyncio.sleep(3)
-                await notify_browser_step("step_"+str(step), "enviando", "Submetendo candidatura")
+                await notify_browser_step("step_"+str(step), "enviando", f"Clicou: {btn_text}")
                 try:
                     url_apos = driver.current_url
                 except Exception:
@@ -613,28 +604,11 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
                         "mensagem": "Candidatura enviada com sucesso via LinkedIn Easy Apply!",
                         "screenshot": b64[:100] if b64 else "",
                     }
-
-                if await _clicar_submit_selenium(driver, timeout=3):
-                    await asyncio.sleep(3)
-                    try:
-                        url_apos = driver.current_url
-                    except Exception:
-                        url_apos = ""
-                    html = driver.page_source
-                    if _detectar_sucesso(html, url_apos):
-                        await notify_browser_step("step_"+str(step), "sucesso", "Candidatura enviada!")
-                        b64 = await screenshot_base64()
-                        await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
-                        await asyncio.sleep(2)
-                        return {
-                            "sucesso": True,
-                            "perguntas_respondidas": perguntas_customizadas,
-                            "mensagem": "Candidatura enviada com sucesso via LinkedIn Easy Apply!",
-                            "screenshot": b64[:100] if b64 else "",
-                        }
-
-            await notify_browser_step("step_"+str(step), "navegando", "Avançando para próximo step")
-            if await _clicar_next_selenium(driver, timeout=3):
+                if is_review:
+                    await asyncio.sleep(1)
+                    continue
+            else:
+                await notify_browser_step("step_"+str(step), "navegando", f"Avançando: {btn_text}")
                 await asyncio.sleep(2)
                 continue
 
@@ -916,6 +890,92 @@ async def _preencher_radio_selenium(driver, label_text: str, resposta: str) -> N
         logger.debug("linkedin_selenium: erro ao preencher radio: %s", e)
 
 
+async def _clicar_botao_primario_modal(driver) -> tuple:
+    """Encontra e clica o botão primário (ação principal) do modal Easy Apply.
+    Retorna (texto_botao, clicou_bool)."""
+
+    _JS_FIND_PRIMARY_BTN = """
+    return (() => {
+        function norm(s) { return (s || '').replace(/\\s+/g, ' ').trim().toLowerCase(); }
+
+        // Procura dentro do modal/dialog
+        const modals = document.querySelectorAll(
+            'div[role="dialog"], .jobs-easy-apply-modal, .artdeco-modal, .jobs-easy-apply-content'
+        );
+        const container = modals.length > 0 ? modals[modals.length - 1] : document;
+
+        // Procura footer do modal
+        const footers = container.querySelectorAll('footer, div[class*="footer"], div[class*="actions"]');
+        const footer = footers.length > 0 ? footers[footers.length - 1] : container;
+
+        // Botão primário no footer (o botão azul de ação)
+        const primaryBtns = footer.querySelectorAll(
+            'button.artdeco-button--primary, button[data-easy-apply-next-button], ' +
+            'button[type="submit"]'
+        );
+        for (const btn of primaryBtns) {
+            const rect = btn.getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0 && !btn.disabled) {
+                const text = norm(btn.textContent || btn.innerText || '');
+                btn.scrollIntoView({block: 'center'});
+                btn.click();
+                return text;
+            }
+        }
+
+        // Fallback: qualquer botão no modal com texto de ação
+        const actionTexts = [
+            'avan', 'next', 'continuar', 'continue', 'enviar', 'submit',
+            'revisar', 'review', 'candidatura', 'application', 'finalizar'
+        ];
+        const allBtns = container.querySelectorAll('button');
+        for (const btn of allBtns) {
+            const text = norm(btn.textContent || btn.innerText || '');
+            const rect = btn.getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0 && !btn.disabled) {
+                for (const at of actionTexts) {
+                    if (text.includes(at)) {
+                        btn.scrollIntoView({block: 'center'});
+                        btn.click();
+                        return text;
+                    }
+                }
+            }
+        }
+        return null;
+    })()
+    """
+    try:
+        resultado = await _run_in_thread(driver.execute_script, _JS_FIND_PRIMARY_BTN)
+        if resultado:
+            print(f"[LINKEDIN] Botão primário encontrado via JS: '{resultado}'")
+            return (resultado, True)
+    except Exception as e:
+        print(f"[LINKEDIN] JS botão primário falhou: {e}")
+
+    seletores_next = [
+        "button[data-easy-apply-next-button]",
+        "button[aria-label='Continue to next step']",
+        "button[aria-label='Continuar para a proxima etapa']",
+        "//button[contains(., 'Avançar')]",
+        "//button[contains(., 'Next')]",
+        "//button[contains(., 'Continuar')]",
+    ]
+    seletores_submit = [
+        "button[aria-label='Submit application']",
+        "button[aria-label='Enviar candidatura']",
+        "button[aria-label='Review your application']",
+        "//button[contains(., 'Enviar candidatura')]",
+        "//button[contains(., 'Submit')]",
+        "//button[contains(., 'Revisar')]",
+    ]
+    for sel_list, default_text in [(seletores_next, "Next"), (seletores_submit, "Submit")]:
+        if await click_qualquer_selenium(driver, sel_list, timeout=2):
+            return (default_text, True)
+
+    return ("", False)
+
+
 async def _clicar_submit_selenium(driver, timeout: int = 5) -> bool:
     """Clica no botao Submit/Review/Enviar."""
     seletores = [
@@ -1172,23 +1232,48 @@ async def _dismissar_cookie_banner(driver) -> None:
 
 
 _JS_CLICK_EASY_APPLY = """
-(() => {
-    const textos = ['Candidatura simplificada', 'Easy Apply'];
-    const seletor = 'button, a, [role="button"], span[role="button"], div[role="button"]';
+return (() => {
+    function norm(s) { return (s || '').replace(/\\s+/g, ' ').trim().toLowerCase(); }
+
+    const keywords = ['candidatura simplificada', 'easy apply'];
+    const seletor = 'button, a, [role="button"]';
     const elementos = document.querySelectorAll(seletor);
+
     for (const el of elementos) {
-        for (const texto of textos) {
-            const aria = (el.getAttribute('aria-label') || '').toLowerCase();
-            const inner = (el.textContent || el.innerText || '').toLowerCase();
-            if (aria.includes(texto.toLowerCase()) || inner.includes(texto.toLowerCase())) {
-                const rect = el.getBoundingClientRect();
-                if (rect.width > 0 && rect.height > 0) {
-                    el.click();
-                    return 'clicou:' + texto;
-                }
+        const rect = el.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0 || el.disabled) continue;
+
+        const text = norm(el.textContent || el.innerText || '');
+        const aria = norm(el.getAttribute('aria-label') || '');
+
+        for (const kw of keywords) {
+            if (text.includes(kw) || aria.includes(kw)) {
+                el.scrollIntoView({block: 'center'});
+                el.click();
+                return 'clicou:' + kw;
             }
         }
     }
+
+    // Fallback: match just "candidatura" or "easy apply" separately
+    for (const el of elementos) {
+        const rect = el.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0 || el.disabled) continue;
+
+        const text = norm(el.textContent || el.innerText || '');
+        const aria = norm(el.getAttribute('aria-label') || '');
+        const cls = norm(el.className || '');
+
+        if (cls.includes('jobs-apply-button') ||
+            text.includes('candidatura') || aria.includes('candidatura') ||
+            (text.includes('apply') && !text.includes('applied')) ||
+            (aria.includes('apply') && !aria.includes('applied'))) {
+            el.scrollIntoView({block: 'center'});
+            el.click();
+            return 'clicou:fallback:' + text.substring(0, 40);
+        }
+    }
+
     return null;
 })()
 """
@@ -1197,9 +1282,11 @@ _JS_CLICK_EASY_APPLY = """
 async def _clicar_easy_apply_js(driver) -> bool:
     try:
         resultado = await _run_in_thread(driver.execute_script, _JS_CLICK_EASY_APPLY)
-        if resultado and resultado.startswith('clicou:'):
-            print(f"[LINKEDIN] Clicou via JS em: {resultado.split(':')[1]}")
+        if resultado and 'clicou:' in resultado:
+            print(f"[LINKEDIN] Clicou via JS: {resultado}")
             return True
+        else:
+            print(f"[LINKEDIN] JS nao encontrou botao Easy Apply")
     except Exception as e:
         print(f"[LINKEDIN] JS click falhou: {e}")
     return False
