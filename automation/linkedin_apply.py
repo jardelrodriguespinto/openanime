@@ -7,10 +7,19 @@ import logging
 import os
 import random
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 logger = logging.getLogger(__name__)
 
-LINKEDIN_EMAIL = os.getenv("LINKEDIN_EMAIL", "")
-LINKEDIN_PASSWORD = os.getenv("LINKEDIN_PASSWORD", "")
+
+def _get_linkedin_email() -> str:
+    return os.getenv("LINKEDIN_EMAIL", "")
+
+
+def _get_linkedin_password() -> str:
+    return os.getenv("LINKEDIN_PASSWORD", "")
 
 # Campos que nao sao "perguntas customizadas" — ja sao preenchidos automaticamente
 _CAMPOS_PADRAO = {
@@ -53,7 +62,7 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "") -> dict
     """
     Candidatura via LinkedIn Easy Apply com multi-step handling.
     """
-    if not LINKEDIN_EMAIL or not LINKEDIN_PASSWORD:
+    if not _get_linkedin_email() or not _get_linkedin_password():
         return {
             "sucesso": False,
             "motivo_falha": "credenciais_ausentes",
@@ -160,14 +169,72 @@ async def _fazer_login(page, context=None) -> dict:
     """Login no LinkedIn. Salva cookies apos sucesso para reutilizar na proxima vez."""
     try:
         await page.goto("https://www.linkedin.com/login")
-        await asyncio.sleep(random.uniform(1, 2))
+        await asyncio.sleep(random.uniform(2, 3))
 
         from automation.browser import digitar_humano, esperar_navegacao, salvar_sessao
-        await digitar_humano(page, "#username", LINKEDIN_EMAIL)
-        await asyncio.sleep(random.uniform(0.3, 0.8))
-        await digitar_humano(page, "#password", LINKEDIN_PASSWORD)
+
+        google_btn = await page.query_selector(
+            "button[data-litms-control='google_sign_in'], "
+            "button[aria-label*='Google'], "
+            "button[aria-label*='google']"
+        )
+        if google_btn:
+            print("[LINKEDIN] Detectado botão Google no Playwright — procurando alternativa email/senha")
+            email_link = await page.query_selector(
+                "a[href*='email-sign-in'], a[href*='sign-in-email'], "
+                "button[aria-label*='Entrar com email'], button[aria-label*='Sign in with email'], "
+                "a[aria-label*='Entrar com email'], a[aria-label*='Sign in with email'], "
+                "text=Entrar com email, text=Sign in with email"
+            )
+            if email_link:
+                await email_link.click()
+                await asyncio.sleep(2)
+            else:
+                print("[LINKEDIN] Botão Google presente mas link email não encontrado")
+
+        email_ok = False
+        for sel in ["#username", "input[name='session_key']", "input[type='email']", "input[autocomplete='username']"]:
+            try:
+                await digitar_humano(page, sel, _get_linkedin_email())
+                email_ok = True
+                break
+            except Exception:
+                continue
+        if not email_ok:
+            return {"sucesso": False, "motivo_falha": "login_falhou", "mensagem": "Campo email não encontrado."}
+
         await asyncio.sleep(random.uniform(0.5, 1.0))
-        await page.click('button[type="submit"]')
+
+        pass_ok = False
+        for sel in ["#password", "input[name='session_password']", "input[type='password']"]:
+            try:
+                await digitar_humano(page, sel, _get_linkedin_password())
+                pass_ok = True
+                break
+            except Exception:
+                continue
+        if not pass_ok:
+            return {"sucesso": False, "motivo_falha": "login_falhou", "mensagem": "Campo senha não encontrado."}
+
+        await asyncio.sleep(random.uniform(0.5, 1.0))
+
+        submitted = False
+        for sel in [
+            'button[type="submit"]',
+            'button.sign-in-form__submit-button',
+            "//button[contains(text(), 'Entrar')]",
+            "//button[contains(., 'Sign in')]",
+        ]:
+            try:
+                await page.click(sel)
+                submitted = True
+                break
+            except Exception:
+                continue
+
+        if not submitted:
+            return {"sucesso": False, "motivo_falha": "login_falhou", "mensagem": "Botão submit não encontrado."}
+
         await esperar_navegacao(page, timeout=20000)
 
         if "checkpoint" in page.url or "challenge" in page.url:
@@ -179,7 +246,6 @@ async def _fazer_login(page, context=None) -> dict:
 
         if "feed" in page.url or "mynetwork" in page.url or "linkedin.com/in/" in page.url:
             logger.info("linkedin_apply: login OK")
-            # Salva sessao para proximas candidaturas
             if context:
                 await salvar_sessao(context, "linkedin")
             return {"sucesso": True}
@@ -192,7 +258,32 @@ async def _fazer_login(page, context=None) -> dict:
                 "mensagem": "Login no LinkedIn falhou. Verifique LINKEDIN_EMAIL e LINKEDIN_PASSWORD no .env.",
             }
 
-        # Sessao possivelmente valida — salva de qualquer forma
+        if context:
+            await salvar_sessao(context, "linkedin")
+        return {"sucesso": True}
+
+    except Exception as e:
+        logger.error("linkedin_apply: erro no login: %s", e)
+        return {
+            "sucesso": False,
+            "motivo_falha": "erro_login",
+            "mensagem": "Erro ao tentar login no LinkedIn.",
+        }
+
+        if "feed" in page.url or "mynetwork" in page.url or "linkedin.com/in/" in page.url:
+            logger.info("linkedin_apply: login OK")
+            if context:
+                await salvar_sessao(context, "linkedin")
+            return {"sucesso": True}
+
+        html = await page.content()
+        if "sign in" in html.lower() or "entrar" in html.lower():
+            return {
+                "sucesso": False,
+                "motivo_falha": "login_falhou",
+                "mensagem": "Login no LinkedIn falhou. Verifique LINKEDIN_EMAIL e LINKEDIN_PASSWORD no .env.",
+            }
+
         if context:
             await salvar_sessao(context, "linkedin")
         return {"sucesso": True}

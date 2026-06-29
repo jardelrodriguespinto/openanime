@@ -124,6 +124,9 @@ _HAS_TEXT_PATTERN = r":has-text\(['\"](.+?)['\"]\)"
 
 def _try_convert_selector(selector: str) -> tuple[str, str] | None:
     import re
+    # XPath selectors start with //
+    if selector.strip().startswith("//"):
+        return (By.XPATH, selector.strip())
     match = re.search(_HAS_TEXT_PATTERN, selector)
     if not match:
         return (By.CSS_SELECTOR, selector)
@@ -311,4 +314,35 @@ async def _ensure_driver_alive():
             return True
     except (InvalidSessionIdException, Exception):
         nova_pagina._driver = None
+    return False
+
+
+async def clicar_entrar_com_email(driver):
+    """Tenta clicar em link/botão para usar email/senha ao invés de Google."""
+    from selenium.webdriver.common.by import By
+    seletores = [
+        "a[href*='email-sign-in']",
+        "a[href*='sign-in-email']",
+        "a[href*='traditional-auth']",
+        "button[data-litms-control='sign_in_with_email']",
+        "button[aria-label*='Entrar com email']",
+        "button[aria-label*='Sign in with email']",
+        "a[aria-label*='Entrar com email']",
+        "a[aria-label*='Sign in with email']",
+        "//a[contains(text(), 'Entrar com email')]",
+        "//a[contains(text(), 'Sign in with email')]",
+        "//button[contains(text(), 'Entrar com email')]",
+        "//button[contains(text(), 'Sign in with email')]",
+    ]
+    for sel in seletores:
+        try:
+            el = await _run_in_thread(
+                lambda s=sel: driver.find_element(By.CSS_SELECTOR, s) if not s.startswith("//") else driver.find_element(By.XPATH, s)
+            )
+            if el and await _run_in_thread(lambda e=el: e.is_displayed()):
+                await _run_in_thread(lambda e=el: e.click())
+                print("[SELENIUM] Clicou em 'Entrar com email'")
+                return True
+        except Exception:
+            continue
     return False

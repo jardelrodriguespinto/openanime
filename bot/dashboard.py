@@ -689,8 +689,21 @@ async def buscar_vagas_dashboard(request: Request):
 
             from automation.browser_agent import buscar_vagas_browser_use
             vagas = []
+
             try:
-                vagas = await buscar_vagas_browser_use(query)
+                if not plataforma or plataforma == "linkedin":
+                    from automation.linkedin_selenium import extrair_vagas_da_busca
+
+                    _set_automacao_status(True, "buscando", "linkedin", f"Abrindo LinkedIn para buscar: {query}")
+                    set_browser_current_step("busca_linkedin", "navegando", f"Query: {query}")
+                    emit_status_update()
+
+                    resultado = await extrair_vagas_da_busca({}, max_vagas=20)
+                    vagas = resultado.get("vagas", [])
+                    for v in vagas:
+                        v["fonte"] = v.get("fonte") or "LinkedIn"
+                else:
+                    vagas = await buscar_vagas_browser_use(query)
             except Exception as e:
                 logger.warning(f"busca falhou: {e}")
 

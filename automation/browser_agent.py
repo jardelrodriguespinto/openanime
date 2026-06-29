@@ -7,6 +7,10 @@ import asyncio
 import logging
 import os
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 logger = logging.getLogger(__name__)
 
 BROWSER_USE_AVAILABLE = True
@@ -75,7 +79,8 @@ async def _aplicar_linkedin_selenium(vaga_url: str, perfil: dict) -> dict:
     from automation.browser import notify_browser_step
     from automation.selenium_browser import (
         nova_pagina, navegar, wait_for_selector, wait_for_selector_visible,
-        click, digitar, digitar_com_delay, screenshot_base64, fechar, get_driver, _run_in_thread
+        click, digitar, digitar_com_delay, screenshot_base64, fechar, get_driver, _run_in_thread,
+        clicar_entrar_com_email
     )
     from urllib.parse import urlparse, parse_qs
 
@@ -83,12 +88,19 @@ async def _aplicar_linkedin_selenium(vaga_url: str, perfil: dict) -> dict:
         await notify_browser_step("selenium_linkedin", "iniciando", f"Aplicando com Selenium em: {vaga_url}")
         print(f"[SELENIUM] Aplicando em: {vaga_url}")
 
-        # Verifica sessão existente e válida
+        email = os.getenv("LINKEDIN_EMAIL", "")
+        password = os.getenv("LINKEDIN_PASSWORD", "")
+        if not email or not password:
+            await fechar()
+            return {"sucesso": False, "mensagem": "Configure LINKEDIN_EMAIL e LINKEDIN_PASSWORD no .env para candidatura automatica."}
+
         driver = await get_driver()
         if driver and await _verifica_sessao_valida():
             print("[SELENIUM] Reutilizando browser existente")
             await navegar("https://www.linkedin.com")
-            await asyncio.sleep(2)
+            await asyncio.sleep(3)
+            current_url = await _run_in_thread(lambda: driver.current_url)
+            title = await get_title()
         else:
             if driver:
                 print("[SELENIUM] Sessão inválida - fechando browser antigo")
@@ -98,25 +110,25 @@ async def _aplicar_linkedin_selenium(vaga_url: str, perfil: dict) -> dict:
                     pass
             print("[SELENIUM] Abrindo novo browser")
             await nova_pagina("https://www.linkedin.com")
-        
-        driver = await get_driver()
-        current_url = driver.current_url
+            await asyncio.sleep(3)
+            driver = await get_driver()
+            current_url = await _run_in_thread(lambda: driver.current_url) if driver else ""
+            title = await get_title() if driver else ""
+
         print(f"[SELENIUM] LinkedIn carregado: {current_url}")
 
-        # Verifica se precisa de login
-        if "login" in current_url.lower() or "sign in" in (await _get_driver_title()).lower():
+        if "login" in current_url.lower() or "sign in" in title.lower():
             await notify_browser_step("selenium_linkedin", "login", "Fazendo login...")
-            email = os.getenv("LINKEDIN_EMAIL", "")
-            password = os.getenv("LINKEDIN_PASSWORD", "")
-            if not email:
-                await fechar()
-                return {"sucesso": False, "mensagem": "Configure LINKEDIN_EMAIL no .env"}
+            login_ok = await _fazer_login_selenium(email, password)
+            print(f"[SELENIUM] Login enviado: {login_ok}")
+        else:
+            print("[SELENIUM] Aparentemente já logado")
 
-            await digitar("#username", email)
-            await digitar("#password", password)
-            await click("[type='submit']")
+        driver = await get_driver()
+        if driver:
+            await navegar(vaga_url)
             await asyncio.sleep(3)
-            print("[SELENIUM] Login enviado")
+            print(f"[SELENIUM] Vaga aberta: {await get_title()}")
 
         # Navega para a vaga (na mesma janela, nao cria nova)
         await notify_browser_step("selenium_linkedin", "navegando", f"Abrindo vaga: {vaga_url}")
@@ -223,6 +235,120 @@ async def _aplicar_linkedin_selenium(vaga_url: str, perfil: dict) -> dict:
         except Exception:
             pass
         return {"sucesso": False, "mensagem": str(e)}
+
+
+async def _fazer_login_selenium(email: str, password: str) -> bool:
+    """Faz login no LinkedIn usando Selenium com seletores robustos e espera por campos clicáveis."""
+    try:
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+
+        driver = await get_driver()
+        if not driver:
+            return False
+
+        await navegar("https://www.linkedin.com/login")
+        await asyncio.sleep(3)
+
+        for tentativa in range(3):
+            try:
+                el_username = await _run_in_thread(
+                    lambda: WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR,
+                            "#username, input[name='session_key'], input[type='email'], input[autocomplete='username']"
+                        ))
+                    )
+                )
+                el_username = await _run_in_thread(
+                    lambda: WebDriverWait(driver, 5).until(
+                        EC.element_to_be_clickable((By.CSS_SELECTOR,
+                            "#username, input[name='session_key'], input[type='email'], input[autocomplete='username']"
+                        ))
+                    )
+                )
+                print(f"[SELENIUM] Campo username clicável (tentativa {tentativa+1})")
+            except Exception:
+                try:
+                    el_username = await _run_in_thread(
+                        lambda: driver.find_element(By.CSS_SELECTOR,
+                            "#username, input[name='session_key'], input[type='email'], input[autocomplete='username']"
+                        )
+                    )
+                    print(f"[SELENIUM] Campo username presente (tentativa {tentativa+1})")
+                except Exception:
+                    el_username = None
+
+            if not el_username:
+                google_btn = await _run_in_thread(
+                    lambda: driver.find_elements(By.CSS_SELECTOR,
+                        "button[data-litms-control='google_sign_in'], "
+                        "button[aria-label*='Google'], "
+                        "button[aria-label*='google'], "
+                        "a[href*='google'], "
+                        "a[href*='google.com']"
+                    )
+                )
+                if google_btn:
+                    print("[SELENIUM] Detectado botão Google — procurando alternativa email/senha")
+                    await clicar_entrar_com_email(driver)
+                    await asyncio.sleep(2)
+
+                if tentativa < 2:
+                    await navegar("https://www.linkedin.com/login")
+                    await asyncio.sleep(2)
+                    continue
+                print("[SELENIUM] Campo username não ficou disponível")
+                return False
+            return False
+
+        email_ok = await digitar("#username", email)
+        if not email_ok:
+            email_ok = await digitar("input[name='session_key']", email)
+        if not email_ok:
+            email_ok = await digitar("input[type='email']", email)
+        print(f"[SELENIUM] Email digitado: {email_ok}")
+
+        await asyncio.sleep(0.5)
+
+        pass_ok = await digitar("#password", password)
+        if not pass_ok:
+            pass_ok = await digitar("input[name='session_password']", password)
+        if not pass_ok:
+            pass_ok = await digitar("input[type='password']", password)
+        print(f"[SELENIUM] Senha digitada: {pass_ok}")
+
+        await asyncio.sleep(0.3)
+
+        click_ok = await click("button[type='submit']")
+        if not click_ok:
+            click_ok = await click("button.sign-in-form__submit-button")
+        if not click_ok:
+            click_ok = await click("//button[contains(text(), 'Entrar')]")
+        if not click_ok:
+            click_ok = await click("//button[contains(., 'Sign in')]")
+        print(f"[SELENIUM] Submit clicado: {click_ok}")
+        await asyncio.sleep(5)
+
+        for _ in range(30):
+            await asyncio.sleep(1)
+            try:
+                cur = await _run_in_thread(lambda: driver.current_url)
+                ttl = await get_title()
+                if "feed" in cur or "mynetwork" in cur or "/in/" in cur:
+                    print("[SELENIUM] Login OK")
+                    return True
+                if "checkpoint" in cur or "challenge" in cur:
+                    print("[SELENIUM] Bloqueio de segurança")
+                    return False
+            except Exception:
+                continue
+
+        print("[SELENIUM] Login não confirmado em 30s")
+        return False
+    except Exception as e:
+        print(f"[SELENIUM] Erro no login: {e}")
+        return False
 
 
 async def _verifica_sessao_valida() -> bool:
