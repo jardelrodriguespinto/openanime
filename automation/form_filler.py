@@ -35,8 +35,19 @@ def responder_pergunta(pergunta: str, perfil: dict, vaga_titulo: str = "", vaga_
     Gera resposta para pergunta de formulario de candidatura.
     Baseado primeiro no resumo do curriculo fornecido pelo usuario, depois no perfil.
     Sempre responde em ingles.
+    Suporta perguntas SELECT:label:opcoes e RADIO:label:opcoes.
     """
     perfil_resumido = _resumir_perfil(perfil)
+
+    opcoes_disponiveis = ""
+    pergunta_real = pergunta
+
+    if pergunta.startswith("SELECT:") or pergunta.startswith("RADIO:"):
+        parts = pergunta.split(":", 2)
+        pergunta_real = parts[1] if len(parts) > 1 else pergunta
+        opcoes_raw = parts[2] if len(parts) > 2 else ""
+        if opcoes_raw:
+            opcoes_disponiveis = f"\nAVAILABLE OPTIONS (you MUST choose exactly one of these): {opcoes_raw}\nIMPORTANT: Reply with ONLY the exact text of the chosen option, nothing else."
 
     contexto_parts = []
     if resumo_curriculo and resumo_curriculo.strip():
@@ -48,9 +59,10 @@ def responder_pergunta(pergunta: str, perfil: dict, vaga_titulo: str = "", vaga_
 
 {chr(10).join(contexto_parts)}
 
-Form question: {pergunta}
+Form question: {pergunta_real}{opcoes_disponiveis}
 
-IMPORTANT: Answer in ENGLISH based primarily on the resume text. If the resume doesn't mention relevant info, use the structured profile data or politely indicate willingness to learn. Never claim skills not present in the resume."""
+IMPORTANT: Answer in ENGLISH based primarily on the resume text. If the resume doesn't mention relevant info, use the structured profile data or politely indicate willingness to learn. Never claim skills not present in the resume.
+For numeric questions (years of experience, etc.), reply with ONLY the number."""
 
     messages = [
         {"role": "system", "content": SYSTEM},
@@ -59,8 +71,8 @@ IMPORTANT: Answer in ENGLISH based primarily on the resume text. If the resume d
 
     try:
         resposta = openrouter.converse(messages)
-        logger.info("form_filler: pergunta respondida | pergunta=%s...", pergunta[:50])
-        return resposta
+        logger.info("form_filler: pergunta respondida | pergunta=%s... | resposta=%s...", pergunta_real[:50], resposta[:50])
+        return resposta.strip()
     except Exception as e:
         logger.error("form_filler: erro LLM: %s", e)
         return _resposta_fallback(pergunta, perfil)
