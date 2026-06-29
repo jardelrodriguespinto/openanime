@@ -18,7 +18,7 @@ from automation.selenium_browser import (
     click, digitar, digitar_com_delay, digitar_robusto, digitar_no_elemento,
     screenshot_base64, fechar, get_driver, get_title, _run_in_thread,
     _wait_for_login_form_visible, clicar_entrar_com_email, forcar_formulario_login,
-    _scroll_and_focus_element
+    _scroll_and_focus_element, _try_convert_selector
 )
 from automation.browser import notify_browser_step, get_intervention_state
 from automation.form_filler import responder_pergunta
@@ -367,13 +367,7 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "", user_id
         print(f"[LINKEDIN] Iniciando aplicacao com Selenium para: {vaga_url}")
 
         driver = await get_driver()
-        title_ok = False
-        if driver:
-            try:
-                title_ok = bool(await get_title())
-            except Exception:
-                pass
-        if driver and await _driver_session_valida() and title_ok:
+        if driver and await _driver_session_valida():
             print(f"[LINKEDIN] Reutilizando browser existente: {driver.current_url}")
         else:
             if driver:
@@ -516,6 +510,19 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "", user_id
         return {"sucesso": False, "mensagem": str(e)}
 
 
+def _detectar_sucesso(html: str, url: str) -> bool:
+    """Detecta se a candidatura foi enviada com sucesso."""
+    html_lower = (html or "").lower()
+    url_lower = (url or "").lower()
+    sinais = [
+        "application submitted", "candidatura enviada", "your application was sent",
+        "applied", "candidatura realizada", "obrigado pela candidatura",
+        "thank you for applying", "sua candidatura foi enviada", "candidatura recebida",
+        "application sent", "we received your application",
+    ]
+    return any(s in html_lower or s in url_lower for s in sinais)
+
+
 async def _processar_formulario_multistep_selenium(driver, perfil: dict, curriculo_path: str, vaga_url: str, resumo_curriculo: str) -> dict:
     """Processa formulario Easy Apply multi-step via Selenium."""
     from automation.browser import notify_browser_step, wait_if_paused, get_intervention_state, set_intervention_state
@@ -575,10 +582,14 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
                         await asyncio.sleep(random.uniform(0.5, 1.0))
 
             if await _clicar_submit_selenium(driver, timeout=3000):
-                await asyncio.sleep(2)
+                await asyncio.sleep(3)
                 await notify_browser_step("step_"+str(step), "enviando", "Submetendo candidatura")
+                try:
+                    url_apos = driver.current_url
+                except Exception:
+                    url_apos = ""
                 html = driver.page_source
-                if _detectar_sucesso(html, driver.current_url):
+                if _detectar_sucesso(html, url_apos):
                     logger.info("linkedin_selenium: candidatura enviada com sucesso")
                     await notify_browser_step("step_"+str(step), "sucesso", "Candidatura enviada!")
                     b64 = await screenshot_base64()
@@ -592,9 +603,13 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
                     }
 
                 if await _clicar_submit_selenium(driver, timeout=3000):
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(3)
+                    try:
+                        url_apos = driver.current_url
+                    except Exception:
+                        url_apos = ""
                     html = driver.page_source
-                    if _detectar_sucesso(html, driver.current_url):
+                    if _detectar_sucesso(html, url_apos):
                         await notify_browser_step("step_"+str(step), "sucesso", "Candidatura enviada!")
                         b64 = await screenshot_base64()
                         await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
@@ -614,7 +629,11 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
             break
 
         html = driver.page_source
-        if _detectar_sucesso(html, driver.current_url):
+        try:
+            url_fim = driver.current_url
+        except Exception:
+            url_fim = ""
+        if _detectar_sucesso(html, url_fim):
             b64 = await screenshot_base64()
             await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
             await asyncio.sleep(2)
@@ -771,30 +790,49 @@ async def _clicar_next_selenium(driver, timeout: int = 5) -> bool:
         "button[aria-label='Continue to next step']",
         "button[aria-label='Continuar para a proxima etapa']",
         "button[data-easy-apply-next-button]",
-        "footer button.artdeco-button--primary",
+        "button.artdeco-button--primary[data-easy-apply-next-button]",
+        "button.jobs-apply-button--continue",
     ]
     return await click_qualquer_selenium(driver, seletores, timeout)
 
 
 async def click_qualquer_selenium(driver, seletores: list, timeout: int = 5) -> bool:
-    """Tenta clicar em qualquer um dos seletores fornecidos."""
+    """Tenta clicar em qualquer um dos seletores fornecidos, esperando o elemento ficar visível."""
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
     for sel in seletores:
-        try:
-            el = driver.find_element(By.CSS_SELECTOR, sel)
-            if el.is_displayed() and el.is_enabled():
+        for parte in sel.split(","):
+            parte = parte.strip()
+            if not parte:
+                continue
+            try:
+                by, value = _try_convert_selector(parte)
+                if by is None:
+                    continue
+                el = WebDriverWait(driver, timeout).until(
+                    EC.element_to_be_clickable((by, value))
+                )
                 el.click()
                 return True
-        except Exception:
-            continue
-    # Fallback com JavaScript
+            except Exception:
+                continue
     for sel in seletores:
-        try:
-            el = driver.find_element(By.CSS_SELECTOR, sel)
-            if el.is_displayed():
+        for parte in sel.split(","):
+            parte = parte.strip()
+            if not parte:
+                continue
+            try:
+                by, value = _try_convert_selector(parte)
+                if by is None:
+                    continue
+                el = WebDriverWait(driver, timeout).until(
+                    EC.visibility_of_element_located((by, value))
+                )
                 driver.execute_script("arguments[0].click();", el)
                 return True
-        except Exception:
-            continue
+            except Exception:
+                continue
     return False
 
 
@@ -907,10 +945,13 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
 
             driver = await get_driver()
             if driver:
-                cur = driver.current_url
-                if "jobs" not in cur.lower():
-                    await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
-                    await asyncio.sleep(2)
+                try:
+                    cur = driver.current_url
+                    if "jobs" not in cur.lower():
+                        await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
+                        await asyncio.sleep(2)
+                except Exception:
+                    pass
 
                 try:
                     body = driver.find_element(By.TAG_NAME, "body")
