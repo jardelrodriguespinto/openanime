@@ -7,22 +7,35 @@ import asyncio
 import logging
 import os
 import re
+import random
 
 from dotenv import load_dotenv
 
-# Garante que .env é carregado
 load_dotenv()
 
 from automation.selenium_browser import (
     nova_pagina, navegar, wait_for_selector, wait_for_selector_visible,
-    click, digitar, digitar_com_delay, digitar_robusto, digitar_no_elemento, screenshot_base64, fechar, get_driver, get_title, _run_in_thread, _wait_for_login_form_visible,
-    clicar_entrar_com_email, forcar_formulario_login, _scroll_and_focus_element
+    click, digitar, digitar_com_delay, digitar_robusto, digitar_no_elemento,
+    screenshot_base64, fechar, get_driver, get_title, _run_in_thread,
+    _wait_for_login_form_visible, clicar_entrar_com_email, forcar_formulario_login,
+    _scroll_and_focus_element
 )
 from automation.browser import notify_browser_step, get_intervention_state
+from automation.form_filler import responder_pergunta
 from selenium.webdriver.common.by import By
 from selenium.common.exceptions import InvalidSessionIdException, WebDriverException
 
 logger = logging.getLogger(__name__)
+
+
+# Campos que nao sao "perguntas customizadas" — ja sao preenchidos automaticamente
+_CAMPOS_PADRAO = {
+    "telefone", "phone", "email", "nome", "name", "sobrenome", "lastname",
+    "primeiro nome", "first name", "cidade", "city", "pais", "country",
+    "endereco", "address", "cep", "zip", "estado", "state",
+    "país", "primeiro_nome", "ultimo_nome", "last_name", "first_name",
+    "numero", "number", "nacionalidade", "nacionalidade",
+}
 
 
 def _get_linkedin_email() -> str:
@@ -322,8 +335,22 @@ def _esta_logado(url: str, title: str) -> bool:
     return False
 
 
-async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "") -> dict:
-    """Aplica em vaga LinkedIn Easy Apply via Selenium."""
+async def _get_resumo_curriculo(user_id: str) -> str:
+    """Carrega resumo do curriculo do perfil profissional."""
+    try:
+        from graph.neo4j_client import get_neo4j
+        neo4j = get_neo4j()
+        return neo4j.get_resumo_curriculo(user_id) or ""
+    except Exception:
+        return ""
+
+
+async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "", user_id: str = "admin") -> dict:
+    """
+    Aplica em vaga LinkedIn Easy Apply via Selenium com multi-step handling.
+    Usa IA para responder perguntas customizadas baseadas no resumo do curriculo.
+    Sempre responde em ingles.
+    """
     if not _get_linkedin_email() or not _get_linkedin_password():
         return {
             "sucesso": False,
@@ -331,11 +358,14 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "") -> dict
             "mensagem": "Configure LINKEDIN_EMAIL e LINKEDIN_PASSWORD no .env.",
         }
 
+    resumo_curriculo = perfil.get("resumo_curriculo", "") or ""
+    if not resumo_curriculo:
+        resumo_curriculo = await _get_resumo_curriculo(user_id)
+
     try:
         await notify_browser_step("selenium_linkedin", "iniciando", "Abrindo LinkedIn")
         print(f"[LINKEDIN] Iniciando aplicacao com Selenium para: {vaga_url}")
 
-        # Verifica sessão existente - reutiliza se válida
         driver = await get_driver()
         if driver and await _driver_session_valida():
             print(f"[LINKEDIN] Reutilizando browser existente: {driver.current_url}")
@@ -350,7 +380,6 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "") -> dict
             await nova_pagina("https://www.linkedin.com", reutilizar=False)
             await asyncio.sleep(2)
 
-        # Garante login antes de prosseguir
         login_ok = await _garantir_login()
         if not login_ok:
             return {
@@ -363,7 +392,6 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "") -> dict
         current_url = driver.current_url if driver else ""
         print(f"[LINKEDIN] Logado com sucesso. URL: {current_url}")
 
-        # Navega para a vaga apenas se não estiver já na página da vaga
         if vaga_url not in current_url:
             await notify_browser_step("selenium_linkedin", "navegando", f"Abrindo vaga")
             await navegar(vaga_url)
@@ -373,7 +401,6 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "") -> dict
 
         print(f"[LINKEDIN] Vaga carregada: {await get_title()}")
 
-        # Clica em Easy Apply (ingles ou portugues)
         await notify_browser_step("selenium_linkedin", "easy_apply", "Procurando Easy Apply...")
         easy_btn = await wait_for_selector_visible(
             "button.jobs-apply-button, button[data-control-name='apply_show_modal'], "
@@ -393,7 +420,6 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "") -> dict
         print("[LINKEDIN] Clicou em Easy Apply")
         await asyncio.sleep(3)
 
-        # Verifica se modal abriu
         modal = await wait_for_selector_visible(".jobs-easy-apply-modal, .jobs-easy-apply__modal", timeout=10)
         if not modal:
             print("[LINKEDIN] Modal Easy Apply nao apareceu")
@@ -404,61 +430,9 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "") -> dict
 
         print("[LINKEDIN] Modal aberto")
 
-        # Preenche campos do formulario
-        campos = 0
-        nome_completo = perfil.get("nome", "")
-        partes = nome_completo.split()
-        if len(partes) >= 2:
-            primeiro_nome = partes[0]
-            ultimo_nome = " ".join(partes[1:])
-        else:
-            primeiro_nome = nome_completo
-            ultimo_nome = ""
-
-        campos_nomes = [
-            ("input[name='firstName'], #first-name, input[id*='firstName']", primeiro_nome),
-            ("input[name='lastName'], #last-name, input[id*='lastName']", ultimo_nome),
-            ("input[name='email'], #email, input[type='email'], input[placeholder*='Email']", perfil.get("email", _get_linkedin_email())),
-            ("input[name='phone'], #phone, input[type='tel'], input[placeholder*='Phone'], input[aria-label*='Phone Number']", str(perfil.get("telefone", perfil.get("phone", "")))),
-        ]
-        for seletor, texto in campos_nomes:
-            if texto and await digitar_com_delay(seletor, str(texto), delay_min=20, delay_max=60):
-                campos += 1
-                print(f"[LINKEDIN] Preencheu: {seletor[:50]} = {texto[:30]}")
-
-        await notify_browser_step("selenium_linkedin", "preenchido", f"Campos preenchidos: {campos}")
-
-        # Clica em Enviar
-        await notify_browser_step("selenium_linkedin", "enviando", "Enviando candidatura...")
-        submit = await wait_for_selector_visible(
-            "button[aria-label='Enviar candidatura'], button[aria-label='Submit application'], button[type='submit']",
-            timeout=10
-        )
-        if submit:
-            await click("button[aria-label='Enviar candidatura'], button[aria-label='Submit application'], button[type='submit']")
-            await asyncio.sleep(3)
-            print("[LINKEDIN] Clicou em Enviar")
-
-            # Verifica se foi sucesso
-            sucesso = await wait_for_selector_visible(".artdeco-toast", timeout=5)
-            if sucesso:
-                print("[LINKEDIN] Candidatura ENVIADA com sucesso!")
-                await notify_browser_step("selenium_linkedin", "sucesso", "Candidatura enviada!")
-                b64 = await screenshot_base64()
-                await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
-                return {"sucesso": True, "mensagem": "Candidatura enviada no LinkedIn!", "screenshot": b64[:100] if b64 else ""}
-            else:
-                print("[LINKEDIN] Enviou - aguardando confirmacao")
-                await notify_browser_step("selenium_linkedin", "sucesso", "Candidatura enviada!")
-                b64 = await screenshot_base64()
-                await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
-                return {"sucesso": True, "mensagem": "Candidatura enviada (aguardando confirmacao).", "screenshot": b64[:100] if b64 else ""}
-        else:
-            print("[LINKEDIN] Botao enviar nao encontrado")
-            await notify_browser_step("selenium_linkedin", "erro", "Botao enviar nao encontrado")
-            b64 = await screenshot_base64()
-            await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
-            return {"sucesso": False, "mensagem": "Botao enviar nao encontrado. Complete manualmente.", "screenshot": b64[:100] if b64 else ""}
+        await notify_browser_step("selenium_linkedin", "preenchendo", "Preenchendo formulário multi-step")
+        resultado = await _processar_formulario_multistep_selenium(driver, perfil, curriculo_path, vaga_url, resumo_curriculo)
+        return resultado
 
     except Exception as e:
         logger.error(f"aplicar_linkedin_selenium erro: {e}")
@@ -471,10 +445,320 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "") -> dict
         return {"sucesso": False, "mensagem": str(e)}
 
 
-async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5) -> dict:
+async def _processar_formulario_multistep_selenium(driver, perfil: dict, curriculo_path: str, vaga_url: str, resumo_curriculo: str) -> dict:
+    """Processa formulario Easy Apply multi-step via Selenium."""
+    from automation.browser import notify_browser_step, wait_if_paused, get_intervention_state, set_intervention_state
+
+    perguntas_customizadas = []
+    respostas_geradas = {}
+    max_steps = 12
+
+    try:
+        vaga_titulo = ""
+        try:
+            vaga_titulo = driver.title or ""
+        except Exception:
+            pass
+
+        for step in range(max_steps):
+            control = await get_intervention_state()
+            if control.get("paused") or control.get("intervention_type") == "manual":
+                logger.info("linkedin_selenium: pausado pelo usuario no step %d", step)
+                await notify_browser_step("step_"+str(step), "pausado", "Intervenção manual necessária")
+                return {
+                    "sucesso": False,
+                    "pausado": True,
+                    "mensagem": "Automação pausada pelo usuário — intervenção manual necessária",
+                    "acao_necessaria": "intervencao_manual",
+                    "step": step,
+                }
+
+            if control.get("current_action") == "pular":
+                logger.info("linkedin_selenium: usuario pediu para pular step %d", step)
+                await set_intervention_state("current_action", "rodando")
+                await notify_browser_step("step_"+str(step), "pulado", "Usuário pediu pular")
+                continue
+
+            await asyncio.sleep(random.uniform(0.8, 1.5))
+            await notify_browser_step("step_"+str(step), "preenchendo", "Preenchendo campos do formulário")
+            await wait_if_paused(None, "step_"+str(step))
+
+            await _preencher_step_selenium(driver, perfil, curriculo_path)
+
+            perguntas_step = await _detectar_perguntas_nao_respondidas_selenium(driver)
+            if perguntas_step:
+                await notify_browser_step("step_"+str(step), "respondendo", f"{len(perguntas_step)} pergunta(s) customizada(s)")
+                for pergunta in perguntas_step:
+                    if pergunta not in respostas_geradas:
+                        await wait_if_paused(None, "step_"+str(step))
+                        resposta = responder_pergunta(
+                            pergunta, perfil,
+                            vaga_titulo=vaga_titulo,
+                            vaga_empresa="",
+                            resumo_curriculo=resumo_curriculo
+                        )
+                        respostas_geradas[pergunta] = resposta
+                        await notify_browser_step("step_"+str(step), "respondendo", f"Pergunta: {pergunta[:40]}...")
+                        await _preencher_resposta_customizada_selenium(driver, pergunta, resposta)
+                        perguntas_customizadas.append(pergunta)
+                        await asyncio.sleep(random.uniform(0.5, 1.0))
+
+            if await _clicar_submit_selenium(driver, timeout=3000):
+                await asyncio.sleep(2)
+                await notify_browser_step("step_"+str(step), "enviando", "Submetendo candidatura")
+                html = driver.page_source
+                if _detectar_sucesso(html, driver.current_url):
+                    logger.info("linkedin_selenium: candidatura enviada com sucesso")
+                    await notify_browser_step("step_"+str(step), "sucesso", "Candidatura enviada!")
+                    b64 = await screenshot_base64()
+                    await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
+                    await asyncio.sleep(2)
+                    return {
+                        "sucesso": True,
+                        "perguntas_respondidas": perguntas_customizadas,
+                        "mensagem": "Candidatura enviada com sucesso via LinkedIn Easy Apply!",
+                        "screenshot": b64[:100] if b64 else "",
+                    }
+
+                if await _clicar_submit_selenium(driver, timeout=3000):
+                    await asyncio.sleep(2)
+                    html = driver.page_source
+                    if _detectar_sucesso(html, driver.current_url):
+                        await notify_browser_step("step_"+str(step), "sucesso", "Candidatura enviada!")
+                        b64 = await screenshot_base64()
+                        await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
+                        await asyncio.sleep(2)
+                        return {
+                            "sucesso": True,
+                            "perguntas_respondidas": perguntas_customizadas,
+                            "mensagem": "Candidatura enviada com sucesso via LinkedIn Easy Apply!",
+                            "screenshot": b64[:100] if b64 else "",
+                        }
+
+            await notify_browser_step("step_"+str(step), "navegando", "Avançando para próximo step")
+            if await _clicar_next_selenium(driver, timeout=3000):
+                await asyncio.sleep(2)
+                continue
+
+            break
+
+        html = driver.page_source
+        if _detectar_sucesso(html, driver.current_url):
+            b64 = await screenshot_base64()
+            await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
+            await asyncio.sleep(2)
+            return {
+                "sucesso": True,
+                "perguntas_respondidas": perguntas_customizadas,
+                "mensagem": "Candidatura enviada com sucesso via LinkedIn Easy Apply!",
+                "screenshot": b64[:100] if b64 else "",
+            }
+
+        b64 = await screenshot_base64()
+        await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
+        await asyncio.sleep(2)
+        return {
+            "sucesso": False,
+            "motivo_falha": "formulario_incompleto",
+            "mensagem": f"Nao consegui completar o formulario. Candidate-se manualmente: {vaga_url}",
+            "screenshot": b64[:100] if b64 else "",
+        }
+    except Exception as e:
+        logger.error(f"_processar_formulario_multistep_selenium erro: {e}")
+        try:
+            await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
+            await asyncio.sleep(2)
+        except Exception:
+            pass
+        return {
+            "sucesso": False,
+            "motivo_falha": "erro_tecnico",
+            "mensagem": f"Erro no formulario. Candidate-se manualmente: {vaga_url}",
+        }
+
+
+async def _preencher_step_selenium(driver, perfil: dict, curriculo_path: str) -> None:
+    """Preenche campos conhecidos no step atual via Selenium."""
+    nome_completo = perfil.get("nome", "")
+    partes = nome_completo.split()
+    primeiro_nome = partes[0] if partes else nome_completo
+    ultimo_nome = " ".join(partes[1:]) if len(partes) >= 2 else ""
+
+    campos_nomes = [
+        ("input[name='firstName'], #first-name, input[id*='firstName']", primeiro_nome),
+        ("input[name='lastName'], #last-name, input[id*='lastName']", ultimo_nome),
+        ("input[name='email'], #email, input[type='email'], input[placeholder*='Email']", perfil.get("email", _get_linkedin_email())),
+        ("input[name='phone'], #phone, input[type='tel'], input[placeholder*='Phone'], input[aria-label*='Phone Number']", str(perfil.get("telefone", perfil.get("phone", "")))),
+        ("input[aria-label*='City'], input[aria-label*='Cidade'], input[name*='city']", perfil.get("localizacao", "").split(",")[0].strip() if perfil.get("localizacao") else ""),
+    ]
+    for seletor, texto in campos_nomes:
+        if not texto:
+            continue
+        if await digitar_com_delay(seletor, str(texto), delay_min=20, delay_max=60):
+            try:
+                print(f"[LINKEDIN] Preencheu: {seletor[:50]} = {texto[:30]}")
+            except Exception:
+                pass
+
+    if curriculo_path:
+        try:
+            file_input = driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
+            for fi in file_input:
+                if fi.is_displayed():
+                    fi.send_keys(curriculo_path)
+                    await asyncio.sleep(1.5)
+                    break
+        except Exception:
+            pass
+
+    try:
+        selects = driver.find_elements(By.CSS_SELECTOR, "select")
+        for sel_elem in selects:
+            if not sel_elem.is_displayed():
+                continue
+            options = sel_elem.find_elements(By.TAG_NAME, "option")
+            for opt in options:
+                text = (opt.text or "").strip().lower()
+                if text in ("yes", "sim", "authorized", "autorizado"):
+                    val = opt.get_attribute("value")
+                    if val:
+                        from selenium.webdriver.support.ui import Select
+                        Select(sel_elem).select_by_value(val)
+                        break
+    except Exception:
+        pass
+
+
+async def _detectar_perguntas_nao_respondidas_selenium(driver) -> list:
+    """Detecta campos de pergunta ainda vazios no step atual via Selenium."""
+    perguntas = []
+    try:
+        inputs = driver.find_elements(By.CSS_SELECTOR,
+            "input[type='text']:not([value]), input[type='text'][value=''], textarea"
+        )
+        for inp in inputs:
+            if not inp.is_displayed():
+                continue
+            label = await _get_label_selenium(driver, inp)
+            if not label:
+                continue
+            label_lower = label.lower()
+            if any(p in label_lower for p in _CAMPOS_PADRAO):
+                continue
+            current_val = ""
+            try:
+                current_val = inp.get_attribute("value") or ""
+            except Exception:
+                pass
+            if not current_val:
+                perguntas.append(label)
+    except Exception:
+        pass
+    return perguntas[:6]
+
+
+async def _preencher_resposta_customizada_selenium(driver, pergunta: str, resposta: str) -> None:
+    """Preenche campo de pergunta customizada pela label via Selenium."""
+    try:
+        labels = driver.find_elements(By.CSS_SELECTOR, "label")
+        for label in labels:
+            try:
+                label_text = (label.text or "").lower()
+            except Exception:
+                continue
+            if pergunta.lower()[:30] in label_text:
+                label_for = label.get_attribute("for")
+                if label_for:
+                    el = driver.find_elements(By.ID, label_for)
+                    if el and el[0].is_displayed():
+                        tag = el[0].tag_name.lower()
+                        if tag == "textarea":
+                            el[0].clear()
+                            el[0].send_keys(resposta[:500])
+                        else:
+                            el[0].clear()
+                            el[0].send_keys(resposta[:200])
+                        return
+    except Exception as e:
+        logger.debug("linkedin_selenium: erro ao preencher resposta: %s", e)
+
+
+async def _clicar_submit_selenium(driver, timeout: int = 5) -> bool:
+    """Clica no botao Submit/Enviar."""
+    seletores = [
+        "button[aria-label='Submit application']",
+        "button[aria-label='Enviar candidatura']",
+        "button[data-control-name='submit_apply']",
+        "button[type='submit']",
+        "button:has-text('Submit application')",
+        "button:has-text('Enviar candidatura')",
+        "button:has-text('Enviar')",
+        "button:has-text('Finalizar')",
+    ]
+    return await click_qualquer_selenium(driver, seletores, timeout)
+
+
+async def _clicar_next_selenium(driver, timeout: int = 5) -> bool:
+    """Clica no botao Next/Continuar."""
+    seletores = [
+        "button[aria-label='Continue to next step']",
+        "button[aria-label='Continuar para a proxima etapa']",
+        "button[data-easy-apply-next-button]",
+        "button:has-text('Next')",
+        "button:has-text('Continuar')",
+        "button:has-text('Proximo')",
+        "footer button.artdeco-button--primary",
+    ]
+    return await click_qualquer_selenium(driver, seletores, timeout)
+
+
+async def click_qualquer_selenium(driver, seletores: list, timeout: int = 5) -> bool:
+    """Tenta clicar em qualquer um dos seletores fornecidos."""
+    for sel in seletores:
+        try:
+            el = driver.find_element(By.CSS_SELECTOR, sel)
+            if el.is_displayed() and el.is_enabled():
+                el.click()
+                return True
+        except Exception:
+            continue
+    # Fallback com JavaScript
+    for sel in seletores:
+        try:
+            el = driver.find_element(By.CSS_SELECTOR, sel)
+            if el.is_displayed():
+                driver.execute_script("arguments[0].click();", el)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+async def _get_label_selenium(driver, inp) -> str:
+    """Retorna label associada a um input via Selenium."""
+    try:
+        input_id = inp.get_attribute("id")
+        if input_id:
+            labels = driver.find_elements(By.CSS_SELECTOR, f"label[for='{input_id}']")
+            if labels:
+                return (labels[0].text or "").strip()
+        aria = inp.get_attribute("aria-label")
+        if aria:
+            return aria.strip()
+        placeholder = inp.get_attribute("placeholder")
+        if placeholder:
+            return placeholder.strip()
+    except Exception:
+        pass
+    return ""
+
+
+async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, user_id: str = "admin") -> dict:
     """
     Aplica em vagas visíveis na página atual do LinkedIn.
     Usa a página já aberta (busca, easy-apply, etc.) sem forçar navegação.
+    Verifica se já se candidatou antes de aplicar.
+    Navega de volta para a página de jobs após cada aplicação.
     """
     if not _get_linkedin_email() or not _get_linkedin_password():
         return {
@@ -502,7 +786,6 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5) -> 
             await nova_pagina("https://www.linkedin.com", reutilizar=False)
             await asyncio.sleep(2)
 
-        # Garante login automático antes de aplicar
         login_ok = await _garantir_login()
         if not login_ok:
             return {
@@ -515,12 +798,12 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5) -> 
         current_url = driver.current_url
         url_lower = current_url.lower()
 
-        # Se NÃO está na página de Easy Apply, navega para lá
         if "jobs" not in url_lower:
             await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
             await asyncio.sleep(3)
 
         await notify_browser_step("selenium_linkedin", "iniciando", f"Página atual: {current_url}")
+        await notify_browser_step("selenium_linkedin", "iniciando", f"Resumo curriculo: {'SIM' if (perfil.get('resumo_curriculo') or await _get_resumo_curriculo(user_id)) else 'NAO'}")
 
         resultados = {"sucesso": True, "aplicacoes": [], "falhas": 0}
 
@@ -537,14 +820,27 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5) -> 
                 await notify_browser_step("selenium_linkedin", "finalizando", "Nenhuma vaga Easy Apply encontrada")
                 break
 
+            vaga_id = _extrair_vaga_id(vaga_url)
+            if vaga_id:
+                try:
+                    from graph.neo4j_client import get_neo4j
+                    neo4j = get_neo4j()
+                    ja_aplicou = neo4j.ja_se_candidatou(user_id, vaga_id)
+                    if ja_aplicou:
+                        print(f"[LINKEDIN] Ja candidatou para {vaga_id} — pulando")
+                        await notify_browser_step("selenium_linkedin", f"vaga_{i+1}", "Ja aplicou — pulando")
+                        await asyncio.sleep(1)
+                        continue
+                except Exception:
+                    pass
+
             await notify_browser_step("selenium_linkedin", f"vaga_{i+1}", f"Aplicando em: {vaga_url[:60]}...")
 
-            resultado = await aplicar(vaga_url, perfil)
+            resultado = await aplicar(vaga_url, perfil, user_id=user_id)
             resultados["aplicacoes"].append(resultado)
             if not resultado.get("sucesso"):
                 resultados["falhas"] += 1
 
-            # Volta para a página de jobs após cada aplicação
             driver = await get_driver()
             if driver:
                 cur = driver.current_url
@@ -552,7 +848,14 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5) -> 
                     await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
                     await asyncio.sleep(2)
 
-            await asyncio.sleep(2)
+                try:
+                    body = driver.find_element(By.TAG_NAME, "body")
+                    await _scroll_and_focus_element(driver, body)
+                    await asyncio.sleep(1)
+                except Exception:
+                    pass
+
+        await asyncio.sleep(2)
 
         await notify_browser_step("selenium_linkedin", "finalizando", f"Concluído: {len(resultados['aplicacoes'])} vagas processadas")
         return resultados
@@ -564,6 +867,14 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5) -> 
             "mensagem": str(e),
             "falhas": 1,
         }
+
+
+def _extrair_vaga_id(url: str) -> str:
+    if not url:
+        return ""
+    if "/jobs/view/" in url:
+        return url.split("/jobs/view/")[1].split("/")[0].split("?")[0]
+    return url
 
 
 async def _driver_session_valida() -> bool:

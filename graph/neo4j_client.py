@@ -1643,6 +1643,7 @@ class Neo4jClient:
                 "pretensao_salarial": dados.get("pretensao_salarial"),
                 "modalidade_preferida": dados.get("modalidade_preferida"),
                 "objetivo_profissional": dados.get("objetivo"),
+                "resumo_curriculo": dados.get("resumo_curriculo"),
             }.items() if v}
 
             if campos:
@@ -1726,6 +1727,24 @@ class Neo4jClient:
         with self.driver.session() as session:
             session.run(cypher, tid=user_id, cargo=cargo)
 
+    def salvar_resumo_curriculo(self, user_id: str, resumo: str) -> None:
+        cypher = """
+        MERGE (u:Usuario {user_id: $tid})
+        SET u.resumo_curriculo = $resumo
+        """
+        with self.driver.session() as session:
+            session.run(cypher, tid=user_id, resumo=resumo)
+
+    def get_resumo_curriculo(self, user_id: str) -> str:
+        cypher = """
+        MATCH (u:Usuario {user_id: $tid})
+        RETURN coalesce(u.resumo_curriculo, '') AS resumo
+        """
+        with self.driver.session() as session:
+            result = session.run(cypher, tid=user_id)
+            record = result.single()
+            return record["resumo"] if record else ""
+
     def get_perfil_profissional(self, user_id: str) -> dict:
         cypher = """
         MATCH (u:Usuario {user_id: $tid})
@@ -1758,6 +1777,7 @@ class Neo4jClient:
                 "pretensao_salarial": u.get("pretensao_salarial", ""),
                 "modalidade_preferida": u.get("modalidade_preferida", ""),
                 "objetivo": u.get("objetivo_profissional", ""),
+                "resumo_curriculo": u.get("resumo_curriculo", ""),
                 "habilidades": [h for h in record["habilidades"] if h.get("nome")],
                 "experiencias": [e for e in record["experiencias"] if e.get("empresa")],
                 "formacao": [f for f in record["formacao"] if f.get("curso")],

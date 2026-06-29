@@ -348,7 +348,8 @@ async def _processar_formulario_multistep(page, perfil: dict, curriculo_path: st
                     resposta = responder_pergunta(
                         pergunta, perfil,
                         vaga_titulo="vaga LinkedIn",
-                        vaga_empresa=""
+                        vaga_empresa="",
+                        resumo_curriculo=perfil.get("resumo_curriculo", "")
                     )
                     respostas_geradas[pergunta] = resposta
                     await notify_browser_step("step_"+str(step), "respondendo", f"Pergunta: {pergunta[:40]}...")

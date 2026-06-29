@@ -230,6 +230,15 @@ VUE_DASHBOARD = """
             <button @click="aplicarVagasVisiveisLinkedin" style="padding:8px 16px;background:#00ff88;border:none;border-radius:4px;color:#0f0f23;font-weight:bold;cursor:pointer;">🤖 Aplicar Vagas Visíveis</button>
         </div>
 
+        <div style="background:#16213e;padding:12px 15px;border-radius:8px;margin-bottom:15px;">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+                <strong style="color:#00d4ff">📝 Currículo / Informações Pessoais</strong>
+                <button @click="salvarResumoCurriculo" style="padding:6px 14px;background:#00ff88;border:none;border-radius:4px;color:#0f0f23;font-weight:bold;cursor:pointer;">💾 Salvar Currículo</button>
+            </div>
+            <textarea v-model="resumoCurriculo" rows="6" placeholder="Cole aqui o texto do seu currículo ou informações pessoais (qualificações, experiências, habilidades, etc.). A IA usará estas informações para preencher os formulários de candidatura em inglês." style="width:100%;padding:10px;border-radius:6px;background:#1a1a2e;color:#fff;border:1px solid #333;font-size:0.9rem;resize:vertical;"></textarea>
+            <div style="font-size:0.75rem;color:#888;margin-top:6px;">Este texto será usado pela IA para responder perguntas dos formulários. Sempre respondido em inglês.</div>
+        </div>
+
         <div class="browser-panel" v-if="browser.screenshot || browserControl.paused || browserStep.step">
             <h4>🖥️ Browser em Tempo Real | {{browserStep.step || 'Monitoramento'}}</h4>
             <div class="browser-viewport">
@@ -346,6 +355,7 @@ VUE_DASHBOARD = """
                 vagaSelecionada: '',
                 plataformaSelecionada: '',
                 plataformaAplicacao: '',
+                resumoCurriculo: '',
             }
         },
         computed: {
@@ -376,6 +386,7 @@ VUE_DASHBOARD = """
             this.initSocket();
             this.carregarAutomacao();
             this.carregarBrowser();
+            this.carregarResumoCurriculo();
             this.historicoInterval = setInterval(this.carregarAutomacao, 3000);
             this.browserInterval = setInterval(this.carregarBrowser, 1000);
         },
@@ -574,6 +585,30 @@ VUE_DASHBOARD = """
                         alert('Aplicação em vagas visíveis iniciada! Veja o browser em tempo real.');
                     } else {
                         alert('Erro: ' + (d.message || 'Falha ao iniciar'));
+                    }
+                } catch(e) {
+                    alert('Erro de conexão');
+                }
+            },
+            async carregarResumoCurriculo() {
+                try {
+                    const r = await fetch('/api/perfil/resumo-curriculo');
+                    const d = await r.json();
+                    this.resumoCurriculo = d.resumo || '';
+                } catch(e) {}
+            },
+            async salvarResumoCurriculo() {
+                try {
+                    const r = await fetch('/api/perfil/resumo-curriculo', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({resumo: this.resumoCurriculo})
+                    });
+                    const d = await r.json();
+                    if (d.success) {
+                        alert('Currículo salvo com sucesso!');
+                    } else {
+                        alert('Erro: ' + (d.error || 'Falha ao salvar'));
                     }
                 } catch(e) {
                     alert('Erro de conexão');
@@ -982,7 +1017,7 @@ async def aplicar_vagas_visiveis_linkedin_endpoint(request: Request):
             set_browser_current_step("visiveis", "aplicando", "Buscando vagas na página")
             emit_status_update()
 
-            resultado = await aplicar_vagas_visiveis_na_pagina(perfil, max_vagas)
+            resultado = await aplicar_vagas_visiveis_na_pagina(perfil, max_vagas, user_id)
 
             _set_automacao_status(
                 False,
@@ -1056,16 +1091,21 @@ async def limpar_cache():
 
 @fastapi_app.get("/api/browser/screenshot")
 async def get_browser_screenshot():
-    """Retorna screenshot base64 da pagina ativa do Playwright."""
+    """Retorna screenshot base64 da pagina ativa (Playwright ou Selenium)."""
     try:
         from automation.browser import get_active_page, screenshot_base64
         page = await get_active_page()
-        if not page:
-            return JSONResponse({"success": False, "message": "Nenhuma pagina ativa"}, status_code=404)
-        img = await screenshot_base64(page)
-        if not img:
-            return JSONResponse({"success": False, "message": "Falha ao capturar screenshot"}, status_code=500)
-        return JSONResponse({"success": True, "screenshot": img, "url": page.url})
+        if page:
+            img = await screenshot_base64(page)
+            if img:
+                return JSONResponse({"success": True, "screenshot": img, "url": page.url})
+        from automation.selenium_browser import screenshot_base64 as sel_screenshot
+        img = await sel_screenshot()
+        if img:
+            driver = await get_driver()
+            url = driver.current_url if driver else ""
+            return JSONResponse({"success": True, "screenshot": img, "url": url})
+        return JSONResponse({"success": False, "message": "Nenhuma pagina ativa"}, status_code=404)
     except Exception as e:
         return JSONResponse({"success": False, "message": str(e)}, status_code=500)
 
@@ -1151,6 +1191,30 @@ async def get_browser_controle():
 @fastapi_app.get("/api/browser/step")
 async def get_browser_step():
     return JSONResponse(_browser_current_step)
+
+
+@fastapi_app.get("/api/perfil/resumo-curriculo")
+async def get_resumo_curriculo():
+    user_id = os.getenv("DASHBOARD_USER_ID", "admin")
+    try:
+        neo4j = get_neo4j()
+        resumo = neo4j.get_resumo_curriculo(user_id)
+        return JSONResponse({"resumo": resumo})
+    except Exception as e:
+        return JSONResponse({"resumo": "", "error": str(e)})
+
+
+@fastapi_app.post("/api/perfil/resumo-curriculo")
+async def set_resumo_curriculo(request: Request):
+    body = await request.json()
+    resumo = body.get("resumo", "")
+    user_id = os.getenv("DASHBOARD_USER_ID", "admin")
+    try:
+        neo4j = get_neo4j()
+        neo4j.salvar_resumo_curriculo(user_id, resumo)
+        return JSONResponse({"success": True})
+    except Exception as e:
+        return JSONResponse({"success": False, "error": str(e)})
 
 
 @fastapi_app.post("/api/browser/step")
