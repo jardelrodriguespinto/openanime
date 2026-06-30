@@ -910,15 +910,18 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
             if perguntas_step:
                 await notify_browser_step("step_"+str(step), "respondendo", f"{len(perguntas_step)} pergunta(s) customizada(s)")
                 for pergunta in perguntas_step:
+                    await wait_if_paused(None, "step_"+str(step))
+                    # Pular pressionado durante resposta: sai sem clicar botao
+                    ctrl = await get_intervention_state()
+                    if ctrl.get("current_action") == "pular":
+                        pular_agora = True
+                        break
+                    # Gera a resposta UMA vez (cacheia). Mas o PREENCHIMENTO é sempre
+                    # tentado: se a pergunta foi re-detectada, é porque o campo ainda
+                    # está vazio (fill anterior falhou por stale) → preenche de novo.
                     if pergunta not in respostas_geradas:
-                        await wait_if_paused(None, "step_"+str(step))
-                        # Pular pressionado durante resposta: sai sem clicar botao
-                        ctrl = await get_intervention_state()
-                        if ctrl.get("current_action") == "pular":
-                            pular_agora = True
-                            break
                         try:
-                            resposta = responder_pergunta(
+                            respostas_geradas[pergunta] = responder_pergunta(
                                 pergunta, perfil,
                                 vaga_titulo=vaga_titulo,
                                 vaga_empresa="",
@@ -927,13 +930,23 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
                             )
                         except Exception as _rpe:
                             _registrar_run_log(f"FORM step {step}: responder_pergunta ERRO: {_rpe}")
-                            resposta = ""
-                        respostas_geradas[pergunta] = resposta
-                        await notify_browser_step("step_"+str(step), "respondendo", f"Pergunta: {pergunta[:40]}...")
-                        _registrar_run_log(f"FORM step {step}: resp '{pergunta[:35]}' = '{str(resposta)[:25]}'")
-                        await _preencher_resposta_customizada_selenium(driver, pergunta, resposta)
+                            respostas_geradas[pergunta] = ""
+                    resposta = respostas_geradas[pergunta]
+                    await notify_browser_step("step_"+str(step), "respondendo", f"Pergunta: {pergunta[:40]}...")
+                    _registrar_run_log(f"FORM step {step}: resp '{pergunta[:35]}' = '{str(resposta)[:25]}'")
+                    # Retry on stale: cada resposta (textarea longa) re-renderiza o
+                    # form (React) e deixa os próximos campos obsoletos — era o
+                    # "deixa um ou outro pra trás e não avança".
+                    for _tp in range(3):
+                        try:
+                            await _preencher_resposta_customizada_selenium(driver, pergunta, resposta)
+                            break
+                        except StaleElementReferenceException:
+                            await asyncio.sleep(0.6)
+                    if pergunta not in perguntas_customizadas:
                         perguntas_customizadas.append(pergunta)
-                        await asyncio.sleep(random.uniform(0.5, 1.0))
+                    # Deixa o React assentar antes do próximo campo (evita stale).
+                    await asyncio.sleep(random.uniform(0.8, 1.3))
 
             if pular_agora:
                 await set_intervention_state("current_action", "rodando")
@@ -1737,7 +1750,13 @@ async def _preencher_checkbox_selenium(driver, label_text: str, resposta: str) -
         if not deveria_marcar:
             print(f"[LINKEDIN] Checkbox '{label_text[:40]}' → IA respondeu não marcar")
             return
-        result = await _run_in_thread(_check)
+        result = False
+        for _tent in range(4):  # retry on stale (re-render do React após textareas)
+            try:
+                result = await _run_in_thread(_check)
+                break
+            except StaleElementReferenceException:
+                await asyncio.sleep(0.6)
         if result:
             print(f"[LINKEDIN] Marcou checkbox: {label_text[:40]}")
         else:
@@ -2133,7 +2152,16 @@ async def _preencher_radio_selenium(driver, label_text: str, resposta: str) -> N
         return False
 
     try:
-        marcou = await _run_in_thread(_fill)
+        # Retry on stale: responder textareas re-renderiza o form (React) e deixa os
+        # elementos de radio obsoletos. Re-acha tudo e tenta de novo (era o "deixa
+        # um campo pra trás" → não avança).
+        marcou = False
+        for _tent in range(4):
+            try:
+                marcou = await _run_in_thread(_fill)
+                break
+            except StaleElementReferenceException:
+                await asyncio.sleep(0.6)
         _registrar_run_log(f"RADIO '{label_text[:30]}' marcado={marcou}")
     except Exception as e:
         logger.debug("linkedin_selenium: erro ao preencher radio: %s", e)
