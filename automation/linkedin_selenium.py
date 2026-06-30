@@ -60,6 +60,76 @@ def _find_element_by_text(driver, tag: str, text: str, timeout: int = 10):
         return None
 
 
+async def _aguardar_resolucao_captcha(driver, origem: str = "login") -> bool:
+    """
+    Pausa a automação e aguarda o usuário resolver um CAPTCHA/checkpoint do LinkedIn.
+    Ativa intervenção manual, faz polling da URL e retoma quando o checkpoint sai.
+    Retorna True se o usuário resolveu e está numa página válida, False se clicou Parar.
+    """
+    from automation.browser import set_intervention_state, get_intervention_state
+
+    await set_intervention_state("paused", True)
+    await set_intervention_state("intervention_type", "manual")
+    await notify_browser_step(
+        "selenium_linkedin", "captcha",
+        f"⚠️ CAPTCHA/verificação detectado ({origem})! Resolva no browser Firefox e clique ▶️ Continuar no dashboard."
+    )
+    print(f"[LINKEDIN] CAPTCHA detectado em '{origem}' — aguardando resolução manual...")
+
+    while True:
+        # Usuário clicou Parar
+        control = await get_intervention_state()
+        if control.get("current_action") == "parar":
+            print("[LINKEDIN] Usuário clicou Parar durante espera de CAPTCHA")
+            return False
+
+        # Verifica se URL saiu do checkpoint (usuário resolveu no browser)
+        try:
+            cur = await _run_in_thread(lambda: driver.current_url)
+            if "checkpoint" not in cur.lower() and "challenge" not in cur.lower():
+                # Saiu do checkpoint — verifica se está logado ou numa página válida
+                if "linkedin.com" in cur.lower() and "login" not in cur.lower():
+                    print(f"[LINKEDIN] CAPTCHA resolvido! URL: {cur}")
+                    await notify_browser_step("selenium_linkedin", "retomando", "CAPTCHA resolvido! Retomando automação...")
+                    await set_intervention_state("paused", False)
+                    await set_intervention_state("intervention_type", None)
+                    return True
+        except Exception:
+            pass
+
+        # Usuário clicou Continuar no dashboard sem ter resolvido ainda —
+        # re-ativa intervenção se ainda estiver no checkpoint
+        if not control.get("paused") and control.get("intervention_type") != "manual":
+            try:
+                cur = await _run_in_thread(lambda: driver.current_url)
+                if "checkpoint" not in cur.lower() and "challenge" not in cur.lower():
+                    print(f"[LINKEDIN] Retomando após Continuar. URL: {cur}")
+                    await notify_browser_step("selenium_linkedin", "retomando", "Retomando após intervenção manual...")
+                    return True
+                else:
+                    # Ainda no checkpoint — re-ativa intervenção
+                    await set_intervention_state("paused", True)
+                    await set_intervention_state("intervention_type", "manual")
+                    await notify_browser_step(
+                        "selenium_linkedin", "captcha",
+                        "⚠️ CAPTCHA ainda ativo. Resolva no browser antes de continuar."
+                    )
+            except Exception:
+                pass
+
+        # Envia screenshot periódico
+        try:
+            img = await screenshot_base64()
+            if img:
+                from automation.browser import _send_screenshot_via_sio
+                import asyncio as _asyncio
+                _asyncio.create_task(_send_screenshot_via_sio({"image": img, "step": "captcha", "action": "aguardando resolução"}))
+        except Exception:
+            pass
+
+        await asyncio.sleep(2)
+
+
 async def _garantir_login() -> bool:
     """Garante que o browser Selenium está logado no LinkedIn.
     Usa as credenciais do .env. Retorna True se logado com sucesso."""
@@ -292,8 +362,22 @@ async def _garantir_login() -> bool:
                 await notify_browser_step("linkedin_login", "sucesso", "Login realizado com sucesso")
                 return True
             if "checkpoint" in cur.lower() or "challenge" in cur.lower():
-                print("[LINKEDIN] Login bloqueado por verificação de segurança")
-                await notify_browser_step("linkedin_login", "bloqueio", "Verificação de segurança necessária")
+                print("[LINKEDIN] Login bloqueado por verificação de segurança — aguardando resolução manual")
+                await notify_browser_step("linkedin_login", "bloqueio", "Verificação de segurança — resolva no browser")
+                resolvido = await _aguardar_resolucao_captcha(driver, "login")
+                if not resolvido:
+                    return False
+                # Após resolução, verifica se realmente está logado
+                try:
+                    cur = await _run_in_thread(lambda: driver.current_url)
+                    ttl = await get_title()
+                except Exception:
+                    cur, ttl = "", ""
+                if _esta_logado(cur, ttl):
+                    return True
+                # Deu na página de jobs ou feed mas _esta_logado retornou False — tenta navegar para jobs
+                if "linkedin.com" in cur.lower():
+                    return True
                 return False
         except Exception as e:
             print(f"[LINKEDIN] Erro ao verificar login: {e}")
@@ -428,11 +512,32 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "", user_id
 
         current_url = await _run_in_thread(lambda: driver.current_url) if driver else ""
         if "checkpoint" in current_url.lower() or "challenge" in current_url.lower():
-            print("[LINKEDIN] Bloqueio detectado")
-            b64 = await screenshot_base64()
-            return {"sucesso": False, "mensagem": "Verificação de segurança detectada.", "screenshot": b64[:100] if b64 else ""}
+            print("[LINKEDIN] Bloqueio detectado ao navegar para vaga")
+            resolvido = await _aguardar_resolucao_captcha(driver, "navegação para vaga")
+            if not resolvido:
+                b64 = await screenshot_base64()
+                return {"sucesso": False, "mensagem": "Verificação de segurança não resolvida.", "screenshot": b64[:100] if b64 else ""}
+            # Recarrega URL atual após resolução
+            try:
+                current_url = await _run_in_thread(lambda: driver.current_url)
+            except Exception:
+                current_url = ""
 
         print(f"[LINKEDIN] Vaga carregada: {await get_title()}")
+
+        # Verifica se LinkedIn indica que a vaga já foi candidatada (badge Applied no botão)
+        driver = await get_driver()
+        if driver and await _verificar_ja_aplicado_na_pagina(driver):
+            print(f"[LINKEDIN] Página indica vaga já candidatada — pulando")
+            await notify_browser_step("selenium_linkedin", "pulada", "LinkedIn indica vaga já candidatada")
+            await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
+            await asyncio.sleep(2)
+            return {
+                "sucesso": False,
+                "pulada": True,
+                "motivo_falha": "ja_aplicado_pagina",
+                "mensagem": "Vaga já candidatada (detectado na página).",
+            }
 
         # Avalia match com currículo e detecta idioma da vaga
         idioma_vaga = "pt"
@@ -631,6 +736,9 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
                     logger.info("linkedin_selenium: candidatura enviada com sucesso")
                     await notify_browser_step("step_"+str(step), "sucesso", "Candidatura enviada!")
                     b64 = await screenshot_base64()
+                    # Clica em Concluído antes de navegar
+                    await _fechar_modal_sucesso(driver)
+                    await asyncio.sleep(0.5)
                     await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
                     await asyncio.sleep(2)
                     return {
@@ -656,6 +764,8 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
             url_fim = ""
         if _detectar_sucesso(html, url_fim):
             b64 = await screenshot_base64()
+            await _fechar_modal_sucesso(driver)
+            await asyncio.sleep(0.5)
             await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
             await asyncio.sleep(2)
             return {
@@ -666,6 +776,11 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
             }
 
         b64 = await screenshot_base64()
+        # Tenta fechar qualquer modal aberto antes de navegar
+        try:
+            await _fechar_modal_sucesso(driver)
+        except Exception:
+            pass
         await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
         await asyncio.sleep(2)
         return {
@@ -730,6 +845,64 @@ async def _preencher_step_selenium(driver, perfil: dict, curriculo_path: str) ->
 
     await _run_in_thread(_preencher_campos)
 
+    # Seleciona CV em inglês se houver múltiplos CVs já enviados ao LinkedIn
+    def _selecionar_cv_ingles():
+        """LinkedIn mostra CVs anteriores como radio/checkbox. Prefere o inglês (segundo item)."""
+        _en_kw = {"english", "inglês", "ingles", "en_", "_en.", "-en.", "en-", "(en)"}
+        # Seletores comuns para escolha de resume no Easy Apply
+        for sel in [
+            "input[type='radio']",
+            "input[type='checkbox']",
+        ]:
+            opts = driver.find_elements(By.CSS_SELECTOR, sel)
+            # Filtra só os que estão dentro de containers de resume/document
+            resume_opts = []
+            for opt in opts:
+                try:
+                    opt_id = opt.get_attribute("id") or ""
+                    name = (opt.get_attribute("name") or "").lower()
+                    # Pega label associada
+                    lbl_text = ""
+                    if opt_id:
+                        lbl_els = driver.find_elements(By.CSS_SELECTOR, f"label[for='{opt_id}']")
+                        if lbl_els:
+                            lbl_text = (lbl_els[0].text or "").lower()
+                    if not lbl_text:
+                        try:
+                            parent = opt.find_element(By.XPATH, "./..")
+                            lbl_text = (parent.text or "").lower()
+                        except Exception:
+                            pass
+                    # Só considera se label tem extensão de arquivo ou palavra "resume"/"cv"
+                    is_resume_field = (
+                        any(ext in lbl_text for ext in [".pdf", ".doc", ".docx"])
+                        or "resume" in lbl_text or "curriculum" in lbl_text
+                        or "currículo" in lbl_text or "cv" in lbl_text
+                    )
+                    if is_resume_field:
+                        resume_opts.append((opt, opt_id, lbl_text))
+                except Exception:
+                    continue
+
+            if len(resume_opts) >= 2:
+                # Tenta achar o que tem indicação de inglês
+                for opt, opt_id, lbl_text in resume_opts:
+                    if any(kw in lbl_text for kw in _en_kw):
+                        _clicar_radio_via_label(driver, opt)
+                        print(f"[LINKEDIN] Selecionou CV inglês: {lbl_text[:50]}")
+                        return True
+                # Não achou por label — usa o SEGUNDO (índice 1, presumivelmente EN)
+                opt, opt_id, lbl_text = resume_opts[1]
+                _clicar_radio_via_label(driver, opt)
+                print(f"[LINKEDIN] Selecionou segundo CV (EN presumido): {lbl_text[:50]}")
+                return True
+        return False
+
+    try:
+        await _run_in_thread(_selecionar_cv_ingles)
+    except Exception:
+        pass
+
     if curriculo_path:
         try:
             def _upload():
@@ -746,17 +919,37 @@ async def _preencher_step_selenium(driver, perfil: dict, curriculo_path: str) ->
             pass
 
 
+_SELECT_PLACEHOLDER_TEXTS = {
+    "", "select an option", "selecione uma opção", "selecione", "--", "select",
+    "choose", "selecione uma resposta", "selecionar uma opção", "escolha uma opção",
+    "nenhum selecionado", "select a response", "please select", "escolha",
+    "seleccione", "selecionar", "escolher",
+}
+
+_DECIMAL_LABEL_KEYWORDS = {
+    "salary", "salário", "wage", "remuneração", "taxa", "rate", "compensation",
+    "pay", "valor", "price", "preço", "gpa", "nota", "score",
+}
+_INTEGER_LABEL_KEYWORDS = {
+    "years", "months", "anos", "meses", "quantos", "quanto", "how many",
+    "number of", "quantidade", "experiencia", "experience",
+}
+
+
 async def _detectar_perguntas_nao_respondidas_selenium(driver) -> list:
     """Detecta todos os campos de pergunta ainda vazios no step atual via Selenium.
-    Inclui text, number, textarea, select e fieldsets com radio buttons."""
+    Inclui text, number (NUMERO/DECIMAL), textarea, select, combobox e radio."""
     perguntas = []
-    try:
-        _NUMERIC_KEYWORDS = {
-            "years", "months", "how many", "quantos", "quanto", "anos", "meses",
-            "número", "numero", "salary", "salário", "amount", "quantidade",
-            "experiencia", "experience", "nota", "score", "gpa", "rate",
-        }
+    seen_labels: set = set()
 
+    def _add(pergunta: str):
+        # Evita duplicatas pela label base
+        base = re.sub(r'^(NUMERO|DECIMAL|SELECT|RADIO|COMBO):', '', pergunta).split(":")[0][:40]
+        if base not in seen_labels:
+            seen_labels.add(base)
+            perguntas.append(pergunta)
+
+    try:
         inputs = driver.find_elements(By.CSS_SELECTOR,
             "input[type='text'], input[type='number'], textarea"
         )
@@ -774,21 +967,40 @@ async def _detectar_perguntas_nao_respondidas_selenium(driver) -> list:
                 current_val = inp.get_attribute("value") or ""
             except Exception:
                 pass
-            if not current_val:
-                input_type = ""
-                try:
-                    input_type = (inp.get_attribute("type") or "").lower()
-                except Exception:
-                    pass
-                is_numeric = (
-                    input_type == "number"
-                    or any(kw in label_lower for kw in _NUMERIC_KEYWORDS)
-                )
-                if is_numeric:
-                    perguntas.append(f"NUMERO:{label}")
-                else:
-                    perguntas.append(label)
+            if current_val:
+                continue
 
+            input_type = ""
+            step_val = ""
+            min_val = ""
+            try:
+                input_type = (inp.get_attribute("type") or "").lower()
+                step_val = (inp.get_attribute("step") or "").strip()
+                min_val = (inp.get_attribute("min") or "").strip()
+            except Exception:
+                pass
+
+            # Detecta se é campo numérico pelo tipo OU palavras-chave na label
+            _all_numeric_kw = _DECIMAL_LABEL_KEYWORDS | _INTEGER_LABEL_KEYWORDS
+            is_numeric = (
+                input_type == "number"
+                or any(kw in label_lower for kw in _all_numeric_kw)
+            )
+
+            if is_numeric:
+                # Distingue decimal de inteiro pelo atributo step/min OU pela label
+                step_has_decimal = "." in step_val and step_val not in ("", "any", "1")
+                min_has_decimal = "." in min_val
+                label_decimal = any(kw in label_lower for kw in _DECIMAL_LABEL_KEYWORDS)
+                label_integer = any(kw in label_lower for kw in _INTEGER_LABEL_KEYWORDS)
+                if step_has_decimal or min_has_decimal or (label_decimal and not label_integer):
+                    _add(f"DECIMAL:{label}")
+                else:
+                    _add(f"NUMERO:{label}")
+            else:
+                _add(label)
+
+        # Selects nativos
         selects = driver.find_elements(By.CSS_SELECTOR, "select")
         for sel_elem in selects:
             if not sel_elem.is_displayed():
@@ -796,15 +1008,59 @@ async def _detectar_perguntas_nao_respondidas_selenium(driver) -> list:
             try:
                 from selenium.webdriver.support.ui import Select
                 sel_obj = Select(sel_elem)
-                selected_text = (sel_obj.first_selected_option.text or "").strip().lower()
-                if selected_text in ("", "select an option", "selecione uma opção", "selecione", "--", "select", "choose"):
+                first_opt = sel_obj.first_selected_option
+                selected_text = (first_opt.text or "").strip().lower()
+                first_val = (first_opt.get_attribute("value") or "").strip()
+                if selected_text in _SELECT_PLACEHOLDER_TEXTS or first_val == "":
                     label = await _get_label_selenium(driver, sel_elem)
                     if label and not any(p in label.lower() for p in _CAMPOS_PADRAO):
-                        options_text = [o.text.strip() for o in sel_obj.options if o.text.strip() and o.text.strip().lower() not in ("", "select an option", "selecione uma opção", "selecione", "--", "select", "choose")]
-                        perguntas.append(f"SELECT:{label}:{','.join(options_text[:10])}")
+                        options_text = [
+                            o.text.strip() for o in sel_obj.options
+                            if o.text.strip() and o.text.strip().lower() not in _SELECT_PLACEHOLDER_TEXTS
+                        ]
+                        if options_text:
+                            _add(f"SELECT:{label}:{','.join(options_text[:10])}")
             except Exception:
                 pass
 
+        # LinkedIn custom comboboxes (role=combobox / aria-haspopup=listbox)
+        combo_sels = "[role='combobox'], button[aria-haspopup='listbox'], button[aria-haspopup='true'][aria-expanded]"
+        comboboxes = driver.find_elements(By.CSS_SELECTOR, combo_sels)
+        for cb in comboboxes:
+            if not cb.is_displayed():
+                continue
+            try:
+                # Verifica se já tem valor selecionado
+                current_text = (cb.text or cb.get_attribute("aria-label") or "").strip().lower()
+                if current_text and current_text not in _SELECT_PLACEHOLDER_TEXTS:
+                    continue  # já preenchido
+                # Busca label do combobox
+                label = await _get_label_selenium(driver, cb)
+                if not label:
+                    # Tenta via aria-labelledby
+                    aria_by = cb.get_attribute("aria-labelledby") or ""
+                    for aid in aria_by.split():
+                        el = driver.find_elements(By.ID, aid)
+                        if el:
+                            label = (el[0].text or "").strip()
+                            break
+                if not label:
+                    continue
+                if any(p in label.lower() for p in _CAMPOS_PADRAO):
+                    continue
+                # Coleta opções disponíveis
+                options_text = []
+                try:
+                    opts = driver.find_elements(By.CSS_SELECTOR, "[role='option'], [role='listbox'] li")
+                    options_text = [o.text.strip() for o in opts if o.text.strip()]
+                except Exception:
+                    pass
+                suffix = f":{','.join(options_text[:10])}" if options_text else ""
+                _add(f"COMBO:{label}{suffix}")
+            except Exception:
+                continue
+
+        # Fieldsets com radio buttons
         fieldsets = driver.find_elements(By.CSS_SELECTOR, "fieldset")
         for fs in fieldsets:
             if not fs.is_displayed():
@@ -816,39 +1072,40 @@ async def _detectar_perguntas_nao_respondidas_selenium(driver) -> list:
                 legend_text = (legend[0].text or "").strip()
                 if not legend_text or any(p in legend_text.lower() for p in _CAMPOS_PADRAO):
                     continue
+                # LinkedIn esconde os inputs com CSS; não filtra por is_displayed()
                 radios = fs.find_elements(By.CSS_SELECTOR, "input[type='radio']")
                 if radios:
-                    any_checked = any(r.is_selected() for r in radios if r.is_displayed())
+                    # Verifica se algum já está selecionado (is_selected() funciona mesmo hidden)
+                    any_checked = any(r.is_selected() for r in radios)
                     if not any_checked:
                         options_text = []
                         for r in radios:
-                            if r.is_displayed():
-                                r_label = ""
-                                r_id = r.get_attribute("id")
-                                if r_id:
-                                    lbl = driver.find_elements(By.CSS_SELECTOR, f"label[for='{r_id}']")
-                                    if lbl:
-                                        r_label = (lbl[0].text or "").strip()
-                                if not r_label:
-                                    try:
-                                        parent = r.find_element(By.XPATH, "./..")
-                                        r_label = (parent.text or "").strip()
-                                    except Exception:
-                                        pass
-                                if r_label:
-                                    options_text.append(r_label)
+                            r_label = ""
+                            r_id = r.get_attribute("id")
+                            if r_id:
+                                lbl = driver.find_elements(By.CSS_SELECTOR, f"label[for='{r_id}']")
+                                if lbl:
+                                    r_label = (lbl[0].text or "").strip()
+                            if not r_label:
+                                try:
+                                    parent = r.find_element(By.XPATH, "./..")
+                                    r_label = (parent.text or "").strip()
+                                except Exception:
+                                    pass
+                            if r_label and r_label not in options_text:
+                                options_text.append(r_label)
                         if options_text:
-                            perguntas.append(f"RADIO:{legend_text}:{','.join(options_text[:10])}")
+                            _add(f"RADIO:{legend_text}:{','.join(options_text[:10])}")
             except Exception:
                 continue
     except Exception:
         pass
-    return perguntas[:10]
+    return perguntas[:12]
 
 
 async def _preencher_resposta_customizada_selenium(driver, pergunta: str, resposta: str) -> None:
     """Preenche campo de pergunta customizada pela label via Selenium.
-    Suporta text, number, textarea, select, radio e NUMERO: (apenas digitos)."""
+    Suporta text, number, textarea, select, radio, NUMERO (int), DECIMAL (float) e COMBO."""
     try:
         if pergunta.startswith("SELECT:"):
             parts = pergunta.split(":", 2)
@@ -862,11 +1119,30 @@ async def _preencher_resposta_customizada_selenium(driver, pergunta: str, respos
             await _preencher_radio_selenium(driver, label_text, resposta)
             return
 
-        # NUMERO: a resposta já vem só com dígitos de form_filler; garante aqui também
+        if pergunta.startswith("COMBO:"):
+            parts = pergunta.split(":", 2)
+            label_text = parts[1] if len(parts) > 1 else ""
+            await _preencher_combobox_linkedin(driver, label_text, resposta)
+            return
+
+        # NUMERO: inteiro — extrai o primeiro número inteiro da resposta
         is_numero = pergunta.startswith("NUMERO:")
-        pergunta_busca = pergunta[7:] if is_numero else pergunta
+        # DECIMAL: float — extrai número com ponto decimal
+        is_decimal = pergunta.startswith("DECIMAL:")
+
         if is_numero:
-            resposta = re.sub(r'[^\d]', '', resposta) or "1"
+            pergunta_busca = pergunta[7:].strip()
+            m = re.search(r'\b\d+\b', resposta)
+            resposta = m.group() if m else re.sub(r'[^\d]', '', resposta) or "1"
+        elif is_decimal:
+            pergunta_busca = pergunta[8:].strip()
+            m = re.search(r'\d+[.,]\d+|\d+', resposta)
+            if m:
+                resposta = m.group().replace(',', '.')
+            else:
+                resposta = re.sub(r'[^\d.]', '', resposta) or "1.0"
+        else:
+            pergunta_busca = pergunta
 
         labels = driver.find_elements(By.CSS_SELECTOR, "label")
         for label in labels:
@@ -885,11 +1161,11 @@ async def _preencher_resposta_customizada_selenium(driver, pergunta: str, respos
                             el[0].clear()
                             el[0].send_keys(resposta[:500])
                             print(f"[LINKEDIN] Preencheu textarea: {pergunta_busca[:40]} = {resposta[:30]}")
-                        elif input_type == "number" or is_numero:
-                            digits = re.sub(r'[^\d]', '', resposta)
+                        elif input_type == "number" or is_numero or is_decimal:
+                            # resposta já foi formatada (inteiro ou decimal) antes deste ponto
                             el[0].clear()
-                            el[0].send_keys(digits or "1")
-                            print(f"[LINKEDIN] Preencheu number: {pergunta_busca[:40]} = {digits}")
+                            el[0].send_keys(resposta)
+                            print(f"[LINKEDIN] Preencheu number: {pergunta_busca[:40]} = {resposta}")
                         else:
                             el[0].clear()
                             el[0].send_keys(resposta[:200])
@@ -897,6 +1173,98 @@ async def _preencher_resposta_customizada_selenium(driver, pergunta: str, respos
                         return
     except Exception as e:
         logger.debug("linkedin_selenium: erro ao preencher resposta: %s", e)
+
+
+async def _preencher_combobox_linkedin(driver, label_text: str, resposta: str) -> bool:
+    """Preenche combobox customizado do LinkedIn (role=combobox / aria-haspopup=listbox).
+    Clica no trigger, aguarda a lista de opções e seleciona a que mais combina com a resposta."""
+    import time
+
+    def _find_trigger():
+        seletores = "[role='combobox'], button[aria-haspopup='listbox'], button[aria-haspopup='true'][aria-expanded]"
+        for cb in driver.find_elements(By.CSS_SELECTOR, seletores):
+            if not cb.is_displayed():
+                continue
+            # Busca label via for, aria-labelledby ou container
+            cb_id = cb.get_attribute("id") or ""
+            label_found = ""
+            if cb_id:
+                lbs = driver.find_elements(By.CSS_SELECTOR, f"label[for='{cb_id}']")
+                if lbs:
+                    label_found = (lbs[0].text or "").strip()
+            if not label_found:
+                aria_by = cb.get_attribute("aria-labelledby") or ""
+                for aid in aria_by.split():
+                    el = driver.find_elements(By.ID, aid)
+                    if el:
+                        label_found = (el[0].text or "").strip()
+                        break
+            if not label_found:
+                try:
+                    container = cb.find_element(By.XPATH,
+                        "./ancestor::div[contains(@class,'fb-') or contains(@class,'easy-apply') or contains(@class,'jobs-')][1]"
+                    )
+                    lbs = container.find_elements(By.CSS_SELECTOR, "label, legend, span[class*='label']")
+                    if lbs:
+                        label_found = (lbs[0].text or "").strip()
+                except Exception:
+                    pass
+            if label_text.lower()[:25] in label_found.lower() or label_found.lower()[:25] in label_text.lower():
+                return cb
+        return None
+
+    def _click_option(resposta_lower: str):
+        # Opções visíveis após abrir o combobox
+        for sel in [
+            "[role='option']", "[role='listbox'] li", ".artdeco-dropdown__item",
+            ".basic-typeahead__selectable", "li[data-test-text-selectable-option]",
+        ]:
+            opts = driver.find_elements(By.CSS_SELECTOR, sel)
+            visible = [o for o in opts if o.is_displayed() and (o.text or "").strip()]
+            if not visible:
+                continue
+            # Correspondência exata
+            for opt in visible:
+                if opt.text.strip().lower() == resposta_lower:
+                    opt.click()
+                    return True
+            # Correspondência parcial
+            for opt in visible:
+                t = opt.text.strip().lower()
+                if resposta_lower in t or t in resposta_lower:
+                    opt.click()
+                    return True
+            # "Sim"/"Não" heurística: se a resposta sugere positivo, pega a 1ª opção
+            if resposta_lower in ("sim", "yes", "s", "y") and visible:
+                visible[0].click()
+                return True
+            if resposta_lower in ("não", "nao", "no", "n") and len(visible) >= 2:
+                visible[1].click()
+                return True
+            # Fallback: primeira opção disponível
+            visible[0].click()
+            return True
+        return False
+
+    try:
+        trigger = await _run_in_thread(_find_trigger)
+        if not trigger:
+            # Tenta via <select> como fallback
+            await _preencher_select_selenium(driver, label_text, resposta)
+            return False
+
+        await _run_in_thread(trigger.click)
+        await asyncio.sleep(0.8)
+
+        resultado = await _run_in_thread(lambda: _click_option(resposta.strip().lower()))
+        if resultado:
+            print(f"[LINKEDIN] Preencheu combobox: {label_text[:40]} = {resposta[:30]}")
+        else:
+            print(f"[LINKEDIN] Combobox: nenhuma opção encontrada para '{label_text[:30]}'")
+        return resultado
+    except Exception as e:
+        logger.debug("_preencher_combobox_linkedin erro: %s", e)
+        return False
 
 
 async def _preencher_select_selenium(driver, label_text: str, resposta: str) -> None:
@@ -927,9 +1295,37 @@ async def _preencher_select_selenium(driver, label_text: str, resposta: str) -> 
         logger.debug("linkedin_selenium: erro ao preencher select: %s", e)
 
 
-async def _preencher_radio_selenium(driver, label_text: str, resposta: str) -> None:
-    """Preenche um campo radio button baseado na resposta da IA."""
+def _clicar_radio_via_label(driver, radio_input) -> bool:
+    """Clica num radio button via label ou JS — funciona mesmo quando o input está hidden pelo CSS."""
+    r_id = radio_input.get_attribute("id")
+    if r_id:
+        lbls = driver.find_elements(By.CSS_SELECTOR, f"label[for='{r_id}']")
+        if lbls:
+            try:
+                driver.execute_script("arguments[0].click();", lbls[0])
+                return True
+            except Exception:
+                pass
+    # Fallback: JS click no próprio input
     try:
+        driver.execute_script("arguments[0].click();", radio_input)
+        return True
+    except Exception:
+        pass
+    # Último recurso: click normal
+    try:
+        radio_input.click()
+        return True
+    except Exception:
+        pass
+    return False
+
+
+async def _preencher_radio_selenium(driver, label_text: str, resposta: str) -> None:
+    """Preenche um campo radio button baseado na resposta da IA.
+    Clica no <label> associado (funciona com inputs hidden do LinkedIn)."""
+
+    def _fill():
         fieldsets = driver.find_elements(By.CSS_SELECTOR, "fieldset")
         for fs in fieldsets:
             if not fs.is_displayed():
@@ -938,13 +1334,15 @@ async def _preencher_radio_selenium(driver, label_text: str, resposta: str) -> N
             if not legend:
                 continue
             legend_text = (legend[0].text or "").strip()
-            if label_text.lower()[:30] not in legend_text.lower():
+            # Verifica se o fieldset corresponde à label buscada
+            if label_text.lower()[:35] not in legend_text.lower() and legend_text.lower()[:35] not in label_text.lower():
                 continue
             radios = fs.find_elements(By.CSS_SELECTOR, "input[type='radio']")
             resposta_lower = resposta.strip().lower()
+
+            # Monta mapa radio → texto da label
+            radio_opcoes = []
             for r in radios:
-                if not r.is_displayed():
-                    continue
                 r_label = ""
                 r_id = r.get_attribute("id")
                 if r_id:
@@ -957,16 +1355,44 @@ async def _preencher_radio_selenium(driver, label_text: str, resposta: str) -> N
                         r_label = (parent.text or "").strip()
                     except Exception:
                         pass
+                radio_opcoes.append((r, r_label))
+
+            # 1ª tentativa: correspondência exata
+            for r, r_label in radio_opcoes:
+                if r_label.lower() == resposta_lower:
+                    if _clicar_radio_via_label(driver, r):
+                        print(f"[LINKEDIN] Radio exato: {legend_text[:30]} = {r_label}")
+                        return True
+
+            # 2ª tentativa: correspondência parcial
+            for r, r_label in radio_opcoes:
                 if r_label and (resposta_lower in r_label.lower() or r_label.lower() in resposta_lower):
-                    r.click()
-                    print(f"[LINKEDIN] Radio: {legend_text[:30]} = {r_label}")
-                    return
-            if radios:
-                for r in radios:
-                    if r.is_displayed():
-                        r.click()
-                        print(f"[LINKEDIN] Radio fallback: {legend_text[:30]}")
-                        return
+                    if _clicar_radio_via_label(driver, r):
+                        print(f"[LINKEDIN] Radio parcial: {legend_text[:30]} = {r_label}")
+                        return True
+
+            # 3ª tentativa: heurística Sim/Não (Yes=primeiro, No=segundo)
+            sim_words = {"sim", "yes", "s", "y", "true", "verdadeiro"}
+            nao_words = {"não", "nao", "no", "n", "false", "falso"}
+            if resposta_lower in sim_words and radio_opcoes:
+                if _clicar_radio_via_label(driver, radio_opcoes[0][0]):
+                    print(f"[LINKEDIN] Radio heurística Sim: {legend_text[:30]}")
+                    return True
+            if resposta_lower in nao_words and len(radio_opcoes) >= 2:
+                if _clicar_radio_via_label(driver, radio_opcoes[1][0]):
+                    print(f"[LINKEDIN] Radio heurística Não: {legend_text[:30]}")
+                    return True
+
+            # Fallback: clica no primeiro
+            if radio_opcoes:
+                if _clicar_radio_via_label(driver, radio_opcoes[0][0]):
+                    print(f"[LINKEDIN] Radio fallback primeiro: {legend_text[:30]}")
+                    return True
+
+        return False
+
+    try:
+        await _run_in_thread(_fill)
     except Exception as e:
         logger.debug("linkedin_selenium: erro ao preencher radio: %s", e)
 
@@ -1219,7 +1645,34 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
 
             await notify_browser_step("selenium_linkedin", f"vaga_{i+1}", f"Procurando vaga {i+1}...")
 
+            # Garante que o browser está na página de vagas antes de buscar
+            try:
+                _drv = await get_driver()
+                if not _drv or not await _driver_session_valida():
+                    print("[LINKEDIN] Sessão do browser inválida — reabrindo")
+                    await nova_pagina("https://www.linkedin.com/jobs/collections/easy-apply/", reutilizar=False)
+                    await asyncio.sleep(4)
+                    if not await _garantir_login():
+                        break
+                else:
+                    _cur = await _run_in_thread(lambda: _drv.current_url)
+                    if "jobs" not in _cur.lower() or "checkpoint" in _cur.lower():
+                        await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
+                        await asyncio.sleep(3)
+            except Exception as _nav_e:
+                logger.warning("linkedin_selenium: erro ao verificar página: %s", _nav_e)
+
             vaga_url = await _extrair_proxima_vaga_da_busca(vagas_tentadas_sessao)
+            if not vaga_url:
+                # Tenta uma vez mais após scroll para o topo (recarrega cards)
+                try:
+                    _drv = await get_driver()
+                    if _drv:
+                        await _run_in_thread(lambda: _drv.execute_script("window.scrollTo(0,0)"))
+                        await asyncio.sleep(1.5)
+                        vaga_url = await _extrair_proxima_vaga_da_busca(vagas_tentadas_sessao)
+                except Exception:
+                    pass
             if not vaga_url:
                 await notify_browser_step("selenium_linkedin", "finalizando", "Nenhuma vaga Easy Apply disponível")
                 break
@@ -1331,6 +1784,71 @@ async def _dismissar_cookie_banner(driver) -> None:
                 continue
     except Exception:
         pass
+
+
+async def _fechar_modal_sucesso(driver) -> bool:
+    """Clica em 'Concluído'/'Done' no modal de confirmação pós-candidatura do LinkedIn.
+    Retorna True se o botão foi encontrado e clicado."""
+    done_labels = [
+        "concluído", "concluido", "done", "fechar", "close", "ok", "dismiss",
+    ]
+
+    def _click_done():
+        # Tenta encontrar o botão Concluído em qualquer dialog visível
+        for sel in ["div[role='dialog']", ".artdeco-modal", ".jobs-easy-apply-modal", "body"]:
+            containers = driver.find_elements(By.CSS_SELECTOR, sel)
+            for container in containers:
+                try:
+                    btns = container.find_elements(By.TAG_NAME, "button")
+                    for btn in btns:
+                        t = (btn.text or btn.get_attribute("aria-label") or "").strip().lower()
+                        if any(k in t for k in done_labels) and btn.is_displayed() and btn.is_enabled():
+                            btn.click()
+                            return True
+                except Exception:
+                    continue
+        return False
+
+    try:
+        result = await _run_in_thread(_click_done)
+        if result:
+            await asyncio.sleep(0.8)
+            print("[LINKEDIN] Clicou em Concluído após candidatura enviada")
+        return result
+    except Exception:
+        return False
+
+
+async def _verificar_ja_aplicado_na_pagina(driver) -> bool:
+    """Verifica se o LinkedIn indica que a vaga já foi candidatada (badge/botão Applied)."""
+    def _check():
+        # Verifica texto de botões — LinkedIn troca "Easy Apply" por "Applied" após candidatura
+        for btn in driver.find_elements(By.CSS_SELECTOR, "button"):
+            try:
+                if not btn.is_displayed():
+                    continue
+                t = (btn.text or btn.get_attribute("aria-label") or "").strip().lower()
+                if t in ("applied", "candidatou-se", "já candidatou", "already applied"):
+                    return True
+            except Exception:
+                continue
+        # Verifica badges/avisos na página
+        for sel in ["[class*='applied-badge']", "[class*='already-applied']",
+                    "span[data-test-job-insight-item-with-icon]"]:
+            try:
+                els = driver.find_elements(By.CSS_SELECTOR, sel)
+                for el in els:
+                    t = (el.text or "").lower()
+                    if "applied" in t or "candidatou" in t:
+                        return True
+            except Exception:
+                continue
+        return False
+
+    try:
+        return await _run_in_thread(_check)
+    except Exception:
+        return False
 
 
 async def _fechar_modal_descarte(driver) -> bool:

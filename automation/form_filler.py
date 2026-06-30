@@ -45,18 +45,30 @@ def responder_pergunta(
     Responde no idioma da pergunta (detectado externamente via idioma param).
     Suporta perguntas SELECT:label:opcoes, RADIO:label:opcoes e NUMERO:label.
     """
-    # NUMERO: campo numerico — extrair apenas digitos
+    # NUMERO: campo inteiro — retorna apenas dígitos (ex: anos de experiência)
     if pergunta.startswith("NUMERO:"):
         pergunta_real = pergunta[7:].strip()
         resposta_bruta = _responder_pergunta_raw(
-            pergunta_real, perfil, vaga_titulo, vaga_empresa, resumo_curriculo, idioma
+            f"[RESPONDA APENAS COM UM NÚMERO INTEIRO, SEM TEXTO] {pergunta_real}",
+            perfil, vaga_titulo, vaga_empresa, resumo_curriculo, idioma
         )
+        m = re.search(r'\b\d+\b', resposta_bruta)
+        if m:
+            return m.group()
         digitos = re.sub(r'[^\d]', '', resposta_bruta)
-        if not digitos:
-            # Tentar extrair um número de palavras como "5 anos" ou "five years"
-            match = re.search(r'\b(\d+)\b', resposta_bruta)
-            digitos = match.group(1) if match else "1"
-        return digitos
+        return digitos or "1"
+
+    # DECIMAL: campo decimal — retorna número com ponto (ex: 2.5, 10000.0)
+    if pergunta.startswith("DECIMAL:"):
+        pergunta_real = pergunta[8:].strip()
+        resposta_bruta = _responder_pergunta_raw(
+            f"[RESPONDA APENAS COM UM NÚMERO DECIMAL USANDO PONTO, EX: 2.5 ou 10000.0, SEM TEXTO] {pergunta_real}",
+            perfil, vaga_titulo, vaga_empresa, resumo_curriculo, idioma
+        )
+        m = re.search(r'\d+[.,]\d+|\d+', resposta_bruta)
+        if m:
+            return m.group().replace(',', '.')
+        return re.sub(r'[^\d.]', '', resposta_bruta) or "1.0"
 
     return _responder_pergunta_raw(pergunta, perfil, vaga_titulo, vaga_empresa, resumo_curriculo, idioma)
 
