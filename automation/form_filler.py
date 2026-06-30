@@ -4,6 +4,7 @@ Nunca inventa qualificacoes que o candidato nao tem.
 """
 
 import logging
+import re
 
 from ai.openrouter import openrouter
 
@@ -12,7 +13,7 @@ logger = logging.getLogger(__name__)
 SYSTEM = """You answer job application form questions based on the candidate's resume text.
 
 IMPORTANT RULES:
-- Always respond in ENGLISH, regardless of the form language
+- Respond in the SAME LANGUAGE as the form question (if the question is in Portuguese, answer in Portuguese; if in English, answer in English)
 - Base your answers primarily on the provided resume text
 - Be honest — never claim skills or experiences not mentioned in the resume
 - If the resume doesn't mention something relevant, be honest and show willingness to learn
@@ -24,19 +25,51 @@ When answering:
 1. First check if the resume text contains relevant information
 2. If yes, use that specific information to craft your answer
 3. If no relevant info is found, use the profile data as fallback
-4. Always translate the answer to English
+4. Match the language of your response to the language of the question
 5. Keep answers concise and directly address the question asked
 
 Resume text is the PRIMARY source — use it FIRST for every answer."""
 
 
-def responder_pergunta(pergunta: str, perfil: dict, vaga_titulo: str = "", vaga_empresa: str = "", resumo_curriculo: str = "") -> str:
+def responder_pergunta(
+    pergunta: str,
+    perfil: dict,
+    vaga_titulo: str = "",
+    vaga_empresa: str = "",
+    resumo_curriculo: str = "",
+    idioma: str = "pt",
+) -> str:
     """
     Gera resposta para pergunta de formulario de candidatura.
     Baseado primeiro no resumo do curriculo fornecido pelo usuario, depois no perfil.
-    Sempre responde em ingles.
-    Suporta perguntas SELECT:label:opcoes e RADIO:label:opcoes.
+    Responde no idioma da pergunta (detectado externamente via idioma param).
+    Suporta perguntas SELECT:label:opcoes, RADIO:label:opcoes e NUMERO:label.
     """
+    # NUMERO: campo numerico — extrair apenas digitos
+    if pergunta.startswith("NUMERO:"):
+        pergunta_real = pergunta[7:].strip()
+        resposta_bruta = _responder_pergunta_raw(
+            pergunta_real, perfil, vaga_titulo, vaga_empresa, resumo_curriculo, idioma
+        )
+        digitos = re.sub(r'[^\d]', '', resposta_bruta)
+        if not digitos:
+            # Tentar extrair um número de palavras como "5 anos" ou "five years"
+            match = re.search(r'\b(\d+)\b', resposta_bruta)
+            digitos = match.group(1) if match else "1"
+        return digitos
+
+    return _responder_pergunta_raw(pergunta, perfil, vaga_titulo, vaga_empresa, resumo_curriculo, idioma)
+
+
+def _responder_pergunta_raw(
+    pergunta: str,
+    perfil: dict,
+    vaga_titulo: str = "",
+    vaga_empresa: str = "",
+    resumo_curriculo: str = "",
+    idioma: str = "pt",
+) -> str:
+    """Internamente gera resposta, sem tratar prefixos especiais."""
     perfil_resumido = _resumir_perfil(perfil)
 
     opcoes_disponiveis = ""
@@ -48,6 +81,11 @@ def responder_pergunta(pergunta: str, perfil: dict, vaga_titulo: str = "", vaga_
         opcoes_raw = parts[2] if len(parts) > 2 else ""
         if opcoes_raw:
             opcoes_disponiveis = f"\nAVAILABLE OPTIONS (you MUST choose exactly one of these): {opcoes_raw}\nIMPORTANT: Reply with ONLY the exact text of the chosen option, nothing else."
+
+    idioma_instrucao = (
+        "Answer in PORTUGUESE (Brazil)." if idioma == "pt"
+        else "Answer in ENGLISH."
+    )
 
     contexto_parts = []
     if resumo_curriculo and resumo_curriculo.strip():
@@ -61,7 +99,7 @@ def responder_pergunta(pergunta: str, perfil: dict, vaga_titulo: str = "", vaga_
 
 Form question: {pergunta_real}{opcoes_disponiveis}
 
-IMPORTANT: Answer in ENGLISH based primarily on the resume text. If the resume doesn't mention relevant info, use the structured profile data or politely indicate willingness to learn. Never claim skills not present in the resume.
+IMPORTANT: {idioma_instrucao} Base your answer primarily on the resume text. If the resume doesn't mention relevant info, use the structured profile data or politely indicate willingness to learn. Never claim skills not present in the resume.
 For numeric questions (years of experience, etc.), reply with ONLY the number."""
 
     messages = [
@@ -71,11 +109,14 @@ For numeric questions (years of experience, etc.), reply with ONLY the number.""
 
     try:
         resposta = openrouter.converse(messages)
-        logger.info("form_filler: pergunta respondida | pergunta=%s... | resposta=%s...", pergunta_real[:50], resposta[:50])
+        logger.info(
+            "form_filler: pergunta respondida | pergunta=%s... | resposta=%s...",
+            pergunta_real[:50], resposta[:50]
+        )
         return resposta.strip()
     except Exception as e:
         logger.error("form_filler: erro LLM: %s", e)
-        return _resposta_fallback(pergunta, perfil)
+        return _resposta_fallback(pergunta, perfil, idioma)
 
 
 def _resumir_perfil(perfil: dict) -> str:
@@ -99,13 +140,19 @@ def _resumir_perfil(perfil: dict) -> str:
     return "\n".join(linhas) or "Perfil nao informado"
 
 
-def _resposta_fallback(pergunta: str, perfil: dict) -> str:
-    """Resposta basica sem LLM baseada em palavras-chave — sempre em ingles."""
+def _resposta_fallback(pergunta: str, perfil: dict, idioma: str = "pt") -> str:
+    """Resposta basica sem LLM baseada em palavras-chave."""
     p = pergunta.lower()
     if any(x in p for x in ["pretensao", "salario", "remuneracao", "salary"]):
-        return perfil.get("pretensao_salarial") or "Open to discussion based on benefits"
+        valor = perfil.get("pretensao_salarial")
+        if valor:
+            return str(valor)
+        return "A combinar" if idioma == "pt" else "Open to discussion based on benefits"
     if any(x in p for x in ["remoto", "modalidade", "trabalh", "remote", "work"]):
-        return perfil.get("modalidade_preferida") or "Open to discussion"
+        valor = perfil.get("modalidade_preferida")
+        if valor:
+            return str(valor)
+        return "Flexível" if idioma == "pt" else "Open to discussion"
     if any(x in p for x in ["disponibilidade", "quando", "inicio", "availability", "start"]):
-        return "Immediate availability"
-    return "Information available upon request"
+        return "Imediata" if idioma == "pt" else "Immediate availability"
+    return "Disponível mediante contato" if idioma == "pt" else "Information available upon request"

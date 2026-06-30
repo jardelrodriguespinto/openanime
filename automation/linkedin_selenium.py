@@ -433,6 +433,34 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "", user_id
             return {"sucesso": False, "mensagem": "Verificação de segurança detectada.", "screenshot": b64[:100] if b64 else ""}
 
         print(f"[LINKEDIN] Vaga carregada: {await get_title()}")
+
+        # Avalia match com currículo e detecta idioma da vaga
+        idioma_vaga = "pt"
+        if resumo_curriculo:
+            driver = await get_driver()
+            if driver:
+                descricao_vaga = await _extrair_descricao_vaga(driver)
+                if descricao_vaga:
+                    await notify_browser_step("selenium_linkedin", "avaliando", "Verificando compatibilidade com currículo...")
+                    avaliacao = await _avaliar_match_vaga(descricao_vaga, resumo_curriculo)
+                    idioma_vaga = avaliacao.get("idioma", "pt")
+                    logger.info(
+                        "linkedin_selenium: match=%s idioma=%s motivo=%s",
+                        avaliacao.get("aplicar"), idioma_vaga, avaliacao.get("motivo")
+                    )
+                    if not avaliacao.get("aplicar", True):
+                        motivo = avaliacao.get("motivo", "sem match")
+                        print(f"[LINKEDIN] Pulando vaga — sem match: {motivo}")
+                        await notify_browser_step("selenium_linkedin", "pulada", f"Sem match com currículo: {motivo}")
+                        await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
+                        await asyncio.sleep(2)
+                        return {
+                            "sucesso": False,
+                            "pulada": True,
+                            "motivo_falha": "sem_match",
+                            "mensagem": f"Vaga ignorada (sem match): {motivo}",
+                        }
+
         await notify_browser_step("selenium_linkedin", "easy_apply", "Procurando Easy Apply...")
 
         clicou = False
@@ -469,7 +497,7 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "", user_id
         print("[LINKEDIN] Modal aberto")
 
         await notify_browser_step("selenium_linkedin", "preenchendo", "Preenchendo formulário multi-step")
-        resultado = await _processar_formulario_multistep_selenium(driver, perfil, curriculo_path, vaga_url, resumo_curriculo)
+        resultado = await _processar_formulario_multistep_selenium(driver, perfil, curriculo_path, vaga_url, resumo_curriculo, idioma=idioma_vaga)
         return resultado
 
     except Exception as e:
@@ -496,7 +524,7 @@ def _detectar_sucesso(html: str, url: str) -> bool:
     return any(s in html_lower or s in url_lower for s in sinais)
 
 
-async def _processar_formulario_multistep_selenium(driver, perfil: dict, curriculo_path: str, vaga_url: str, resumo_curriculo: str) -> dict:
+async def _processar_formulario_multistep_selenium(driver, perfil: dict, curriculo_path: str, vaga_url: str, resumo_curriculo: str, idioma: str = "pt") -> dict:
     """Processa formulario Easy Apply multi-step via Selenium."""
     from automation.browser import notify_browser_step, wait_if_paused, get_intervention_state, set_intervention_state
 
@@ -512,6 +540,12 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
             pass
 
         for step in range(max_steps):
+            # 0. Descarta qualquer modal de "Descartar candidatura" que tenha sobrado
+            try:
+                await _fechar_modal_descarte(driver)
+            except Exception:
+                pass
+
             # 1. Aguarda se pausado (sai tambem se 'pular' foi solicitado)
             control = await get_intervention_state()
             if control.get("paused") or control.get("intervention_type") == "manual":
@@ -548,7 +582,8 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
                             pergunta, perfil,
                             vaga_titulo=vaga_titulo,
                             vaga_empresa="",
-                            resumo_curriculo=resumo_curriculo
+                            resumo_curriculo=resumo_curriculo,
+                            idioma=idioma,
                         )
                         respostas_geradas[pergunta] = resposta
                         await notify_browser_step("step_"+str(step), "respondendo", f"Pergunta: {pergunta[:40]}...")
@@ -564,8 +599,15 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
             btn_text, btn_clicked = await _clicar_botao_primario_modal(driver)
 
             if not btn_clicked:
-                print(f"[LINKEDIN] Step {step}: nenhum botão encontrado no modal")
-                break
+                # Pode haver um modal de descarte sobreposto — tenta dispensar e re-clicar
+                dispensado = await _fechar_modal_descarte(driver)
+                if dispensado:
+                    await asyncio.sleep(1)
+                    btn_text, btn_clicked = await _clicar_botao_primario_modal(driver)
+
+                if not btn_clicked:
+                    print(f"[LINKEDIN] Step {step}: nenhum botão encontrado no modal")
+                    break
 
             print(f"[LINKEDIN] Step {step}: clicou botão '{btn_text}'")
             btn_lower = btn_text.lower()
@@ -709,6 +751,12 @@ async def _detectar_perguntas_nao_respondidas_selenium(driver) -> list:
     Inclui text, number, textarea, select e fieldsets com radio buttons."""
     perguntas = []
     try:
+        _NUMERIC_KEYWORDS = {
+            "years", "months", "how many", "quantos", "quanto", "anos", "meses",
+            "número", "numero", "salary", "salário", "amount", "quantidade",
+            "experiencia", "experience", "nota", "score", "gpa", "rate",
+        }
+
         inputs = driver.find_elements(By.CSS_SELECTOR,
             "input[type='text'], input[type='number'], textarea"
         )
@@ -727,7 +775,19 @@ async def _detectar_perguntas_nao_respondidas_selenium(driver) -> list:
             except Exception:
                 pass
             if not current_val:
-                perguntas.append(label)
+                input_type = ""
+                try:
+                    input_type = (inp.get_attribute("type") or "").lower()
+                except Exception:
+                    pass
+                is_numeric = (
+                    input_type == "number"
+                    or any(kw in label_lower for kw in _NUMERIC_KEYWORDS)
+                )
+                if is_numeric:
+                    perguntas.append(f"NUMERO:{label}")
+                else:
+                    perguntas.append(label)
 
         selects = driver.find_elements(By.CSS_SELECTOR, "select")
         for sel_elem in selects:
@@ -788,7 +848,7 @@ async def _detectar_perguntas_nao_respondidas_selenium(driver) -> list:
 
 async def _preencher_resposta_customizada_selenium(driver, pergunta: str, resposta: str) -> None:
     """Preenche campo de pergunta customizada pela label via Selenium.
-    Suporta text, number, textarea, select e radio buttons."""
+    Suporta text, number, textarea, select, radio e NUMERO: (apenas digitos)."""
     try:
         if pergunta.startswith("SELECT:"):
             parts = pergunta.split(":", 2)
@@ -802,13 +862,19 @@ async def _preencher_resposta_customizada_selenium(driver, pergunta: str, respos
             await _preencher_radio_selenium(driver, label_text, resposta)
             return
 
+        # NUMERO: a resposta já vem só com dígitos de form_filler; garante aqui também
+        is_numero = pergunta.startswith("NUMERO:")
+        pergunta_busca = pergunta[7:] if is_numero else pergunta
+        if is_numero:
+            resposta = re.sub(r'[^\d]', '', resposta) or "1"
+
         labels = driver.find_elements(By.CSS_SELECTOR, "label")
         for label in labels:
             try:
                 label_text = (label.text or "").lower()
             except Exception:
                 continue
-            if pergunta.lower()[:30] in label_text:
+            if pergunta_busca.lower()[:30] in label_text:
                 label_for = label.get_attribute("for")
                 if label_for:
                     el = driver.find_elements(By.ID, label_for)
@@ -818,16 +884,16 @@ async def _preencher_resposta_customizada_selenium(driver, pergunta: str, respos
                         if tag == "textarea":
                             el[0].clear()
                             el[0].send_keys(resposta[:500])
-                            print(f"[LINKEDIN] Preencheu textarea: {pergunta[:40]} = {resposta[:30]}")
-                        elif input_type == "number":
+                            print(f"[LINKEDIN] Preencheu textarea: {pergunta_busca[:40]} = {resposta[:30]}")
+                        elif input_type == "number" or is_numero:
                             digits = re.sub(r'[^\d]', '', resposta)
                             el[0].clear()
-                            el[0].send_keys(digits or "0")
-                            print(f"[LINKEDIN] Preencheu number: {pergunta[:40]} = {digits}")
+                            el[0].send_keys(digits or "1")
+                            print(f"[LINKEDIN] Preencheu number: {pergunta_busca[:40]} = {digits}")
                         else:
                             el[0].clear()
                             el[0].send_keys(resposta[:200])
-                            print(f"[LINKEDIN] Preencheu text: {pergunta[:40]} = {resposta[:30]}")
+                            print(f"[LINKEDIN] Preencheu text: {pergunta_busca[:40]} = {resposta[:30]}")
                         return
     except Exception as e:
         logger.debug("linkedin_selenium: erro ao preencher resposta: %s", e)
@@ -1180,6 +1246,21 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
             if not resultado.get("sucesso"):
                 resultados["falhas"] += 1
 
+            # Registra no Neo4j para evitar re-aplicação (exceto vagas ignoradas por sem_match)
+            if vaga_id and not resultado.get("pulada"):
+                try:
+                    from graph.neo4j_client import get_neo4j
+                    _neo4j = get_neo4j()
+                    _status = "candidatado" if resultado.get("sucesso") else "tentativa_falhou"
+                    _neo4j.registrar_candidatura(
+                        user_id=user_id,
+                        vaga_id=vaga_id,
+                        plataforma="linkedin",
+                        status=_status,
+                    )
+                except Exception as _e:
+                    logger.warning("linkedin_selenium: erro ao registrar candidatura: %s", _e)
+
             driver = await get_driver()
             if driver:
                 try:
@@ -1250,6 +1331,127 @@ async def _dismissar_cookie_banner(driver) -> None:
                 continue
     except Exception:
         pass
+
+
+async def _fechar_modal_descarte(driver) -> bool:
+    """Detecta e fecha modal 'Descartar candidatura' clicando em Continuar editando.
+    Retorna True se um modal de descarte foi encontrado e dispensado."""
+    keep_labels = [
+        "continue applying", "continuar candidatura", "continuar editando",
+        "keep editing", "manter candidatura", "go back", "voltar",
+        "não, continuar", "no, continue",
+    ]
+    discard_markers = ["discard", "descartar", "abandon"]
+
+    def _dismiss():
+        try:
+            dialogs = driver.find_elements(
+                By.CSS_SELECTOR,
+                "div[role='alertdialog'], div[role='dialog']"
+            )
+            for dialog in dialogs:
+                try:
+                    text = (dialog.text or "").lower()
+                except Exception:
+                    continue
+                if not any(k in text for k in discard_markers):
+                    continue
+                # Found a discard dialog — look for the "keep" button
+                btns = dialog.find_elements(By.TAG_NAME, "button")
+                for btn in btns:
+                    try:
+                        t = (btn.text or "").strip().lower()
+                        if any(k in t for k in keep_labels):
+                            if btn.is_displayed() and btn.is_enabled():
+                                btn.click()
+                                return True
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        return False
+
+    try:
+        result = await _run_in_thread(_dismiss)
+        if result:
+            await asyncio.sleep(0.8)
+        return result
+    except Exception:
+        return False
+
+
+async def _extrair_descricao_vaga(driver) -> str:
+    """Extrai texto da descrição da vaga na página atual."""
+    def _extract():
+        seletores = [
+            ".jobs-description__content",
+            ".jobs-description-content__text",
+            "div[class*='job-description']",
+            ".description__text",
+            "#job-details",
+            "article.jobs-description",
+            ".jobs-box__html-content",
+            ".jobs-unified-top-card__job-insight",
+        ]
+        for sel in seletores:
+            try:
+                els = driver.find_elements(By.CSS_SELECTOR, sel)
+                if els and els[0].is_displayed():
+                    text = (els[0].text or "").strip()
+                    if len(text) > 100:
+                        return text[:3000]
+            except Exception:
+                continue
+        return ""
+
+    try:
+        return await _run_in_thread(_extract)
+    except Exception:
+        return ""
+
+
+async def _avaliar_match_vaga(descricao: str, curriculo: str) -> dict:
+    """
+    Avalia se a vaga é compatível com o currículo via LLM barato.
+    Retorna: {"aplicar": bool, "idioma": "pt"|"en", "motivo": str}
+    """
+    if not descricao or not curriculo:
+        return {"aplicar": True, "idioma": "pt", "motivo": "sem dados para avaliar"}
+
+    import json as _json
+    from ai.openrouter import openrouter
+
+    prompt = f"""You are evaluating if a job description matches a candidate's resume.
+
+JOB DESCRIPTION (first 2000 chars):
+{descricao[:2000]}
+
+CANDIDATE RESUME (first 1500 chars):
+{curriculo[:1500]}
+
+Respond with ONLY valid JSON, no markdown, no explanation:
+{{"aplicar": true, "idioma": "pt", "motivo": "brief reason"}}
+
+Rules:
+- "aplicar": true if the job is reasonably compatible (be lenient — only set false for clearly unrelated roles like developer resume for nursing/accounting/unrelated field)
+- "idioma": language of the job description — "pt" for Portuguese, "en" for English
+- "motivo": one sentence explaining the decision"""
+
+    try:
+        resp = openrouter.converse([{"role": "user", "content": prompt}])
+        resp = resp.strip()
+        json_match = re.search(r'\{[^{}]+\}', resp, re.DOTALL)
+        if json_match:
+            data = _json.loads(json_match.group())
+            return {
+                "aplicar": bool(data.get("aplicar", True)),
+                "idioma": str(data.get("idioma", "pt")),
+                "motivo": str(data.get("motivo", "")),
+            }
+    except Exception as e:
+        logger.warning("_avaliar_match_vaga erro LLM: %s", e)
+
+    return {"aplicar": True, "idioma": "pt", "motivo": "fallback"}
 
 
 _JS_CLICK_EASY_APPLY = """
@@ -1440,7 +1642,10 @@ async def extrair_vagas_da_busca(perfil: dict, max_vagas: int = 20) -> dict:
 
     if not await _driver_session_valida():
         print("[LINKEDIN] Sessão inválida na extração - reabrindo browser")
-        await fechar()
+        try:
+            await fechar()
+        except Exception:
+            pass
         await nova_pagina(easy_apply_url, reutilizar=False)
         await asyncio.sleep(3)
         driver = await get_driver()
@@ -1454,14 +1659,11 @@ async def extrair_vagas_da_busca(perfil: dict, max_vagas: int = 20) -> dict:
             "mensagem": "Não foi possível fazer login no LinkedIn. Verifique LINKEDIN_EMAIL e LINKEDIN_PASSWORD no .env.",
         }
 
-    current_url = driver.current_url
-    # Se já está em uma página de jobs (search, easy-apply, etc), não navega
-    url_lower = current_url.lower()
-    if "jobs" not in url_lower and "feed" not in url_lower:
-        await navegar(easy_apply_url)
-        await asyncio.sleep(3)
+    # Após login, sempre navega para a aba de vagas Easy Apply
+    await navegar(easy_apply_url)
+    await asyncio.sleep(4)
 
-    await notify_browser_step("linkedin_extracao", "iniciando", "Extraindo vagas da página atual")
+    await notify_browser_step("linkedin_extracao", "iniciando", f"Extraindo vagas de {easy_apply_url}")
 
     cards = await _extrair_cards_vaga(max_vagas)
 
@@ -1563,7 +1765,10 @@ async def _extrair_vagas_playwright(page, max_vagas: int = 20) -> dict:
 
 async def _extrair_cards_vaga(max_vagas: int = 20) -> list[dict]:
     """Extrai dados dos cards de vaga visíveis na página de busca."""
+    import time
     from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
 
     driver = await get_driver()
     if not driver:
@@ -1571,99 +1776,155 @@ async def _extrair_cards_vaga(max_vagas: int = 20) -> list[dict]:
 
     def _procurar():
         resultados = []
-        cards = driver.find_elements(By.CSS_SELECTOR,
-            ".job-card-container, .jobs-search__result-card, .base-card, "
-            ".jobs-easy-apply__card, .job-card--easy-apply, .job-card"
-        )
+
+        # Aguarda aparecer pelo menos um card (LinkedIn renderiza via JS)
+        try:
+            WebDriverWait(driver, 15).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR,
+                    "li.scaffold-layout__list-item, .job-card-container, "
+                    ".jobs-search-results__list-item, [class*='job-card']"
+                ))
+            )
+        except Exception:
+            pass
+        time.sleep(2)
+
+        # Scroll para disparar lazy-load de cards adicionais
+        last_h = driver.execute_script("return document.body.scrollHeight")
+        for _ in range(4):
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(1.5)
+            new_h = driver.execute_script("return document.body.scrollHeight")
+            if new_h == last_h:
+                break
+            last_h = new_h
+        driver.execute_script("window.scrollTo(0, 0);")
+        time.sleep(1)
+
+        # Seletores em ordem de prioridade para diferentes versões do LinkedIn
+        cards = []
+        for sel in [
+            "li.scaffold-layout__list-item",
+            ".jobs-search-results__list-item",
+            ".job-card-container",
+            "[class*='job-card-container']",
+            ".jobs-search__result-card",
+            ".base-card",
+            "[class*='job-card']",
+        ]:
+            try:
+                found = driver.find_elements(By.CSS_SELECTOR, sel)
+                if found:
+                    print(f"[LINKEDIN] {len(found)} cards via: {sel}")
+                    cards = found
+                    break
+            except Exception:
+                continue
+
+        # Fallback: todos os links /jobs/view/ visíveis na página
         if not cards:
+            print("[LINKEDIN] Nenhum card — usando links /jobs/view/ como fallback")
+            links = driver.find_elements(By.XPATH, "//a[contains(@href, '/jobs/view/')]")
+            seen = set()
+            for link in links:
+                try:
+                    url = link.get_attribute("href") or ""
+                    if not url or url in seen or "/jobs/view/" not in url:
+                        continue
+                    seen.add(url)
+                    titulo = link.text.strip() or link.get_attribute("aria-label") or ""
+                    vaga_id = url.split("/jobs/view/")[1].split("/")[0].split("?")[0]
+                    if vaga_id:
+                        resultados.append({
+                            "id": f"linkedin-{vaga_id}",
+                            "titulo": titulo or f"Vaga {vaga_id}",
+                            "empresa": "",
+                            "url": url,
+                            "fonte": "LinkedIn",
+                            "easy_apply": True,
+                            "salario": "", "modalidade": "", "descricao": "", "local": "",
+                        })
+                    if len(resultados) >= max_vagas:
+                        break
+                except Exception:
+                    continue
             return resultados
 
-        for card in cards[:max_vagas]:
+        seen_urls: set = set()
+        for card in cards[:max_vagas * 2]:
             try:
                 titulo = ""
+                url = ""
+                empresa = ""
+
+                # URL — link que aponta para /jobs/view/
                 try:
-                    el = card.find_element(By.CSS_SELECTOR,
-                        ".job-card-list__title, .base-search-card__title, h3, "
-                        "a[data-control-name='job_card_title'], .job-card-title"
-                    )
-                    titulo = el.text.strip()
+                    link_el = card.find_element(By.XPATH, ".//a[contains(@href, '/jobs/view/')]")
+                    url = link_el.get_attribute("href") or ""
+                    candidate = link_el.text.strip() or link_el.get_attribute("aria-label") or ""
+                    if candidate:
+                        titulo = candidate
                 except Exception:
                     pass
+
+                if not url or url in seen_urls:
+                    continue
+                seen_urls.add(url)
+
+                # Título — seletores alternativos
                 if not titulo:
+                    for sel in [
+                        ".job-card-list__title--link",
+                        ".job-card-list__title",
+                        "a.job-card-container__link",
+                        "[class*='job-card'][class*='title']",
+                        "h3", "h2",
+                    ]:
+                        try:
+                            el = card.find_element(By.CSS_SELECTOR, sel)
+                            t = el.text.strip() or el.get_attribute("aria-label") or ""
+                            if t:
+                                titulo = t
+                                break
+                        except Exception:
+                            pass
+
+                # Empresa
+                for sel in [
+                    ".job-card-container__primary-description",
+                    ".job-card-container__company-name",
+                    "[class*='company-name']",
+                    ".artdeco-entity-lockup__subtitle",
+                    ".base-search-card__subtitle",
+                ]:
                     try:
-                        el = card.find_element(By.XPATH, ".//a[contains(@href, '/jobs/view/')]")
-                        titulo = el.text.strip()
+                        el = card.find_element(By.CSS_SELECTOR, sel)
+                        t = el.text.strip()
+                        if t:
+                            empresa = t
+                            break
                     except Exception:
                         pass
 
-                empresa = ""
-                try:
-                    el = card.find_element(By.CSS_SELECTOR,
-                        ".job-card-container__primary-description, .base-search-card__subtitle, "
-                        ".job-card-container__company-name, .job-card-company-name"
-                    )
-                    empresa = el.text.strip()
-                except Exception:
-                    pass
+                vaga_id = url.split("/jobs/view/")[1].split("/")[0].split("?")[0] if "/jobs/view/" in url else ""
+                if not vaga_id:
+                    continue
 
-                url = ""
-                try:
-                    el = card.find_element(By.XPATH, ".//a[contains(@href, '/jobs/view/')]")
-                    url = el.get_attribute("href") or ""
-                except Exception:
-                    pass
+                resultados.append({
+                    "id": f"linkedin-{vaga_id}",
+                    "titulo": titulo or f"Vaga {vaga_id}",
+                    "empresa": empresa,
+                    "url": url,
+                    "fonte": "LinkedIn",
+                    "easy_apply": True,
+                    "salario": "", "modalidade": "", "descricao": "", "local": "",
+                })
 
-                local = ""
-                try:
-                    el = card.find_element(By.CSS_SELECTOR,
-                        ".job-card-container__metadata, .job-search-card__location, "
-                        ".base-search-card__metadata, .job-card-location"
-                    )
-                    local = el.text.strip()
-                except Exception:
-                    pass
-
-                modalidade = ""
-                try:
-                    el = card.find_element(By.CSS_SELECTOR,
-                        ".job-card-container__footer, .job-search-card__benefits, "
-                        ".job-card-properties, .job-card-benefits"
-                    )
-                    modalidade = el.text.strip()
-                except Exception:
-                    pass
-
-                easy_apply = False
-                try:
-                    ea_btn = card.find_element(By.CSS_SELECTOR,
-                        "button.jobs-apply-button, button[data-control-name='apply_show_modal'], "
-                        "button[aria-label*='Easy Apply'], button[aria-label*='Candidatura simplificada'], "
-                        ".jobs-apply-button, [data-control-name='apply_show_modal'], "
-                        "[aria-label*='Easy Apply'], [aria-label*='Candidatura simplificada']"
-                    )
-                    if ea_btn and ea_btn.is_displayed():
-                        ea_text = (ea_btn.text or "").strip().lower()
-                        if "easy apply" in ea_text or "candidatura simplificada" in ea_text or "apply" in ea_text:
-                            easy_apply = True
-                except Exception:
-                    pass
-
-                if titulo and url:
-                    vaga_id = url.split("/jobs/view/")[1].split("/")[0].split("?")[0] if "/jobs/view/" in url else url
-                    resultados.append({
-                        "id": f"linkedin-{vaga_id}",
-                        "titulo": titulo,
-                        "empresa": empresa,
-                        "url": url,
-                        "fonte": "LinkedIn",
-                        "salario": "",
-                        "modalidade": modalidade,
-                        "descricao": "",
-                        "local": local,
-                        "easy_apply": easy_apply,
-                    })
+                if len(resultados) >= max_vagas:
+                    break
             except Exception:
                 continue
+
         return resultados
 
     return await _run_in_thread(_procurar)

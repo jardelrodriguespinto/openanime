@@ -41,6 +41,17 @@ _MAX_HISTORY = 50
 _status_history = []
 _MAX_HISTORY = 50
 
+# Rastreamento de tasks de automação em andamento
+_current_tasks: set = set()
+
+
+def _track_task(coro):
+    """Cria task rastreada para poder cancelar com o botão Parar."""
+    task = asyncio.create_task(coro)
+    _current_tasks.add(task)
+    task.add_done_callback(_current_tasks.discard)
+    return task
+
 
 def _set_automacao_status(running: bool, action: str = "idle", platform: str = "", mensagem: str = ""):
     global _automacao_status
@@ -794,6 +805,15 @@ async def buscar_vagas_dashboard(request: Request):
     plataforma = body.get("platform", "")
     user_id = os.getenv("DASHBOARD_USER_ID", "admin")
 
+    # Limpa sinal de parar para não bloquear a nova execução
+    try:
+        from automation.browser import set_intervention_state, get_intervention_state
+        ctrl = await get_intervention_state()
+        if ctrl.get("current_action") == "parar":
+            await set_intervention_state("current_action", "rodando")
+    except Exception:
+        pass
+
     async def _run_busca():
         try:
             _set_automacao_status(True, "buscando", plataforma or "browser-use", f"Buscando vagas: {query}")
@@ -886,19 +906,34 @@ async def buscar_vagas_dashboard(request: Request):
                     _set_automacao_status(False, "erro", "", str(e))
                     emit_status_update()
 
-            asyncio.create_task(_auto_aplicar())
+            _track_task(_auto_aplicar())
         except Exception as e:
             _set_automacao_status(False, "erro", "", str(e))
             set_browser_current_step("erro", "falha", str(e))
             emit_status_update()
 
-    asyncio.create_task(_run_busca())
+    _track_task(_run_busca())
     return JSONResponse({"success": True, "message": "Busca iniciada com browser visível"})
 
 
 @fastapi_app.post("/api/automacao/parar")
 async def parar_automacao():
-    _set_automacao_status(False, "idle", "", "Automação parada")
+    # Sinaliza stop para loops que aguardam em wait_if_paused
+    try:
+        from automation.browser import set_intervention_state
+        await set_intervention_state("current_action", "parar")
+    except Exception:
+        pass
+
+    # Cancela tasks de automação rodando
+    canceladas = 0
+    for task in list(_current_tasks):
+        if not task.done():
+            task.cancel()
+            canceladas += 1
+    _current_tasks.clear()
+
+    _set_automacao_status(False, "idle", "", f"Automação parada ({canceladas} tasks canceladas)")
     emit_status_update()
     return JSONResponse({"success": True, "message": "Automação parada"})
 
@@ -951,7 +986,7 @@ async def aplicar_vagas_lote(request: Request):
             _set_automacao_status(False, "erro", "", str(e))
             emit_status_update()
     
-    asyncio.create_task(_run_aplicacao_lote())
+    _track_task(_run_aplicacao_lote())
     return JSONResponse({"success": True, "message": f"Iniciando aplicação automática para vagas com score ≥ {int(limiar_score*100)}%"})
 
 
@@ -1017,7 +1052,7 @@ async def aplicar_vaga_dashboard(request: Request):
             set_browser_current_step("erro", "falha", str(e))
             emit_status_update()
 
-    asyncio.create_task(_run_apply())
+    _track_task(_run_apply())
     return JSONResponse({"success": True, "message": "Aplicação iniciada em background"})
 
 
@@ -1027,6 +1062,15 @@ async def extrair_vagas_linkedin(request: Request):
     body = await request.json()
     max_vagas = int(body.get("max_vagas", 20))
     user_id = os.getenv("DASHBOARD_USER_ID", "admin")
+
+    # Limpa sinal de parar para não bloquear a nova execução
+    try:
+        from automation.browser import set_intervention_state, get_intervention_state
+        ctrl = await get_intervention_state()
+        if ctrl.get("current_action") == "parar":
+            await set_intervention_state("current_action", "rodando")
+    except Exception:
+        pass
 
     async def _run_extracao():
         try:
@@ -1072,7 +1116,7 @@ async def extrair_vagas_linkedin(request: Request):
             set_browser_current_step("extracao_fim", "falha", str(e))
             emit_status_update()
 
-    asyncio.create_task(_run_extracao())
+    _track_task(_run_extracao())
     return JSONResponse({"success": True, "message": f"Extraindo até {max_vagas} vagas da página do LinkedIn"})
 
 
@@ -1082,6 +1126,15 @@ async def aplicar_vagas_visiveis_linkedin_endpoint(request: Request):
     body = await request.json()
     max_vagas = int(body.get("max_vagas", 5))
     user_id = os.getenv("DASHBOARD_USER_ID", "admin")
+
+    # Limpa sinal de parar para não bloquear a nova execução
+    try:
+        from automation.browser import set_intervention_state, get_intervention_state
+        ctrl = await get_intervention_state()
+        if ctrl.get("current_action") == "parar":
+            await set_intervention_state("current_action", "rodando")
+    except Exception:
+        pass
 
     async def _run_apply_visiveis():
         try:
@@ -1111,7 +1164,7 @@ async def aplicar_vagas_visiveis_linkedin_endpoint(request: Request):
             _set_automacao_status(False, "erro", "linkedin", str(e))
             emit_status_update()
 
-    asyncio.create_task(_run_apply_visiveis())
+    _track_task(_run_apply_visiveis())
     return JSONResponse({"success": True, "message": f"Iniciando aplicação em até {max_vagas} vagas visíveis no LinkedIn"})
 
 

@@ -222,9 +222,13 @@ async def notify_browser_step(step: str = "", action: str = "", detail: str = ""
 
 async def wait_if_paused(page=None, step_name: str = ""):
     """Aguarda se o usuario pausou a automacao.
-    Nao consome o sinal 'pular' — sai do loop para que o chamador decida pular."""
+    Nao consome o sinal 'pular' — sai do loop para que o chamador decida pular.
+    Lança CancelledError se o usuario clicou em Parar."""
     while True:
         control = await get_intervention_state()
+        # Parar: propaga cancelamento para encerrar toda a automacao
+        if control.get("current_action") == "parar":
+            raise asyncio.CancelledError("Automação parada pelo usuário")
         # Sai sem consumir: o loop do step verifica e faz continue
         if control.get("current_action") == "pular":
             return True
