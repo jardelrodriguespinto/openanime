@@ -618,17 +618,45 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "", user_id
         return {"sucesso": False, "mensagem": str(e)}
 
 
+# Frases ESPECÍFICAS do modal de confirmação pós-envio. NÃO inclui "applied"
+# (genérico demais — aparece no fundo da listagem de vagas já candidatadas e
+# causava falso-positivo de sucesso já no 1º 'Avançar').
+_FRASES_SUCESSO = (
+    "candidatura enviada", "sua candidatura foi enviada", "candidatura foi enviada",
+    "application submitted", "application sent", "your application was sent",
+    "we received your application", "candidatura recebida", "candidatura realizada",
+    "obrigado pela candidatura", "thank you for applying", "applicationsubmitted",
+)
+
+
+async def _candidatura_enviada(driver) -> bool:
+    """Confirma envio SÓ pelo modal de confirmação visível (não pela página de
+    fundo). Evita falso-positivo do 'applied' que aparece na listagem atrás do
+    modal e fazia o bot pular para outra vaga sem preencher/enviar."""
+    def _check():
+        for sel in ["div[role='dialog']", ".artdeco-modal", ".artdeco-toast-item"]:
+            for dlg in driver.find_elements(By.CSS_SELECTOR, sel):
+                try:
+                    if not dlg.is_displayed():
+                        continue
+                    low = (dlg.text or "").lower()
+                    if any(f in low for f in _FRASES_SUCESSO):
+                        return True
+                except Exception:
+                    continue
+        return False
+    try:
+        return await _run_in_thread(_check)
+    except Exception:
+        return False
+
+
 def _detectar_sucesso(html: str, url: str) -> bool:
-    """Detecta se a candidatura foi enviada com sucesso."""
+    """[legado] Detecta sucesso por texto da página inteira — use
+    _candidatura_enviada(driver) (escopo no modal) para evitar falso-positivo."""
     html_lower = (html or "").lower()
     url_lower = (url or "").lower()
-    sinais = [
-        "application submitted", "candidatura enviada", "your application was sent",
-        "applied", "candidatura realizada", "obrigado pela candidatura",
-        "thank you for applying", "sua candidatura foi enviada", "candidatura recebida",
-        "application sent", "we received your application",
-    ]
-    return any(s in html_lower or s in url_lower for s in sinais)
+    return any(s in html_lower or s in url_lower for s in _FRASES_SUCESSO)
 
 
 async def _detectar_erros_validacao(driver) -> list:
@@ -815,15 +843,7 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
             """Se a candidatura foi enviada, finaliza e devolve o dict de sucesso;
             senão None. Chamado após QUALQUER clique de botão primário — o botão de
             enviar às vezes volta com texto vazio e não casa is_submit."""
-            try:
-                _u = driver.current_url
-            except Exception:
-                _u = ""
-            try:
-                _html = driver.page_source
-            except Exception:
-                _html = ""
-            if _detectar_sucesso(_html, _u):
+            if await _candidatura_enviada(driver):
                 logger.info("linkedin_selenium: candidatura enviada com sucesso")
                 _registrar_run_log(f"FORM step {step_idx}: SUCESSO detectado")
                 await notify_browser_step("step_"+str(step_idx), "sucesso", "Candidatura enviada!")
@@ -988,12 +1008,7 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
 
             break
 
-        html = driver.page_source
-        try:
-            url_fim = driver.current_url
-        except Exception:
-            url_fim = ""
-        if _detectar_sucesso(html, url_fim):
+        if await _candidatura_enviada(driver):
             b64 = await screenshot_base64()
             await _finalizar_sucesso(driver, motivo="sucesso-fim")
             return {
@@ -2568,6 +2583,7 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
                     from graph.neo4j_client import get_neo4j
                     if get_neo4j().ja_se_candidatou(user_id, vaga_id):
                         print(f"[LINKEDIN] {vaga_id} já candidatada (Neo4j) — pulando")
+                        _registrar_run_log(f"SKIP {vaga_id} já-candidatado (Neo4j)")
                         await notify_browser_step("selenium_linkedin", "pulando", f"{vaga_id} — já candidatou (Neo4j)")
                         continue
                 except Exception:
@@ -2580,6 +2596,7 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
                 ja_na_pag = False
             if ja_na_pag:
                 print(f"[LINKEDIN] {vaga_id} — badge 'Aplicado' visível — pulando")
+                _registrar_run_log(f"SKIP {vaga_id} badge-Aplicado")
                 await notify_browser_step("selenium_linkedin", "pulando", f"{vaga_id} — badge Aplicado")
                 if vaga_id:
                     try:
@@ -2603,6 +2620,7 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
                     if match_cache and not match_cache.get("aplicar", True):
                         motivo_cache = match_cache.get("motivo", "match ruim (Neo4j cache)")
                         print(f"[LINKEDIN] Sem match (Neo4j cache) — pulando {vaga_id}: {motivo_cache}")
+                        _registrar_run_log(f"SKIP {vaga_id} sem-match-cache: {motivo_cache[:40]}")
                         await notify_browser_step("selenium_linkedin", "pulando", f"Cache: {motivo_cache}")
                         continue
                 except Exception:
@@ -2683,6 +2701,7 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
                     if not avaliacao.get("aplicar", True):
                         motivo = avaliacao.get("motivo", "sem match")
                         print(f"[LINKEDIN] Sem match — pulando {vaga_id}: {motivo}")
+                        _registrar_run_log(f"SKIP {vaga_id} sem-match-LLM: {motivo[:50]}")
                         await notify_browser_step("selenium_linkedin", "pulando", f"Sem match: {motivo}")
                         continue
 

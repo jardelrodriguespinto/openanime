@@ -1860,7 +1860,9 @@ class Neo4jClient:
         MERGE (v:Vaga {id: $vaga_id})
         MERGE (u)-[r:SE_CANDIDATOU {vaga_id: $vaga_id}]->(v)
         SET r.data = datetime(), r.plataforma = $plataforma, r.status = $status,
-            r.data_ultima_atualizacao = datetime()
+            r.data_ultima_atualizacao = datetime(),
+            r.tentativas = coalesce(r.tentativas, 0)
+                + (CASE WHEN $status = 'tentativa_falhou' THEN 1 ELSE 0 END)
         """
         with self.driver.session() as session:
             session.run(cypher, uid=user_id, vaga_id=vaga_id,
@@ -1949,8 +1951,13 @@ class Neo4jClient:
             return [dict(r) for r in result]
 
     def ja_se_candidatou(self, user_id: str, vaga_id: str) -> bool:
+        # Só considera "já candidatado" sucessos (candidatado/ja_aplicado).
+        # 'tentativa_falhou' NÃO bloqueia — deve ser re-tentada (até 3x), senão um
+        # form que falhou uma vez ficaria pulado para sempre e o bot esgota as vagas.
         cypher = """
         MATCH (u:Usuario {user_id: $tid})-[r:SE_CANDIDATOU {vaga_id: $vaga_id}]->(v:Vaga)
+        WHERE r.status IN ['candidatado', 'ja_aplicado']
+              OR coalesce(r.tentativas, 0) >= 3
         RETURN count(r) > 0 AS existe
         """
         with self.driver.session() as session:
