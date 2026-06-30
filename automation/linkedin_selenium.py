@@ -639,12 +639,14 @@ async def _detectar_erros_validacao(driver) -> list:
     """
     def _coletar():
         erros = []
-        # Mensagens inline do artdeco + roles de alerta
+        # 1. Mensagens inline conhecidas do artdeco + roles de alerta
         sels = [
             ".artdeco-inline-feedback--error",
             "[role='alert']",
             ".fb-dash-form-element__error-text",
             "[data-test-form-element-error-messages]",
+            ".artdeco-text-input--error",
+            "[aria-invalid='true']",
         ]
         for sel in sels:
             try:
@@ -656,6 +658,25 @@ async def _detectar_erros_validacao(driver) -> list:
                         erros.append(txt)
             except Exception:
                 continue
+        # 2. Fallback estrutura-agnóstico: varre o texto do modal por frases de erro.
+        #    LinkedIn varia as classes/idiomas; o texto é mais estável.
+        FRASES = [
+            "obrigatório", "obrigatorio", "insira uma resposta válida",
+            "insira uma resposta valida", "required", "please enter",
+            "please select", "this field is required", "enter a valid",
+            "campo obrigatório", "selecione uma opção",
+        ]
+        try:
+            for dlg in driver.find_elements(By.CSS_SELECTOR, "div[role='dialog'], .artdeco-modal"):
+                if not dlg.is_displayed():
+                    continue
+                low = (dlg.text or "").lower()
+                for fr in FRASES:
+                    if fr in low and fr not in [e.lower() for e in erros]:
+                        erros.append(fr)
+                break
+        except Exception:
+            pass
         return erros
 
     try:
@@ -664,9 +685,118 @@ async def _detectar_erros_validacao(driver) -> list:
         return []
 
 
+def _dump_form_debug_sync(driver) -> str:
+    """Escreve o HTML e um inventário dos controles do modal Easy Apply atual
+    num arquivo de debug. Permite inspecionar a estrutura REAL do formulário
+    (tipos de campo, labels, aria) quando o preenchimento falha — fim do chute.
+    Retorna o caminho do arquivo, ou "" em falha."""
+    import os
+    try:
+        modal = None
+        for sel in ["div[role='dialog']", ".artdeco-modal", ".jobs-easy-apply-modal"]:
+            els = [e for e in driver.find_elements(By.CSS_SELECTOR, sel) if e.is_displayed()]
+            if els:
+                modal = els[0]
+                break
+        scope = modal if modal is not None else driver
+        html = ""
+        try:
+            html = modal.get_attribute("outerHTML") if modal is not None else driver.page_source
+        except Exception:
+            html = driver.page_source
+
+        linhas = []
+        controles = scope.find_elements(
+            By.CSS_SELECTOR,
+            "input, select, textarea, [role='combobox'], [role='radio'], "
+            "button[aria-haspopup], [contenteditable='true']",
+        )
+        for c in controles:
+            try:
+                if not c.is_displayed():
+                    continue
+                tag = c.tag_name
+                attrs = {
+                    k: (c.get_attribute(k) or "")
+                    for k in ("type", "id", "name", "role", "aria-label",
+                              "aria-labelledby", "aria-required", "aria-invalid",
+                              "placeholder", "value")
+                }
+                lbl = ""
+                cid = attrs.get("id")
+                if cid:
+                    lblels = driver.find_elements(By.CSS_SELECTOR, f"label[for='{cid}']")
+                    if lblels:
+                        lbl = (lblels[0].text or "").strip().replace("\n", " ")
+                opts = ""
+                if tag == "select":
+                    try:
+                        opts = " | OPTIONS=" + ",".join(
+                            (o.text or "").strip() for o in c.find_elements(By.TAG_NAME, "option")
+                        )[:300]
+                    except Exception:
+                        pass
+                linhas.append(
+                    f"<{tag}> label='{lbl}' "
+                    + " ".join(f"{k}='{v}'" for k, v in attrs.items() if v)
+                    + opts
+                )
+            except Exception:
+                continue
+
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_linkedin_form_debug.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("=== INVENTÁRIO DE CONTROLES ===\n")
+            f.write("\n".join(linhas))
+            f.write("\n\n=== HTML DO MODAL ===\n")
+            f.write(html or "")
+        print(f"[LINKEDIN] DOM do formulário salvo em: {path}")
+        return path
+    except Exception as e:
+        print(f"[LINKEDIN] _dump_form_debug falhou: {e}")
+        return ""
+
+
+async def _obter_progresso(driver) -> str:
+    """Assinatura do estado do step para detectar não-avanço de forma
+    estrutura-agnóstica: progresso (aria-valuenow) + nº de campos vazios.
+    Se a assinatura não muda após clicar 'Avançar', o step travou."""
+    def _sig():
+        prog = ""
+        try:
+            for pb in driver.find_elements(By.CSS_SELECTOR, "[role='progressbar'], progress"):
+                v = pb.get_attribute("aria-valuenow") or pb.get_attribute("value") or ""
+                if v:
+                    prog = v
+                    break
+        except Exception:
+            pass
+        vazios = 0
+        try:
+            for el in driver.find_elements(By.CSS_SELECTOR, "input, select, textarea"):
+                try:
+                    if el.is_displayed() and not (el.get_attribute("value") or "").strip():
+                        vazios += 1
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return f"p={prog};vazios={vazios}"
+
+    try:
+        return await _run_in_thread(_sig)
+    except Exception:
+        return ""
+
+
 async def _processar_formulario_multistep_selenium(driver, perfil: dict, curriculo_path: str, vaga_url: str, resumo_curriculo: str, idioma: str = "pt") -> dict:
     """Processa formulario Easy Apply multi-step via Selenium."""
     from automation.browser import notify_browser_step, wait_if_paused, get_intervention_state, set_intervention_state
+
+    # Garante que o preenchimento (ex.: extração de cidade) enxergue o currículo,
+    # mesmo quando o perfil veio sem o campo e o resumo foi resolvido à parte.
+    if resumo_curriculo and not perfil.get("resumo_curriculo"):
+        perfil = {**perfil, "resumo_curriculo": resumo_curriculo}
 
     perguntas_customizadas = []
     respostas_geradas = {}
@@ -736,6 +866,9 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
                 await notify_browser_step("step_"+str(step), "pulado", "Usuário pediu pular")
                 continue
 
+            # Assinatura do step antes de clicar — para detectar não-avanço
+            sig_antes = await _obter_progresso(driver)
+
             btn_text, btn_clicked = await _clicar_botao_primario_modal(driver)
 
             if not btn_clicked:
@@ -771,11 +904,7 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
                     logger.info("linkedin_selenium: candidatura enviada com sucesso")
                     await notify_browser_step("step_"+str(step), "sucesso", "Candidatura enviada!")
                     b64 = await screenshot_base64()
-                    # Clica em Concluído antes de navegar
-                    await _fechar_modal_sucesso(driver)
-                    await asyncio.sleep(0.5)
-                    await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
-                    await asyncio.sleep(2)
+                    await _finalizar_sucesso(driver, motivo="sucesso-step")
                     return {
                         "sucesso": True,
                         "perguntas_respondidas": perguntas_customizadas,
@@ -788,15 +917,24 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
             else:
                 await notify_browser_step("step_"+str(step), "navegando", f"Avançando: {btn_text}")
                 await asyncio.sleep(2)
-                # Keystone: o clique em 'Avançar' pode ter sido recusado por campo
-                # obrigatório vazio/inválido. Se há erro de validação, o step NÃO
-                # avançou — clicar de novo no mesmo botão repetiria indefinidamente
-                # (e no fim cairíamos em 'Salvar candidatura?' → jobs-tracker).
+                # Keystone (estrutura-agnóstico): o clique em 'Avançar' pode ter sido
+                # recusado por campo obrigatório vazio/inválido. Detecta de DUAS formas
+                # independentes da estrutura exata do DOM:
+                #   1) mensagem de erro de validação visível;
+                #   2) a assinatura do step (progresso + nº de campos vazios) não mudou.
+                # Qualquer uma → o step travou; clicar de novo só repetiria até cair
+                # em 'Salvar candidatura?' → jobs-tracker. Dump do DOM + bail limpo.
                 erros = await _detectar_erros_validacao(driver)
-                if erros:
-                    msg = " | ".join(erros[:3])
-                    print(f"[LINKEDIN] Step {step}: validação bloqueou avanço — {msg}")
-                    await notify_browser_step("step_"+str(step), "bloqueado", f"Campo obrigatório: {msg[:80]}")
+                sig_depois = await _obter_progresso(driver)
+                travado = bool(erros) or (sig_antes and sig_antes == sig_depois)
+                if travado:
+                    motivo = (" | ".join(erros[:3])) if erros else f"sem avanço ({sig_depois})"
+                    print(f"[LINKEDIN] Step {step}: avanço bloqueado — {motivo}")
+                    await notify_browser_step("step_"+str(step), "bloqueado", f"Travou: {motivo[:80]}")
+                    try:
+                        await _run_in_thread(_dump_form_debug_sync, driver)
+                    except Exception:
+                        pass
                     break
                 continue
 
@@ -809,10 +947,7 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
             url_fim = ""
         if _detectar_sucesso(html, url_fim):
             b64 = await screenshot_base64()
-            await _fechar_modal_sucesso(driver)
-            await asyncio.sleep(0.5)
-            await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
-            await asyncio.sleep(2)
+            await _finalizar_sucesso(driver, motivo="sucesso-fim")
             return {
                 "sucesso": True,
                 "perguntas_respondidas": perguntas_customizadas,
@@ -821,13 +956,17 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
             }
 
         b64 = await screenshot_base64()
+        # Captura a estrutura real do formulário antes de descartar (modal ainda aberto)
+        try:
+            await _run_in_thread(_dump_form_debug_sync, driver)
+        except Exception:
+            pass
         # Fecha modal Easy Apply ainda aberto (se houver) antes de navegar — descarta candidatura
         try:
             await _escapar_modal_ativo(driver)
         except Exception:
             pass
-        await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
-        await asyncio.sleep(2)
+        await _voltar_para_listagem(driver, motivo="formulario-incompleto")
         return {
             "sucesso": False,
             "motivo_falha": "formulario_incompleto",
@@ -836,10 +975,14 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
         }
     except Exception as e:
         logger.error(f"_processar_formulario_multistep_selenium erro: {e}")
+        _registrar_run_log(f"FORM except: {e}")
+        try:
+            await _run_in_thread(_dump_form_debug_sync, driver)
+        except Exception:
+            pass
         try:
             await _escapar_modal_ativo(driver)
-            await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
-            await asyncio.sleep(2)
+            await _voltar_para_listagem(driver, motivo="form-except")
         except Exception:
             pass
         return {
@@ -849,6 +992,26 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
         }
 
 
+def _extrair_cidade_do_curriculo(resumo: str) -> str:
+    """Extrai a cidade do texto do currículo/informações pessoais.
+    Cobre 'Cidade: Joinville', 'Cidade Joinville', 'Localização: X', 'Endereço ... , Cidade'.
+    Determinístico (regex) — não depende de chamada de LLM."""
+    if not resumo:
+        return ""
+    # 1) Rótulos explícitos
+    for pat in (r"cidade\s*[:\-]\s*([^\n,;:]+)",
+                r"localiza[çc][aã]o\s*[:\-]\s*([^\n,;:]+)",
+                r"city\s*[:\-]\s*([^\n,;:]+)"):
+        m = re.search(pat, resumo, re.IGNORECASE)
+        if m:
+            cidade = m.group(1).strip(" .,-:\t")
+            # remove sufixos de estado/país que possam ter colado
+            cidade = re.split(r"\s+(?:estado|pa[íi]s|bairro|brasil|brazil)\b", cidade, flags=re.IGNORECASE)[0].strip()
+            if 1 < len(cidade) <= 40:
+                return cidade
+    return ""
+
+
 async def _preencher_cidade_autocomplete(driver, cidade: str) -> None:
     """Preenche campo cidade/localização com suporte ao autocomplete do LinkedIn.
 
@@ -856,14 +1019,23 @@ async def _preencher_cidade_autocomplete(driver, cidade: str) -> None:
     uma sugestão ou pressionar Tab para comprometer o valor, evitando que o dropdown
     aberto interfira nos cliques seguintes (ex.: botão Avançar fora do modal).
     """
+    # Campo real do LinkedIn: id '...location-GEO-LOCATION', label 'Location (city)',
+    # role='combobox' (typeahead). Os seletores antigos só viam 'city' e eram
+    # case-sensitive — não casavam com 'location'/'Location (city)'. Cobrir tudo.
     CITY_SELS = [
-        "input[aria-label*='City']",
-        "input[aria-label*='Cidade']",
-        "input[aria-label*='city']",
-        "input[name*='city']",
-        "input[id*='city']",
-        "input[placeholder*='City']",
-        "input[placeholder*='Cidade']",
+        "input[id*='location']",
+        "input[id*='GEO-LOCATION']",
+        "input[id*='typeahead-entity']",
+        "input[id*='city' i]",
+        "input[role='combobox'][id*='typeahead']",
+        "input[aria-label*='location' i]",
+        "input[aria-label*='city' i]",
+        "input[aria-label*='cidade' i]",
+        "input[aria-label*='locali' i]",
+        "input[name*='city' i]",
+        "input[name*='location' i]",
+        "input[placeholder*='city' i]",
+        "input[placeholder*='cidade' i]",
     ]
     SUGGESTION_SELS = [
         "[role='option']",
@@ -1059,10 +1231,20 @@ async def _preencher_step_selenium(driver, perfil: dict, curriculo_path: str) ->
     except Exception:
         pass
 
-    # Cidade com autocomplete — separado para evitar dropdown aberto ao clicar Avançar
+    # Cidade com autocomplete — campo obrigatório no Easy Apply (vazio = "Insira uma
+    # resposta válida" e trava tudo). Ordem de origem da cidade:
+    #   1) perfil.localizacao  2) extraída do texto do currículo  3) env (último caso)
     cidade_val = perfil.get("localizacao", "").split(",")[0].strip() if perfil.get("localizacao") else ""
+    if not cidade_val:
+        cidade_val = _extrair_cidade_do_curriculo(perfil.get("resumo_curriculo", ""))
+        if cidade_val:
+            print(f"[LINKEDIN] Cidade extraída do currículo: {cidade_val}")
+    if not cidade_val:
+        cidade_val = os.getenv("LINKEDIN_CIDADE", "").strip()
     if cidade_val:
         await _preencher_cidade_autocomplete(driver, cidade_val)
+    else:
+        print("[LINKEDIN] AVISO: cidade não encontrada (perfil/currículo) — campo de localização vai travar o form")
 
     # Seleciona CV em inglês se houver múltiplos CVs já enviados ao LinkedIn
     def _selecionar_cv_ingles():
@@ -1995,32 +2177,184 @@ async def _scroll_lista_vagas(driver) -> None:
 
 
 async def _ir_proxima_pagina_vagas(driver) -> bool:
-    """Clica no botão 'Próximo' da paginação LinkedIn. Retorna True se navegou."""
-    def _click_next():
-        for sel in [
-            "button[aria-label='Next']",
-            "button[aria-label='Próximo']",
-            "button[aria-label='Próxima']",
-            ".artdeco-pagination__button--next",
-            "li[data-test-pagination-page-btn].selected + li button",
-        ]:
-            btns = driver.find_elements(By.CSS_SELECTOR, sel)
-            for btn in btns:
+    """Avança para a próxima página de vagas no LinkedIn. Retorna True se navegou.
+
+    A paginação do LinkedIn é numerada (`<button aria-label='Página 2'><span>2</span></button>`)
+    e só renderiza depois de rolar a lista até o fim. A seta 'Avançar' (PT) também existe.
+    Estratégia: rola até a paginação aparecer → clica o número atual+1 → fallback seta."""
+    def _scroll_ate_paginacao():
+        # A paginação fica no rodapé da lista esquerda; rola o container/janela até ela.
+        for _ in range(6):
+            pag = driver.find_elements(By.CSS_SELECTOR, ".artdeco-pagination, [class*='pagination']")
+            if pag and any(p.is_displayed() for p in pag):
                 try:
-                    if btn.is_displayed() and btn.is_enabled():
-                        driver.execute_script("arguments[0].click();", btn)
-                        return True
+                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});",
+                                          next(p for p in pag if p.is_displayed()))
                 except Exception:
-                    continue
+                    pass
+                return True
+            for sel in [".jobs-search-results-list", ".scaffold-layout__list",
+                        "[class*='jobs-search-results']"]:
+                els = driver.find_elements(By.CSS_SELECTOR, sel)
+                if els and els[0].is_displayed():
+                    driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight;", els[0])
+                    break
+            else:
+                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         return False
+
+    def _pagina_atual():
+        # Retorna o número da página selecionada, ou 0 se não achar.
+        for sel in ["li.active[data-test-pagination-page-btn]",
+                    "li.selected[data-test-pagination-page-btn]",
+                    ".artdeco-pagination__indicator--number.active",
+                    ".artdeco-pagination__indicator--number.selected",
+                    "button[aria-current='true']", "button[aria-current='page']",
+                    "[aria-current='true']", "[aria-current='page']"]:
+            for el in driver.find_elements(By.CSS_SELECTOR, sel):
+                txt = (el.get_attribute("data-test-pagination-page-btn") or el.text or "").strip()
+                # pode vir "Página 2\n2" — pega o último token numérico
+                for tok in reversed(txt.replace("\n", " ").split()):
+                    if tok.isdigit():
+                        return int(tok)
+        return 0
+
+    def _click_numero(n):
+        # Tenta clicar diretamente o botão da página n.
+        for sel in [f"li[data-test-pagination-page-btn='{n}'] button",
+                    f"button[aria-label='Página {n}']",
+                    f"button[aria-label='Page {n}']"]:
+            for btn in driver.find_elements(By.CSS_SELECTOR, sel):
+                if btn.is_displayed() and btn.is_enabled():
+                    driver.execute_script("arguments[0].click();", btn)
+                    return True
+        return False
+
+    def _click_seta_next():
+        for sel in [".artdeco-pagination__button--next",
+                    "button[aria-label='Avançar']", "button[aria-label='Next']",
+                    "button[aria-label='Próximo']", "button[aria-label='Próxima']"]:
+            for btn in driver.find_elements(By.CSS_SELECTOR, sel):
+                if btn.is_displayed() and btn.is_enabled():
+                    driver.execute_script("arguments[0].click();", btn)
+                    return True
+        return False
+
+    def _navegar():
+        _scroll_ate_paginacao()
+        atual = _pagina_atual()
+        # 1) Página conhecida → clica exatamente a próxima (forward garantido).
+        if atual and _click_numero(atual + 1):
+            print(f"[LINKEDIN] Paginação: página {atual} → {atual + 1}")
+            return True
+        # 2) Página desconhecida → a seta 'Avançar'/Next é forward-safe (nunca volta).
+        #    Tentada ANTES de qualquer scan numérico cego (que poderia clicar uma
+        #    página anterior e fazer o loop girar sem sair do lugar).
+        if _click_seta_next():
+            print("[LINKEDIN] Paginação: clicou seta Avançar/Next")
+            return True
+        print("[LINKEDIN] Paginação: nenhum controle de próxima página encontrado")
+        return False
+
     try:
-        result = await asyncio.wait_for(_run_in_thread(_click_next), timeout=8)
+        result = await asyncio.wait_for(_run_in_thread(_navegar), timeout=12)
         if result:
-            await asyncio.sleep(2.5)
+            await asyncio.sleep(3)
         return bool(result)
     except Exception as e:
         logger.debug("_ir_proxima_pagina_vagas erro: %s", e)
         return False
+
+
+_URL_LISTAGEM = "https://www.linkedin.com/jobs/collections/easy-apply/"
+
+# Última listagem REAL onde o bot esteve (busca com filtros, easy-apply, etc.).
+# A recuperação volta para CÁ — preservando filtros e a paginação numerada —
+# em vez de sempre cair na collections genérica. Default: collections.
+_ULTIMA_LISTAGEM_URL = _URL_LISTAGEM
+
+
+def _limpar_url_listagem(url: str) -> str:
+    """Remove o currentJobId (transitório) mas preserva keywords/filtros/start."""
+    try:
+        from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+        parts = urlsplit(url)
+        q = [(k, v) for k, v in parse_qsl(parts.query) if k.lower() != "currentjobid"]
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(q), ""))
+    except Exception:
+        return url
+
+
+def _lembrar_listagem(url: str) -> None:
+    """Memoriza a URL de listagem atual para a recuperação voltar nela."""
+    global _ULTIMA_LISTAGEM_URL
+    if _url_eh_listagem(url) and "jobs/view" not in (url or "").lower():
+        _ULTIMA_LISTAGEM_URL = _limpar_url_listagem(url)
+
+
+def _registrar_run_log(linha: str) -> None:
+    """Append-only num arquivo legível (não depende do scrollback do terminal).
+    Cada decisão/branch grava uma linha com timestamp + URL. Lido por mim no
+    próximo run para diagnosticar sem adivinhar."""
+    import os, datetime
+    try:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_linkedin_run.log")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"{datetime.datetime.now().isoformat(timespec='seconds')} {linha}\n")
+    except Exception:
+        pass
+
+
+def _url_eh_listagem(url: str) -> bool:
+    """True se a URL é uma página de listagem/vaga real (não jobs-tracker)."""
+    u = (url or "").lower()
+    if "jobs-tracker" in u or "stage=applied" in u:
+        return False
+    return ("jobs/collections" in u) or ("jobs/search" in u) or ("jobs/view" in u)
+
+
+async def _voltar_para_listagem(driver, motivo: str = "") -> bool:
+    """Garante que o browser saia de jobs-tracker e volte para a listagem.
+
+    LinkedIn redireciona para jobs-tracker?stage=applied após 'Concluído' numa
+    candidatura. Um único driver.get nem sempre vence o redirect SPA — então
+    navega, verifica a URL final e re-tenta. Retorna True se terminou numa
+    listagem válida."""
+    # Tenta voltar para a última listagem real (busca/filtros); fallback collections.
+    alvos = [_ULTIMA_LISTAGEM_URL, _URL_LISTAGEM]
+    for tentativa in range(3):
+        alvo = alvos[min(tentativa, len(alvos) - 1)]
+        try:
+            await navegar(alvo)
+        except Exception as e:
+            _registrar_run_log(f"VOLTAR erro navegar ({motivo}): {e}")
+        await asyncio.sleep(3)
+        try:
+            cur = await asyncio.wait_for(_run_in_thread(lambda: driver.current_url), timeout=5)
+        except Exception:
+            cur = ""
+        if _url_eh_listagem(cur):
+            _registrar_run_log(f"VOLTAR ok t{tentativa} ({motivo}) -> {cur[:80]}")
+            return True
+        _registrar_run_log(f"VOLTAR falhou t{tentativa} ({motivo}) alvo={alvo[:50]} ainda em {cur[:80]}")
+        await asyncio.sleep(1.5)
+    return False
+
+
+async def _finalizar_sucesso(driver, motivo: str = "") -> None:
+    """Fecha o modal de sucesso e só re-navega se o LinkedIn redirecionou para
+    jobs-tracker. Evita o 'refresh' desnecessário (e o spin de re-cair na mesma
+    vaga) quando o modal fecha sem sair da listagem."""
+    await _fechar_modal_sucesso(driver)
+    await asyncio.sleep(1.0)
+    try:
+        cur = await asyncio.wait_for(_run_in_thread(lambda: driver.current_url), timeout=5)
+    except Exception:
+        cur = ""
+    if _url_eh_listagem(cur):
+        _registrar_run_log(f"SUCESSO sem refresh ({motivo}) -> {cur[:70]}")
+        return
+    await _voltar_para_listagem(driver, motivo=motivo)
 
 
 async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, user_id: str = "admin") -> dict:
@@ -2066,11 +2400,13 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
 
         driver = await get_driver()
         current_url = driver.current_url
-        url_lower = current_url.lower()
 
-        if "jobs" not in url_lower:
-            await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
-            await asyncio.sleep(3)
+        # Listagem real exigida no início: jobs-tracker contém "jobs" mas NÃO serve
+        # (só mostra vagas já aplicadas → streak de ja_aplicado).
+        if not _url_eh_listagem(current_url):
+            await _voltar_para_listagem(driver, motivo="inicio")
+        else:
+            _lembrar_listagem(current_url)  # preserva a busca/filtros do usuário
 
         await notify_browser_step("selenium_linkedin", "iniciando", f"Página atual: {current_url}")
         await notify_browser_step("selenium_linkedin", "iniciando", f"Resumo curriculo: {'SIM' if (perfil.get('resumo_curriculo') or await _get_resumo_curriculo(user_id)) else 'NAO'}")
@@ -2098,6 +2434,28 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
             if not driver:
                 break
 
+            # 0. Guarda anti-jobs-tracker: se o LinkedIn nos deixou parados na
+            # aba de candidaturas (?stage=applied), os cards ali são vagas já
+            # aplicadas — clicá-los gera streak de 'ja_aplicado' e nunca avança.
+            # Volta para a listagem real ANTES de procurar card.
+            try:
+                _url_topo = await asyncio.wait_for(_run_in_thread(lambda: driver.current_url), timeout=5)
+            except Exception:
+                _url_topo = ""
+            _registrar_run_log(f"ITER {_iter} url={_url_topo[:90]}")
+            if _url_eh_listagem(_url_topo):
+                _lembrar_listagem(_url_topo)  # recuperação volta para a busca atual
+            else:
+                _registrar_run_log(f"ITER {_iter} fora da listagem — recuperando")
+                await notify_browser_step("selenium_linkedin", "recuperando", "Saindo de jobs-tracker → listagem")
+                ok_volta = await _voltar_para_listagem(driver, motivo=f"topo-iter-{_iter}")
+                if not ok_volta:
+                    sem_cards_count += 1
+                    if sem_cards_count >= _MAX_SEM_CARDS:
+                        _registrar_run_log(f"ITER {_iter} não conseguiu voltar à listagem — encerrando")
+                        break
+                    continue
+
             # 1. Clica no próximo card (timeout 12s — evita freeze)
             try:
                 vaga_id, vaga_url = await asyncio.wait_for(
@@ -2121,8 +2479,9 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
                 await _scroll_lista_vagas(driver)
                 await asyncio.sleep(2.5)
                 if sem_cards_count >= _MAX_SEM_CARDS - 1:
-                    # Tenta clicar em "Próximo" na paginação
+                    # Tenta avançar para a próxima página (paginação numerada)
                     foi_proxima = await _ir_proxima_pagina_vagas(driver)
+                    _registrar_run_log(f"PAGINACAO proxima={foi_proxima} iter={_iter}")
                     if foi_proxima:
                         sem_cards_count = 0
                         await asyncio.sleep(3)
@@ -2286,6 +2645,7 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
                 if "jobs-tracker" in _url_pos.lower() or "stage=applied" in _url_pos.lower():
                     print(f"[LINKEDIN] {vaga_id} → jobs-tracker detectado — registrando como ja_aplicado e voltando")
                     await notify_browser_step("selenium_linkedin", "sucesso", f"{vaga_id} — jobs-tracker (ja_aplicado)")
+                    _registrar_run_log(f"BRANCH not-modal jobs-tracker vaga={vaga_id}")
                     if vaga_id:
                         try:
                             from graph.neo4j_client import get_neo4j
@@ -2295,8 +2655,7 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
                             )
                         except Exception as _re:
                             logger.warning("linkedin_selenium: erro ao registrar ja_aplicado: %s", _re)
-                    await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
-                    await asyncio.sleep(3)
+                    await _voltar_para_listagem(driver, motivo="not-modal-jobs-tracker")
                     continue
 
                 print(f"[LINKEDIN] Modal não apareceu para {vaga_id}")
@@ -2310,9 +2669,8 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
                     _url_sem_modal = await asyncio.wait_for(
                         _run_in_thread(lambda: driver.current_url), timeout=5
                     )
-                    if "jobs/collections" not in _url_sem_modal.lower() and "jobs/view" not in _url_sem_modal.lower():
-                        await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
-                        await asyncio.sleep(3)
+                    if not _url_eh_listagem(_url_sem_modal):
+                        await _voltar_para_listagem(driver, motivo="modal-nao-apareceu")
                 except Exception:
                     pass
                 continue
@@ -2339,19 +2697,18 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
                 except Exception as _re:
                     logger.warning("linkedin_selenium: erro ao registrar candidatura: %s", _re)
 
-            # 8. Após formulário: se browser não está na listagem de easy-apply, volta
-            # "jobs-tracker" contém "jobs" mas NÃO é a listagem — checar URL específica
+            # 8. Após formulário: o 'Concluído' do LinkedIn redireciona para
+            # jobs-tracker. Volta para a listagem com verificação + retry, senão
+            # a próxima iteração fica presa clicando vagas já aplicadas.
             await asyncio.sleep(2)
             try:
                 cur = await asyncio.wait_for(
                     _run_in_thread(lambda: driver.current_url), timeout=5
                 )
-                _cur_l = cur.lower()
-                _em_lista = "jobs/collections" in _cur_l or "jobs/view" in _cur_l
-                if not _em_lista:
-                    print(f"[LINKEDIN] Step 8: URL fora de jobs-collections ({cur[:70]}) — voltando")
-                    await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
-                    await asyncio.sleep(3)
+                _registrar_run_log(f"POS-FORM vaga={vaga_id} sucesso={resultado.get('sucesso')} url={cur[:80]}")
+                if not _url_eh_listagem(cur):
+                    print(f"[LINKEDIN] Step 8: URL fora da listagem ({cur[:70]}) — voltando")
+                    await _voltar_para_listagem(driver, motivo="pos-formulario")
             except Exception:
                 pass
 
@@ -2413,8 +2770,11 @@ async def _dismissar_cookie_banner(driver) -> None:
 async def _fechar_modal_sucesso(driver) -> bool:
     """Clica em 'Concluído'/'Done' no modal de confirmação pós-candidatura do LinkedIn.
     Retorna True se o botão foi encontrado e clicado."""
+    # Ordem importa: 'Dismiss'/'Fechar' (o X) fecha o modal SEM redirecionar para
+    # jobs-tracker; 'Concluído'/'Done' redireciona. Tenta o X primeiro p/ evitar o
+    # refresh/spin pós-candidatura.
     done_labels = [
-        "concluído", "concluido", "done", "fechar", "close", "ok", "dismiss",
+        "dismiss", "fechar", "close", "concluído", "concluido", "done", "ok",
     ]
 
     def _click_done():
@@ -2635,9 +2995,17 @@ async def _extrair_descricao_vaga(driver) -> str:
         return ""
 
 
+# Nota mínima (0-100) de relevância vaga×currículo para aplicar.
+# 40 = "na dúvida, aplica": só pula o que é claramente de outra área (0-39).
+# Ajustável via env LINKEDIN_LIMIAR_MATCH sem mexer no código.
+_LIMIAR_MATCH = int(os.getenv("LINKEDIN_LIMIAR_MATCH", "40"))
+
+
 async def _avaliar_match_vaga(descricao: str, curriculo: str) -> dict:
     """
     Avalia se a vaga é compatível com o currículo via LLM barato.
+    Rigoroso: exige correlação real de cargo/área (nota >= _LIMIAR_MATCH).
+    Fail-open: se não der para avaliar (sem dados, timeout, erro), aplica.
     Retorna: {"aplicar": bool, "idioma": "pt"|"en", "motivo": str}
     """
     if not descricao or not curriculo:
@@ -2646,7 +3014,7 @@ async def _avaliar_match_vaga(descricao: str, curriculo: str) -> dict:
     import json as _json
     from ai.openrouter import openrouter
 
-    prompt = f"""You are evaluating if a job description matches a candidate's resume.
+    prompt = f"""You are a strict recruiter deciding whether a candidate should apply to a job, based on how well the job matches their resume.
 
 JOB DESCRIPTION (first 2000 chars):
 {descricao[:2000]}
@@ -2654,13 +3022,18 @@ JOB DESCRIPTION (first 2000 chars):
 CANDIDATE RESUME (first 1500 chars):
 {curriculo[:1500]}
 
-Respond with ONLY valid JSON, no markdown, no explanation:
-{{"aplicar": true, "idioma": "pt", "motivo": "brief reason"}}
+Score the relevance from 0 to 100. The candidate prefers to apply WHENEVER there is a plausible fit ("when in doubt, apply"). Only score LOW for jobs that are clearly a different profession.
+- Score below 40 ONLY if the core role is a clearly different profession/field with little overlap (e.g. a software developer resume vs nursing, accounting, pure sales, recruiter, designer, hardware technician).
+- If the job is in tech/software and shares ANY meaningful overlap with the resume (language, framework, backend/frontend/fullstack, similar domain), score 40 or above so it applies — even if some requirements are missing or seniority differs.
+- Reward overlap; do not penalize heavily for missing a few requirements or a seniority gap.
 
-Rules:
-- "aplicar": true if the job is reasonably compatible (be lenient — only set false for clearly unrelated roles like developer resume for nursing/accounting/unrelated field)
+Scoring guide: 80-100 strong; 60-79 good; 40-59 plausible (still APPLY); 0-39 clearly different profession (skip).
+
+Respond with ONLY valid JSON, no markdown, no explanation:
+{{"nota": 0, "idioma": "pt", "motivo": "brief reason"}}
+- "nota": integer 0-100 as defined above
 - "idioma": language of the job description — "pt" for Portuguese, "en" for English
-- "motivo": one sentence explaining the decision"""
+- "motivo": one sentence explaining the score"""
 
     try:
         resp = openrouter.converse([{"role": "user", "content": prompt}])
@@ -2668,11 +3041,20 @@ Rules:
         json_match = re.search(r'\{[^{}]+\}', resp, re.DOTALL)
         if json_match:
             data = _json.loads(json_match.group())
-            return {
-                "aplicar": bool(data.get("aplicar", True)),
-                "idioma": str(data.get("idioma", "pt")),
-                "motivo": str(data.get("motivo", "")),
-            }
+            idioma = str(data.get("idioma", "pt"))
+            motivo = str(data.get("motivo", ""))
+            # Decisão determinística pelo score (mais confiável que o booleano do LLM).
+            # Se a nota vier ausente/ilegível, mantém fail-open (aplica) por escolha do usuário.
+            try:
+                nota = int(float(data.get("nota")))
+                aplicar = nota >= _LIMIAR_MATCH
+                return {
+                    "aplicar": aplicar,
+                    "idioma": idioma,
+                    "motivo": f"nota {nota}/100 — {motivo}",
+                }
+            except (TypeError, ValueError):
+                return {"aplicar": True, "idioma": idioma, "motivo": f"sem nota — {motivo}"}
     except Exception as e:
         logger.warning("_avaliar_match_vaga erro LLM: %s", e)
 
