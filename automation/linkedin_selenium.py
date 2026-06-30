@@ -629,6 +629,41 @@ def _detectar_sucesso(html: str, url: str) -> bool:
     return any(s in html_lower or s in url_lower for s in sinais)
 
 
+async def _detectar_erros_validacao(driver) -> list:
+    """Detecta mensagens de erro de validação visíveis no step atual.
+
+    Quando o LinkedIn rejeita um clique em 'Avançar' por campos obrigatórios
+    vazios/inválidos, ele renderiza mensagens inline. Retorna a lista de textos
+    de erro (vazia = sem erro = step avançou). É o sinal definitivo de que o
+    clique foi recusado e não adianta clicar de novo no mesmo botão.
+    """
+    def _coletar():
+        erros = []
+        # Mensagens inline do artdeco + roles de alerta
+        sels = [
+            ".artdeco-inline-feedback--error",
+            "[role='alert']",
+            ".fb-dash-form-element__error-text",
+            "[data-test-form-element-error-messages]",
+        ]
+        for sel in sels:
+            try:
+                for el in driver.find_elements(By.CSS_SELECTOR, sel):
+                    if not el.is_displayed():
+                        continue
+                    txt = (el.text or "").strip()
+                    if txt and txt not in erros:
+                        erros.append(txt)
+            except Exception:
+                continue
+        return erros
+
+    try:
+        return await _run_in_thread(_coletar)
+    except Exception:
+        return []
+
+
 async def _processar_formulario_multistep_selenium(driver, perfil: dict, curriculo_path: str, vaga_url: str, resumo_curriculo: str, idioma: str = "pt") -> dict:
     """Processa formulario Easy Apply multi-step via Selenium."""
     from automation.browser import notify_browser_step, wait_if_paused, get_intervention_state, set_intervention_state
@@ -753,6 +788,16 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
             else:
                 await notify_browser_step("step_"+str(step), "navegando", f"Avançando: {btn_text}")
                 await asyncio.sleep(2)
+                # Keystone: o clique em 'Avançar' pode ter sido recusado por campo
+                # obrigatório vazio/inválido. Se há erro de validação, o step NÃO
+                # avançou — clicar de novo no mesmo botão repetiria indefinidamente
+                # (e no fim cairíamos em 'Salvar candidatura?' → jobs-tracker).
+                erros = await _detectar_erros_validacao(driver)
+                if erros:
+                    msg = " | ".join(erros[:3])
+                    print(f"[LINKEDIN] Step {step}: validação bloqueou avanço — {msg}")
+                    await notify_browser_step("step_"+str(step), "bloqueado", f"Campo obrigatório: {msg[:80]}")
+                    break
                 continue
 
             break
@@ -838,8 +883,15 @@ async def _preencher_cidade_autocomplete(driver, cidade: str) -> None:
                         continue
                     current = (el.get_attribute("value") or "").strip()
                     if current:
-                        print(f"[LINKEDIN] Cidade já preenchida: {current[:30]}")
-                        return "already_filled"
+                        # Trap: texto inválido de uma tentativa anterior conta como
+                        # "preenchido" mas a validação rejeita ("Insira uma resposta
+                        # válida"). Se o campo está marcado inválido, limpa e re-digita
+                        # para comprometer uma sugestão real do autocomplete.
+                        invalido = (el.get_attribute("aria-invalid") or "").lower() == "true"
+                        if not invalido:
+                            print(f"[LINKEDIN] Cidade já preenchida: {current[:30]}")
+                            return "already_filled"
+                        print(f"[LINKEDIN] Cidade inválida ('{current[:30]}') — re-digitando")
                     el.click()
                     time.sleep(0.2)
                     el.clear()
@@ -899,8 +951,11 @@ async def _preencher_step_selenium(driver, perfil: dict, curriculo_path: str) ->
     campos = [
         (["input[name='firstName']", "#first-name", "input[id*='firstName']"], primeiro_nome),
         (["input[name='lastName']", "#last-name", "input[id*='lastName']"], ultimo_nome),
-        (["input[name='email']", "#email", "input[type='email'][name*='email']"], perfil.get("email", _get_linkedin_email())),
-        (["input[name='phone']", "#phone", "input[type='tel']", "input[aria-label*='Phone Number']"], str(perfil.get("telefone", perfil.get("phone", "")))),
+        (["input[name='email']", "#email", "input[type='email'][name*='email']",
+          "input[aria-label*='email' i]", "input[aria-label*='e-mail' i]"], perfil.get("email", _get_linkedin_email())),
+        (["input[name='phone']", "#phone", "input[type='tel']",
+          "input[aria-label*='phone' i]", "input[aria-label*='telefone' i]",
+          "input[aria-label*='celular' i]"], str(perfil.get("telefone", perfil.get("phone", "")))),
     ]
 
     def _preencher_campos():
@@ -927,6 +982,82 @@ async def _preencher_step_selenium(driver, perfil: dict, curriculo_path: str) ->
                     continue
 
     await _run_in_thread(_preencher_campos)
+
+    # Selects obrigatórios da etapa de contato: e-mail e código do país.
+    # No Easy Apply esses campos costumam ser <select> (não inputs) e ficam
+    # vazios quando a conta não tem padrão definido → "Obrigatório" bloqueia o
+    # avanço. Preenche preservando qualquer seleção válida já existente.
+    email_perfil = (perfil.get("email", "") or _get_linkedin_email() or "").strip().lower()
+    pais_perfil = (perfil.get("pais", perfil.get("país", "")) or "").strip().lower()
+
+    def _preencher_selects_contato():
+        from selenium.webdriver.support.ui import Select
+        EMAIL_KW = ("email", "e-mail")
+        PAIS_KW = ("código do país", "codigo do pais", "country code", "país", "pais", "country")
+        for sel_elem in driver.find_elements(By.CSS_SELECTOR, "select"):
+            try:
+                if not sel_elem.is_displayed() or not sel_elem.is_enabled():
+                    continue
+                aria = (sel_elem.get_attribute("aria-label") or "").lower()
+                lbl = ""
+                sid = sel_elem.get_attribute("id") or ""
+                if sid:
+                    lbls = driver.find_elements(By.CSS_SELECTOR, f"label[for='{sid}']")
+                    if lbls:
+                        lbl = (lbls[0].text or "").lower()
+                texto_ident = f"{aria} {lbl}"
+                is_email = any(k in texto_ident for k in EMAIL_KW)
+                is_pais = any(k in texto_ident for k in PAIS_KW)
+                if not (is_email or is_pais):
+                    continue
+
+                sel_obj = Select(sel_elem)
+                cur = sel_obj.first_selected_option
+                cur_text = (cur.text or "").strip().lower()
+                cur_val = (cur.get_attribute("value") or "").strip()
+                if cur_val and cur_text not in _SELECT_PLACEHOLDER_TEXTS:
+                    continue  # já tem seleção válida — preserva
+
+                opcoes = [
+                    (o.get_attribute("value"), (o.text or "").strip())
+                    for o in sel_obj.options
+                    if (o.text or "").strip().lower() not in _SELECT_PLACEHOLDER_TEXTS
+                    and (o.get_attribute("value") or "").strip()
+                ]
+                if not opcoes:
+                    continue
+
+                escolhido = None
+                if is_email and email_perfil:
+                    for val, txt in opcoes:
+                        if email_perfil in txt.lower():
+                            escolhido = val
+                            break
+                if is_pais:
+                    alvos = [pais_perfil] if pais_perfil else []
+                    alvos += ["brasil", "brazil", "(+55)", "+55", "55"]
+                    for alvo in alvos:
+                        if not alvo:
+                            continue
+                        for val, txt in opcoes:
+                            if alvo in txt.lower():
+                                escolhido = val
+                                break
+                        if escolhido:
+                            break
+                if escolhido is None:
+                    escolhido = opcoes[0][0]  # fallback: primeira opção válida
+
+                sel_obj.select_by_value(escolhido)
+                _tipo = "email" if is_email else "país"
+                print(f"[LINKEDIN] Select contato ({_tipo}) preenchido: {escolhido}")
+            except Exception:
+                continue
+
+    try:
+        await _run_in_thread(_preencher_selects_contato)
+    except Exception:
+        pass
 
     # Cidade com autocomplete — separado para evitar dropdown aberto ao clicar Avançar
     cidade_val = perfil.get("localizacao", "").split(",")[0].strip() if perfil.get("localizacao") else ""
@@ -1015,12 +1146,21 @@ _SELECT_PLACEHOLDER_TEXTS = {
 }
 
 _DECIMAL_LABEL_KEYWORDS = {
-    "salary", "salário", "wage", "remuneração", "taxa", "rate", "compensation",
-    "pay", "valor", "price", "preço", "gpa", "nota", "score",
+    # inglês
+    "salary", "wage", "compensation", "pay", "rate", "price", "gpa", "score",
+    "expected", "desired", "gross", "ctc",
+    # português — com e sem acento, forma adjetiva
+    "salário", "salario", "salarial",
+    "remuneração", "remuneracao", "remuner",
+    "pretens",      # pretensão, pretendido
+    "taxa", "valor", "preço", "preco",
+    "nota",
+    # espanhol/italiano presentes em vagas
+    "sueldo", "salario",
 }
 _INTEGER_LABEL_KEYWORDS = {
     "years", "months", "anos", "meses", "quantos", "quanto", "how many",
-    "number of", "quantidade", "experiencia", "experience",
+    "number of", "quantidade", "experiencia", "experiência", "experience",
 }
 
 
@@ -2135,11 +2275,44 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
             await asyncio.sleep(2)
             modal = await _aguardar_modal_easy_apply(driver)
             if not modal:
+                # Verifica se LinkedIn redirecionou para jobs-tracker (já aplicado ou one-click Apply)
+                try:
+                    _url_pos = await asyncio.wait_for(
+                        _run_in_thread(lambda: driver.current_url), timeout=5
+                    )
+                except Exception:
+                    _url_pos = ""
+
+                if "jobs-tracker" in _url_pos.lower() or "stage=applied" in _url_pos.lower():
+                    print(f"[LINKEDIN] {vaga_id} → jobs-tracker detectado — registrando como ja_aplicado e voltando")
+                    await notify_browser_step("selenium_linkedin", "sucesso", f"{vaga_id} — jobs-tracker (ja_aplicado)")
+                    if vaga_id:
+                        try:
+                            from graph.neo4j_client import get_neo4j
+                            get_neo4j().registrar_candidatura(
+                                user_id=user_id, vaga_id=vaga_id,
+                                plataforma="linkedin", status="ja_aplicado",
+                            )
+                        except Exception as _re:
+                            logger.warning("linkedin_selenium: erro ao registrar ja_aplicado: %s", _re)
+                    await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
+                    await asyncio.sleep(3)
+                    continue
+
                 print(f"[LINKEDIN] Modal não apareceu para {vaga_id}")
                 await notify_browser_step("selenium_linkedin", "pulando", f"{vaga_id} — modal não apareceu")
                 try:
-                    # manter=False: descarta modal residual (não queremos continuar esta candidatura)
                     await _fechar_modal_descarte(driver, manter=False)
+                except Exception:
+                    pass
+                # Garante retorno à listagem se URL saiu de jobs
+                try:
+                    _url_sem_modal = await asyncio.wait_for(
+                        _run_in_thread(lambda: driver.current_url), timeout=5
+                    )
+                    if "jobs/collections" not in _url_sem_modal.lower() and "jobs/view" not in _url_sem_modal.lower():
+                        await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
+                        await asyncio.sleep(3)
                 except Exception:
                     pass
                 continue
@@ -2166,13 +2339,17 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
                 except Exception as _re:
                     logger.warning("linkedin_selenium: erro ao registrar candidatura: %s", _re)
 
-            # 8. Após formulário: se browser saiu de jobs, volta
+            # 8. Após formulário: se browser não está na listagem de easy-apply, volta
+            # "jobs-tracker" contém "jobs" mas NÃO é a listagem — checar URL específica
             await asyncio.sleep(2)
             try:
                 cur = await asyncio.wait_for(
                     _run_in_thread(lambda: driver.current_url), timeout=5
                 )
-                if "jobs" not in cur.lower():
+                _cur_l = cur.lower()
+                _em_lista = "jobs/collections" in _cur_l or "jobs/view" in _cur_l
+                if not _em_lista:
+                    print(f"[LINKEDIN] Step 8: URL fora de jobs-collections ({cur[:70]}) — voltando")
                     await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
                     await asyncio.sleep(3)
             except Exception:
