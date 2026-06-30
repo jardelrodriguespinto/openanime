@@ -1584,6 +1584,70 @@ async def _get_label_selenium(driver, inp) -> str:
     return ""
 
 
+async def _clicar_proximo_card_vaga(driver, ja_tentadas: set) -> tuple:
+    """
+    Clica no próximo card de vaga não processado na lista do painel esquerdo.
+    Não navega — apenas clica para carregar o painel direito.
+    Retorna (vaga_id, vaga_url) ou ("", "") se não houver mais cards.
+    """
+    _CARD_SELS = [
+        "li.jobs-search-results__list-item",
+        ".job-card-container",
+        ".scaffold-layout__list-item",
+        ".jobs-job-board-list__item",
+        ".jobs-search__result-card",
+        "li[data-occludable-job-id]",
+    ]
+
+    def _find_and_click():
+        for sel in _CARD_SELS:
+            cards = driver.find_elements(By.CSS_SELECTOR, sel)
+            for card in cards:
+                if not card.is_displayed():
+                    continue
+                href = ""
+                vaga_id = ""
+                # Tenta pegar o job-id do atributo direto
+                jid = card.get_attribute("data-occludable-job-id") or card.get_attribute("data-job-id") or ""
+                if jid:
+                    vaga_id = jid.strip()
+                    href = f"https://www.linkedin.com/jobs/view/{vaga_id}/"
+                else:
+                    # Busca link dentro do card
+                    links = card.find_elements(By.XPATH, ".//a[contains(@href, '/jobs/view/')]")
+                    if links:
+                        href = links[0].get_attribute("href") or ""
+                        if "/jobs/view/" in href:
+                            vaga_id = href.split("/jobs/view/")[1].split("/")[0].split("?")[0]
+
+                chave = vaga_id or href
+                if not chave or chave in ja_tentadas:
+                    continue
+
+                # Clica no card para carregar o painel direito
+                try:
+                    driver.execute_script("arguments[0].scrollIntoView({block:'center', behavior:'smooth'});", card)
+                    driver.execute_script("arguments[0].click();", card)
+                    return vaga_id, href
+                except Exception:
+                    # Tenta clicar no link interno
+                    if links:
+                        try:
+                            driver.execute_script("arguments[0].click();", links[0])
+                            return vaga_id, href
+                        except Exception:
+                            pass
+                    continue
+        return "", ""
+
+    try:
+        vaga_id, vaga_url = await _run_in_thread(_find_and_click)
+        return vaga_id, vaga_url
+    except Exception as e:
+        logger.debug("_clicar_proximo_card_vaga erro: %s", e)
+        return "", ""
+
+
 async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, user_id: str = "admin") -> dict:
     """
     Aplica em vagas visíveis na página atual do LinkedIn.
@@ -1636,100 +1700,125 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
         await notify_browser_step("selenium_linkedin", "iniciando", f"Página atual: {current_url}")
         await notify_browser_step("selenium_linkedin", "iniciando", f"Resumo curriculo: {'SIM' if (perfil.get('resumo_curriculo') or await _get_resumo_curriculo(user_id)) else 'NAO'}")
 
+        resumo_curriculo = perfil.get("resumo_curriculo", "") or await _get_resumo_curriculo(user_id)
+        curriculo_path = perfil.get("curriculo_path", "") or ""
+
         resultados = {"sucesso": True, "aplicacoes": [], "falhas": 0}
-        vagas_tentadas_sessao: set = set()  # evita re-tentar mesma vaga na sessão
+        vagas_tentadas_sessao: set = set()  # vaga_ids já processados nesta sessão
 
         for i in range(max_vagas):
-            # Espera se pausado (nao avanca o contador nem pula a vaga)
             await wait_if_paused(None, f"vaga_{i+1}")
-
             await notify_browser_step("selenium_linkedin", f"vaga_{i+1}", f"Procurando vaga {i+1}...")
 
-            # Garante que o browser está na página de vagas antes de buscar
-            try:
-                _drv = await get_driver()
-                if not _drv or not await _driver_session_valida():
-                    print("[LINKEDIN] Sessão do browser inválida — reabrindo")
-                    await nova_pagina("https://www.linkedin.com/jobs/collections/easy-apply/", reutilizar=False)
-                    await asyncio.sleep(4)
-                    if not await _garantir_login():
-                        break
-                else:
-                    _cur = await _run_in_thread(lambda: _drv.current_url)
-                    if "jobs" not in _cur.lower() or "checkpoint" in _cur.lower():
-                        await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
-                        await asyncio.sleep(3)
-            except Exception as _nav_e:
-                logger.warning("linkedin_selenium: erro ao verificar página: %s", _nav_e)
-
-            vaga_url = await _extrair_proxima_vaga_da_busca(vagas_tentadas_sessao)
-            if not vaga_url:
-                # Tenta uma vez mais após scroll para o topo (recarrega cards)
-                try:
-                    _drv = await get_driver()
-                    if _drv:
-                        await _run_in_thread(lambda: _drv.execute_script("window.scrollTo(0,0)"))
-                        await asyncio.sleep(1.5)
-                        vaga_url = await _extrair_proxima_vaga_da_busca(vagas_tentadas_sessao)
-                except Exception:
-                    pass
-            if not vaga_url:
-                await notify_browser_step("selenium_linkedin", "finalizando", "Nenhuma vaga Easy Apply disponível")
+            # 1. Clica no próximo card da lista (sem navegar — painel direito atualiza)
+            driver = await get_driver()
+            if not driver:
+                break
+            vaga_id, vaga_url = await _clicar_proximo_card_vaga(driver, vagas_tentadas_sessao)
+            if not vaga_id and not vaga_url:
+                await notify_browser_step("selenium_linkedin", "finalizando", "Nenhuma vaga disponível na lista")
                 break
 
-            vaga_id = _extrair_vaga_id(vaga_url)
             vagas_tentadas_sessao.add(vaga_id or vaga_url)
+            await notify_browser_step("selenium_linkedin", f"vaga_{i+1}", f"Card clicado: {vaga_id or vaga_url[:40]}")
+            await asyncio.sleep(2)  # aguarda painel direito carregar
 
+            # 2. Verifica já candidatado via Neo4j (sem abrir modal)
             if vaga_id:
                 try:
                     from graph.neo4j_client import get_neo4j
-                    neo4j = get_neo4j()
-                    ja_aplicou = neo4j.ja_se_candidatou(user_id, vaga_id)
-                    if ja_aplicou:
-                        print(f"[LINKEDIN] Ja candidatou para {vaga_id} — pulando")
-                        await notify_browser_step("selenium_linkedin", f"vaga_{i+1}", "Ja aplicou — pulando")
+                    _neo4j_check = get_neo4j()
+                    if _neo4j_check.ja_se_candidatou(user_id, vaga_id):
+                        print(f"[LINKEDIN] Vaga {vaga_id} já candidatada (Neo4j) — pulando")
+                        await notify_browser_step("selenium_linkedin", f"vaga_{i+1}", "Já candidatou (Neo4j) — pulando")
                         continue
                 except Exception:
                     pass
 
-            await notify_browser_step("selenium_linkedin", f"vaga_{i+1}", f"Aplicando em: {vaga_url[:60]}...")
+            # 3. Verifica badge "Candidatou-se" visível no painel direito
+            if await _verificar_ja_aplicado_na_pagina(driver):
+                print(f"[LINKEDIN] Vaga {vaga_id} mostra badge 'Aplicado' — pulando")
+                await notify_browser_step("selenium_linkedin", f"vaga_{i+1}", "Badge 'Candidatou-se' visível — pulando")
+                # Registra para não tentar de novo
+                if vaga_id:
+                    try:
+                        from graph.neo4j_client import get_neo4j
+                        get_neo4j().registrar_candidatura(user_id=user_id, vaga_id=vaga_id,
+                                                          plataforma="linkedin", status="ja_aplicado")
+                    except Exception:
+                        pass
+                continue
 
-            resultado = await aplicar(vaga_url, perfil, user_id=user_id)
+            # 4. Extrai descrição do painel direito e avalia match (sem navegar)
+            idioma_vaga = "pt"
+            if resumo_curriculo:
+                descricao_vaga = await _extrair_descricao_vaga(driver)
+                if descricao_vaga:
+                    await notify_browser_step("selenium_linkedin", f"vaga_{i+1}", "Avaliando match com currículo...")
+                    avaliacao = await _avaliar_match_vaga(descricao_vaga, resumo_curriculo)
+                    idioma_vaga = avaliacao.get("idioma", "pt")
+                    logger.info("linkedin_selenium: vaga=%s match=%s idioma=%s motivo=%s",
+                                vaga_id, avaliacao.get("aplicar"), idioma_vaga, avaliacao.get("motivo"))
+                    if not avaliacao.get("aplicar", True):
+                        motivo = avaliacao.get("motivo", "sem match")
+                        print(f"[LINKEDIN] Sem match — pulando {vaga_id}: {motivo}")
+                        await notify_browser_step("selenium_linkedin", f"vaga_{i+1}", f"Sem match: {motivo}")
+                        continue
+
+            # 5. Clica em Easy Apply (botão já visível no painel direito)
+            await notify_browser_step("selenium_linkedin", f"vaga_{i+1}", "Abrindo candidatura simplificada...")
+            clicou = await _clicar_easy_apply_js(driver)
+            if not clicou:
+                await asyncio.sleep(3)
+                clicou = await _clicar_easy_apply_js(driver)
+            if not clicou:
+                print(f"[LINKEDIN] Easy Apply não encontrado para {vaga_id} — pulando")
+                await notify_browser_step("selenium_linkedin", f"vaga_{i+1}", "Easy Apply não encontrado — pulando")
+                continue
+
+            await asyncio.sleep(2)
+            modal = await _aguardar_modal_easy_apply(driver)
+            if not modal:
+                print(f"[LINKEDIN] Modal não apareceu para {vaga_id}")
+                await notify_browser_step("selenium_linkedin", f"vaga_{i+1}", "Modal não apareceu — pulando")
+                try:
+                    await _fechar_modal_descarte(driver)
+                except Exception:
+                    pass
+                continue
+
+            # 6. Preenche formulário multi-step
+            await notify_browser_step("selenium_linkedin", f"vaga_{i+1}", "Preenchendo formulário...")
+            resultado = await _processar_formulario_multistep_selenium(
+                driver, perfil, curriculo_path, vaga_url, resumo_curriculo, idioma=idioma_vaga
+            )
             resultados["aplicacoes"].append(resultado)
             if not resultado.get("sucesso"):
                 resultados["falhas"] += 1
 
-            # Registra no Neo4j para evitar re-aplicação (exceto vagas ignoradas por sem_match)
-            if vaga_id and not resultado.get("pulada"):
+            # 7. Registra no Neo4j (evita re-aplicação em sessões futuras)
+            if vaga_id:
                 try:
                     from graph.neo4j_client import get_neo4j
-                    _neo4j = get_neo4j()
                     _status = "candidatado" if resultado.get("sucesso") else "tentativa_falhou"
-                    _neo4j.registrar_candidatura(
-                        user_id=user_id,
-                        vaga_id=vaga_id,
-                        plataforma="linkedin",
-                        status=_status,
+                    get_neo4j().registrar_candidatura(
+                        user_id=user_id, vaga_id=vaga_id,
+                        plataforma="linkedin", status=_status,
                     )
                 except Exception as _e:
                     logger.warning("linkedin_selenium: erro ao registrar candidatura: %s", _e)
 
-            driver = await get_driver()
-            if driver:
-                try:
-                    cur = driver.current_url
-                    if "jobs" not in cur.lower():
-                        await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
-                        await asyncio.sleep(2)
-                except Exception:
-                    pass
+            # 8. Após o formulário, o painel direito ainda mostra a vaga — aguarda e prossegue
+            await asyncio.sleep(2)
 
-                try:
-                    body = driver.find_element(By.TAG_NAME, "body")
-                    await _scroll_and_focus_element(driver, body)
-                    await asyncio.sleep(1)
-                except Exception:
-                    pass
+            # Se o browser saiu da página de jobs por algum motivo, volta
+            try:
+                cur = await _run_in_thread(lambda: driver.current_url)
+                if "jobs" not in cur.lower():
+                    await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
+                    await asyncio.sleep(3)
+            except Exception:
+                pass
 
         await asyncio.sleep(2)
 
