@@ -897,6 +897,11 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
                     perguntas_step = []
             else:
                 perguntas_step = []
+            # DIAGNÓSTICO: quantas perguntas foram detectadas e quais (prefixo+label)
+            _registrar_run_log(
+                f"FORM step {step}: {len(perguntas_step)} pergunta(s) detectada(s)"
+                + ("" if not perguntas_step else " -> " + " | ".join(p[:45] for p in perguntas_step[:4]))
+            )
             pular_agora = False
             if perguntas_step:
                 await notify_browser_step("step_"+str(step), "respondendo", f"{len(perguntas_step)} pergunta(s) customizada(s)")
@@ -908,15 +913,20 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
                         if ctrl.get("current_action") == "pular":
                             pular_agora = True
                             break
-                        resposta = responder_pergunta(
-                            pergunta, perfil,
-                            vaga_titulo=vaga_titulo,
-                            vaga_empresa="",
-                            resumo_curriculo=resumo_curriculo,
-                            idioma=idioma,
-                        )
+                        try:
+                            resposta = responder_pergunta(
+                                pergunta, perfil,
+                                vaga_titulo=vaga_titulo,
+                                vaga_empresa="",
+                                resumo_curriculo=resumo_curriculo,
+                                idioma=idioma,
+                            )
+                        except Exception as _rpe:
+                            _registrar_run_log(f"FORM step {step}: responder_pergunta ERRO: {_rpe}")
+                            resposta = ""
                         respostas_geradas[pergunta] = resposta
                         await notify_browser_step("step_"+str(step), "respondendo", f"Pergunta: {pergunta[:40]}...")
+                        _registrar_run_log(f"FORM step {step}: resp '{pergunta[:35]}' = '{str(resposta)[:25]}'")
                         await _preencher_resposta_customizada_selenium(driver, pergunta, resposta)
                         perguntas_customizadas.append(pergunta)
                         await asyncio.sleep(random.uniform(0.5, 1.0))
@@ -1139,8 +1149,10 @@ async def _preencher_cidade_autocomplete(driver, cidade: str) -> None:
         return False
 
     result = await _run_in_thread(_type_city)
+    if result == "already_filled":
+        return True
     if result != "typed":
-        return
+        return False  # campo não encontrado
 
     await asyncio.sleep(1.5)
 
@@ -1172,6 +1184,7 @@ async def _preencher_cidade_autocomplete(driver, cidade: str) -> None:
             return False
         await _run_in_thread(_tab_commit)
         await asyncio.sleep(0.3)
+    return True
 
 
 async def _preencher_step_selenium(driver, perfil: dict, curriculo_path: str) -> None:
@@ -1250,13 +1263,13 @@ async def _preencher_step_selenium(driver, perfil: dict, curriculo_path: str) ->
                 cur = sel_obj.first_selected_option
                 cur_text = (cur.text or "").strip().lower()
                 cur_val = (cur.get_attribute("value") or "").strip()
-                if cur_val and cur_text not in _SELECT_PLACEHOLDER_TEXTS:
+                if cur_val and not _eh_placeholder_opcao(cur_text):
                     continue  # já tem seleção válida — preserva
 
                 opcoes = [
                     (o.get_attribute("value"), (o.text or "").strip())
                     for o in sel_obj.options
-                    if (o.text or "").strip().lower() not in _SELECT_PLACEHOLDER_TEXTS
+                    if not _eh_placeholder_opcao(o.text)
                     and (o.get_attribute("value") or "").strip()
                 ]
                 if not opcoes:
@@ -1305,9 +1318,11 @@ async def _preencher_step_selenium(driver, perfil: dict, curriculo_path: str) ->
     if not cidade_val:
         cidade_val = os.getenv("LINKEDIN_CIDADE", "").strip()
     if cidade_val:
-        await _preencher_cidade_autocomplete(driver, cidade_val)
+        ok_cidade = await _preencher_cidade_autocomplete(driver, cidade_val)
+        _registrar_run_log(f"CIDADE '{cidade_val[:25]}' resultado={ok_cidade}")
     else:
         print("[LINKEDIN] AVISO: cidade não encontrada (perfil/currículo) — campo de localização vai travar o form")
+        _registrar_run_log("CIDADE: não encontrada (perfil/currículo/env)")
 
     # Seleciona CV em inglês se houver múltiplos CVs já enviados ao LinkedIn
     def _selecionar_cv_ingles():
@@ -1384,11 +1399,27 @@ async def _preencher_step_selenium(driver, perfil: dict, curriculo_path: str) ->
 
 
 _SELECT_PLACEHOLDER_TEXTS = {
-    "", "select an option", "selecione uma opção", "selecione", "--", "select",
-    "choose", "selecione uma resposta", "selecionar uma opção", "escolha uma opção",
-    "nenhum selecionado", "select a response", "please select", "escolha",
-    "seleccione", "selecionar", "escolher",
+    "", "select an option", "selecione uma opção", "selecionar opção",
+    "selecione", "--", "select", "choose", "selecione uma resposta",
+    "selecionar uma opção", "escolha uma opção", "nenhum selecionado",
+    "select a response", "please select", "escolha", "seleccione",
+    "selecionar", "escolher",
 }
+
+
+def _eh_placeholder_opcao(texto: str) -> bool:
+    """True se o texto da opção/estado de um select é placeholder (não é resposta).
+    Robusto a variações ('Selecionar opção', 'Selecione uma opção', 'Select an
+    option', 'Choose...'). O exact-match antigo deixava 'Selecionar opção' passar
+    como se já estivesse respondido → pergunta nunca preenchida → form travava."""
+    t = (texto or "").strip().lower()
+    if not t or t in _SELECT_PLACEHOLDER_TEXTS:
+        return True
+    return (
+        t.startswith("selecion") or t.startswith("seleccion") or t.startswith("escolh")
+        or t.startswith("choose") or t in ("-", "...", "—")
+        or "select an option" in t or "select a response" in t or "please select" in t
+    )
 
 _DECIMAL_LABEL_KEYWORDS = {
     # inglês
@@ -1409,6 +1440,22 @@ _INTEGER_LABEL_KEYWORDS = {
 }
 
 
+def _modal_scope(driver):
+    """Retorna o elemento do modal Easy Apply (ou o driver, se não achar).
+    Restringe buscas de campos AO modal — fora dele existe a barra de busca do
+    topo do LinkedIn e outros inputs que poluíam a detecção de perguntas."""
+    for sel in ("div.jobs-easy-apply-modal", ".jobs-easy-apply-modal",
+                "div[data-test-modal][role='dialog']", "div[role='dialog']",
+                ".artdeco-modal"):
+        try:
+            els = [e for e in driver.find_elements(By.CSS_SELECTOR, sel) if e.is_displayed()]
+            if els:
+                return els[-1]
+        except Exception:
+            continue
+    return driver
+
+
 async def _detectar_perguntas_nao_respondidas_selenium(driver) -> list:
     """Detecta todos os campos de pergunta ainda vazios no step atual via Selenium.
     Inclui text, number (NUMERO/DECIMAL), textarea, select, combobox e radio."""
@@ -1422,8 +1469,13 @@ async def _detectar_perguntas_nao_respondidas_selenium(driver) -> list:
             seen_labels.add(base)
             perguntas.append(pergunta)
 
+    # Escopo no modal Easy Apply — senão a barra de busca do topo do LinkedIn
+    # ("Pesquisar cargo, competência ou empresa") é detectada como pergunta e
+    # recebe a resposta da IA, disparando uma busca/refresh.
+    scope = _modal_scope(driver)
+
     try:
-        inputs = driver.find_elements(By.CSS_SELECTOR,
+        inputs = scope.find_elements(By.CSS_SELECTOR,
             "input[type='text'], input[type='number'], textarea"
         )
         for inp in inputs:
@@ -1474,7 +1526,12 @@ async def _detectar_perguntas_nao_respondidas_selenium(driver) -> list:
                 _add(label)
 
         # Selects nativos
-        selects = driver.find_elements(By.CSS_SELECTOR, "select")
+        selects = scope.find_elements(By.CSS_SELECTOR, "select")
+        _registrar_run_log(
+            f"DETECT scope={'modal' if scope is not driver else 'PAGE'} "
+            f"inputs={len(inputs)} selects={len(selects)} "
+            f"visiveis_select={sum(1 for s in selects if s.is_displayed())}"
+        )
         for sel_elem in selects:
             if not sel_elem.is_displayed():
                 continue
@@ -1484,28 +1541,30 @@ async def _detectar_perguntas_nao_respondidas_selenium(driver) -> list:
                 first_opt = sel_obj.first_selected_option
                 selected_text = (first_opt.text or "").strip().lower()
                 first_val = (first_opt.get_attribute("value") or "").strip()
-                if selected_text in _SELECT_PLACEHOLDER_TEXTS or first_val == "":
+                if _eh_placeholder_opcao(selected_text) or first_val == "":
                     label = await _get_label_selenium(driver, sel_elem)
                     if label and not any(p in label.lower() for p in _CAMPOS_PADRAO):
                         options_text = [
                             o.text.strip() for o in sel_obj.options
-                            if o.text.strip() and o.text.strip().lower() not in _SELECT_PLACEHOLDER_TEXTS
+                            if o.text.strip() and not _eh_placeholder_opcao(o.text)
                         ]
                         if options_text:
                             _add(f"SELECT:{label}:{','.join(options_text[:10])}")
-            except Exception:
-                pass
+                    elif not label:
+                        _registrar_run_log("DETECT: select sem label — não adicionado")
+            except Exception as _se:
+                _registrar_run_log(f"DETECT select ERRO: {_se}")
 
         # LinkedIn custom comboboxes (role=combobox / aria-haspopup=listbox)
         combo_sels = "[role='combobox'], button[aria-haspopup='listbox'], button[aria-haspopup='true'][aria-expanded]"
-        comboboxes = driver.find_elements(By.CSS_SELECTOR, combo_sels)
+        comboboxes = scope.find_elements(By.CSS_SELECTOR, combo_sels)
         for cb in comboboxes:
             if not cb.is_displayed():
                 continue
             try:
                 # Verifica se já tem valor selecionado
                 current_text = (cb.text or cb.get_attribute("aria-label") or "").strip().lower()
-                if current_text and current_text not in _SELECT_PLACEHOLDER_TEXTS:
+                if current_text and not _eh_placeholder_opcao(current_text):
                     continue  # já preenchido
                 # Busca label do combobox
                 label = await _get_label_selenium(driver, cb)
@@ -1534,7 +1593,7 @@ async def _detectar_perguntas_nao_respondidas_selenium(driver) -> list:
                 continue
 
         # Fieldsets com radio buttons
-        fieldsets = driver.find_elements(By.CSS_SELECTOR, "fieldset")
+        fieldsets = scope.find_elements(By.CSS_SELECTOR, "fieldset")
         for fs in fieldsets:
             if not fs.is_displayed():
                 continue
@@ -1573,7 +1632,7 @@ async def _detectar_perguntas_nao_respondidas_selenium(driver) -> list:
                 continue
 
         # Checkboxes standalone (fora de fieldset — termos, consents, perguntas booleanas)
-        checkboxes = driver.find_elements(By.CSS_SELECTOR, "input[type='checkbox']")
+        checkboxes = scope.find_elements(By.CSS_SELECTOR, "input[type='checkbox']")
         for chk in checkboxes:
             try:
                 if chk.is_selected():
@@ -1699,7 +1758,7 @@ async def _preencher_resposta_customizada_selenium(driver, pergunta: str, respos
         else:
             pergunta_busca = pergunta
 
-        labels = driver.find_elements(By.CSS_SELECTOR, "label")
+        labels = _modal_scope(driver).find_elements(By.CSS_SELECTOR, "label")
         for label in labels:
             try:
                 label_text = (label.text or "").lower()
@@ -1726,8 +1785,10 @@ async def _preencher_resposta_customizada_selenium(driver, pergunta: str, respos
                             el[0].send_keys(resposta[:200])
                             print(f"[LINKEDIN] Preencheu text: {pergunta_busca[:40]} = {resposta[:30]}")
                         return
+        _registrar_run_log(f"PREENCHER: label não casou p/ '{pergunta[:40]}'")
     except Exception as e:
         logger.debug("linkedin_selenium: erro ao preencher resposta: %s", e)
+        _registrar_run_log(f"PREENCHER ERRO '{pergunta[:35]}': {e}")
 
 
 async def _preencher_combobox_linkedin(driver, label_text: str, resposta: str) -> bool:
@@ -1847,20 +1908,43 @@ async def _preencher_select_selenium(driver, label_text: str, resposta: str) -> 
             if not sel_label or label_text.lower()[:30] not in sel_label.lower():
                 continue
             sel_obj = Select(sel_elem)
-            options = [(o.get_attribute("value"), o.text.strip()) for o in sel_obj.options if o.text.strip()]
+            # Só opções reais (exclui placeholder 'Selecionar opção' etc.)
+            options = [
+                (o.get_attribute("value"), o.text.strip())
+                for o in sel_obj.options
+                if o.text.strip() and not _eh_placeholder_opcao(o.text)
+            ]
             resposta_lower = resposta.strip().lower()
+            escolhido = None
             for val, text in options:
                 if resposta_lower == text.lower() or resposta_lower in text.lower() or text.lower() in resposta_lower:
-                    sel_obj.select_by_value(val)
-                    print(f"[LINKEDIN] Select: {label_text[:30]} = {text}")
-                    return
-            for val, text in options:
-                if text.lower() not in ("", "select an option", "selecione uma opção", "selecione", "--", "select", "choose"):
-                    sel_obj.select_by_value(val)
-                    print(f"[LINKEDIN] Select fallback: {label_text[:30]} = {text}")
-                    return
+                    escolhido = (val, text); break
+            if escolhido is None and options:
+                escolhido = options[0]  # fallback: 1ª opção real (não deixa travar)
+            if escolhido is None:
+                _registrar_run_log(f"SELECT '{label_text[:30]}': SEM opções reais")
+                return
+            val, text = escolhido
+            sel_obj.select_by_value(val)
+            # React: o <select> do LinkedIn é controlado — select_by_value pode não
+            # disparar o onChange e o React reverte p/ 'Selecionar opção'. Força os
+            # eventos e verifica se a seleção ficou.
+            try:
+                driver.execute_script(
+                    "arguments[0].dispatchEvent(new Event('input',{bubbles:true}));"
+                    "arguments[0].dispatchEvent(new Event('change',{bubbles:true}));",
+                    sel_elem,
+                )
+            except Exception:
+                pass
+            ficou = (Select(sel_elem).first_selected_option.text or "").strip()
+            print(f"[LINKEDIN] Select: {label_text[:30]} = {text} (ficou: {ficou[:20]})")
+            _registrar_run_log(f"SELECT '{label_text[:30]}' = '{text}' (ficou: '{ficou[:20]}')")
+            return
+        _registrar_run_log(f"SELECT '{label_text[:30]}': nenhum <select> casou a label")
     except Exception as e:
         logger.debug("linkedin_selenium: erro ao preencher select: %s", e)
+        _registrar_run_log(f"SELECT ERRO '{label_text[:30]}': {e}")
 
 
 def _clicar_radio_via_label(driver, radio_input) -> bool:
@@ -2379,9 +2463,12 @@ def _registrar_run_log(linha: str) -> None:
 
 
 def _url_eh_listagem(url: str) -> bool:
-    """True se a URL é uma página de listagem/vaga real (não jobs-tracker)."""
+    """True se a URL é a listagem/feed real de vagas.
+    NÃO conta: jobs-tracker (vagas aplicadas) nem post-apply (página "e agora?"
+    de recomendações pós-candidatura, com cards diferentes — fazia o bot se
+    perder nos cards). Esses disparam volta para o feed real."""
     u = (url or "").lower()
-    if "jobs-tracker" in u or "stage=applied" in u:
+    if "jobs-tracker" in u or "stage=applied" in u or "post-apply" in u:
         return False
     return ("jobs/collections" in u) or ("jobs/search" in u) or ("jobs/view" in u)
 
@@ -2428,6 +2515,59 @@ async def _finalizar_sucesso(driver, motivo: str = "") -> None:
         _registrar_run_log(f"SUCESSO sem refresh ({motivo}) -> {cur[:70]}")
         return
     await _voltar_para_listagem(driver, motivo=motivo)
+
+
+async def _tratar_apply_externo(driver, vaga_id: str, user_id: str) -> bool:
+    """Trata candidaturas que NÃO são Easy Apply: o botão 'Candidatar-se' abre
+    outra aba ou redireciona para o site da empresa (fora do LinkedIn). Sem isso
+    o bot fica perdido fora do site e não vai para a próxima vaga.
+
+    Fecha abas extras, volta ao feed se saiu do LinkedIn, marca a vaga como
+    'apply_externo' (não automatizável) e retorna True para pular a vaga."""
+    def _info():
+        fechou = 0
+        try:
+            handles = driver.window_handles
+            if len(handles) > 1:
+                principal = handles[0]
+                for h in handles[1:]:
+                    try:
+                        driver.switch_to.window(h)
+                        driver.close()
+                        fechou += 1
+                    except Exception:
+                        pass
+                try:
+                    driver.switch_to.window(principal)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        url = ""
+        try:
+            url = driver.current_url
+        except Exception:
+            pass
+        return fechou, url
+
+    fechou, url = await _run_in_thread(_info)
+    fora = "linkedin.com" not in (url or "").lower()
+    if not fechou and not fora:
+        return False
+    _registrar_run_log(f"APPLY-EXTERNO vaga={vaga_id} abas_fechadas={fechou} fora={fora} url={url[:50]}")
+    print(f"[LINKEDIN] {vaga_id}: candidatura externa/nova aba — pulando")
+    if vaga_id:
+        try:
+            from graph.neo4j_client import get_neo4j
+            get_neo4j().registrar_candidatura(
+                user_id=user_id, vaga_id=vaga_id,
+                plataforma="linkedin", status="apply_externo",
+            )
+        except Exception:
+            pass
+    if fora:
+        await _voltar_para_listagem(driver, motivo="apply-externo")
+    return True
 
 
 async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, user_id: str = "admin") -> dict:
@@ -2717,6 +2857,12 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
                 continue
 
             await asyncio.sleep(2)
+            # Candidatura externa (abre outra aba / sai do LinkedIn)? Limpa e pula.
+            try:
+                if await _tratar_apply_externo(driver, vaga_id, user_id):
+                    continue
+            except Exception:
+                pass
             modal = await _aguardar_modal_easy_apply(driver)
             if not modal:
                 # Verifica se LinkedIn redirecionou para jobs-tracker (já aplicado ou one-click Apply)
@@ -2762,9 +2908,24 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
 
             # 6. Preenche formulário
             await notify_browser_step("selenium_linkedin", "formulario", f"Preenchendo: {vaga_id}")
-            resultado = await _processar_formulario_multistep_selenium(
-                driver, perfil, curriculo_path, vaga_url, resumo_curriculo, idioma=idioma_vaga
-            )
+            # Timeout protege contra um form/Selenium travado matar o run inteiro
+            # ("morre no meio do caminho"). Se estourar, abandona e segue pra próxima.
+            try:
+                resultado = await asyncio.wait_for(
+                    _processar_formulario_multistep_selenium(
+                        driver, perfil, curriculo_path, vaga_url, resumo_curriculo, idioma=idioma_vaga
+                    ),
+                    timeout=150,
+                )
+            except asyncio.TimeoutError:
+                _registrar_run_log(f"FORM TIMEOUT vaga={vaga_id} — abandonando e seguindo")
+                print(f"[LINKEDIN] Form travou (timeout) em {vaga_id} — seguindo")
+                try:
+                    await _escapar_modal_ativo(driver)
+                    await _voltar_para_listagem(driver, motivo="form-timeout")
+                except Exception:
+                    pass
+                resultado = {"sucesso": False, "motivo_falha": "timeout"}
             resultados["aplicacoes"].append(resultado)
             if not resultado.get("sucesso"):
                 resultados["falhas"] += 1
@@ -2855,11 +3016,11 @@ async def _dismissar_cookie_banner(driver) -> None:
 async def _fechar_modal_sucesso(driver) -> bool:
     """Clica em 'Concluído'/'Done' no modal de confirmação pós-candidatura do LinkedIn.
     Retorna True se o botão foi encontrado e clicado."""
-    # Ordem importa: 'Dismiss'/'Fechar' (o X) fecha o modal SEM redirecionar para
-    # jobs-tracker; 'Concluído'/'Done' redireciona. Tenta o X primeiro p/ evitar o
-    # refresh/spin pós-candidatura.
+    # Clica 'Concluído'/'Done' PRIMEIRO (finaliza a candidatura corretamente).
+    # O redirect p/ post-apply/jobs-tracker que isso causa é tratado depois pelo
+    # _voltar_para_listagem. X/Dismiss só como fallback se não houver Concluído.
     done_labels = [
-        "dismiss", "fechar", "close", "concluído", "concluido", "done", "ok",
+        "concluído", "concluido", "done", "fechar", "close", "dismiss", "ok",
     ]
 
     def _click_done():

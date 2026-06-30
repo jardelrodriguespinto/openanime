@@ -1956,7 +1956,7 @@ class Neo4jClient:
         # form que falhou uma vez ficaria pulado para sempre e o bot esgota as vagas.
         cypher = """
         MATCH (u:Usuario {user_id: $tid})-[r:SE_CANDIDATOU {vaga_id: $vaga_id}]->(v:Vaga)
-        WHERE r.status IN ['candidatado', 'ja_aplicado']
+        WHERE r.status IN ['candidatado', 'ja_aplicado', 'apply_externo']
               OR coalesce(r.tentativas, 0) >= 3
         RETURN count(r) > 0 AS existe
         """
