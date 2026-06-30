@@ -1686,14 +1686,36 @@ async def _preencher_checkbox_selenium(driver, label_text: str, resposta: str) -
                 if not found_label:
                     continue
                 if label_text.lower()[:30] in found_label.lower() or found_label.lower()[:30] in label_text.lower():
-                    # Clica via label element (se existir) ou via JS direto no input
+                    # 1) Clique real no label (dispara o onChange do React)
                     if chk_id:
                         lbs = driver.find_elements(By.CSS_SELECTOR, f"label[for='{chk_id}']")
                         if lbs:
-                            driver.execute_script("arguments[0].click();", lbs[0])
-                            return True
-                    driver.execute_script("arguments[0].click();", chk)
-                    return True
+                            try:
+                                driver.execute_script("arguments[0].click();", lbs[0])
+                            except Exception:
+                                pass
+                    if not chk.is_selected():
+                        try:
+                            driver.execute_script("arguments[0].click();", chk)
+                        except Exception:
+                            pass
+                    # 2) Ainda não marcou? Checkbox React controlado — usa o NATIVE
+                    # SETTER de 'checked' (interceptado pelo React) + eventos.
+                    if not chk.is_selected():
+                        try:
+                            driver.execute_script(
+                                "var c=arguments[0];"
+                                "var s=Object.getOwnPropertyDescriptor("
+                                "window.HTMLInputElement.prototype,'checked').set;"
+                                "s.call(c,true);"
+                                "c.dispatchEvent(new Event('click',{bubbles:true}));"
+                                "c.dispatchEvent(new Event('input',{bubbles:true}));"
+                                "c.dispatchEvent(new Event('change',{bubbles:true}));",
+                                chk,
+                            )
+                        except Exception:
+                            pass
+                    return chk.is_selected()
             except Exception:
                 continue
         return False
@@ -1708,8 +1730,10 @@ async def _preencher_checkbox_selenium(driver, label_text: str, resposta: str) -
             print(f"[LINKEDIN] Marcou checkbox: {label_text[:40]}")
         else:
             print(f"[LINKEDIN] Checkbox não encontrado: {label_text[:40]}")
+        _registrar_run_log(f"CHECKBOX '{label_text[:35]}' marcado={result}")
     except Exception as e:
         logger.debug("_preencher_checkbox_selenium erro: %s", e)
+        _registrar_run_log(f"CHECKBOX ERRO '{label_text[:30]}': {e}")
 
 
 async def _preencher_resposta_customizada_selenium(driver, pergunta: str, resposta: str) -> None:
@@ -1925,19 +1949,33 @@ async def _preencher_select_selenium(driver, label_text: str, resposta: str) -> 
                 _registrar_run_log(f"SELECT '{label_text[:30]}': SEM opções reais")
                 return
             val, text = escolhido
-            sel_obj.select_by_value(val)
-            # React: o <select> do LinkedIn é controlado — select_by_value pode não
-            # disparar o onChange e o React reverte p/ 'Selecionar opção'. Força os
-            # eventos e verifica se a seleção ficou.
-            try:
-                driver.execute_script(
-                    "arguments[0].dispatchEvent(new Event('input',{bubbles:true}));"
-                    "arguments[0].dispatchEvent(new Event('change',{bubbles:true}));",
-                    sel_elem,
-                )
-            except Exception:
-                pass
-            ficou = (Select(sel_elem).first_selected_option.text or "").strip()
+            # React: o <select> do LinkedIn é controlado. select_by_value seta o DOM
+            # mas o "value tracker" do React reverte p/ 'Selecionar opção' porque o
+            # onChange não dispara. A correção robusta é usar o NATIVE SETTER do
+            # protótipo (que o React intercepta) e então disparar input+change.
+            _js_native_select = """
+                var sel = arguments[0], val = arguments[1];
+                var setter = Object.getOwnPropertyDescriptor(
+                    window.HTMLSelectElement.prototype, 'value').set;
+                setter.call(sel, val);
+                sel.dispatchEvent(new Event('input', {bubbles:true}));
+                sel.dispatchEvent(new Event('change', {bubbles:true}));
+            """
+            def _set_react():
+                driver.execute_script(_js_native_select, sel_elem, val)
+                return (Select(sel_elem).first_selected_option.text or "").strip()
+            ficou = await _run_in_thread(_set_react)
+            # Se reverteu (React não pegou), tenta também o select_by_value nativo.
+            if _eh_placeholder_opcao(ficou):
+                def _set_selenium():
+                    try:
+                        Select(sel_elem).select_by_value(val)
+                        driver.execute_script(
+                            "arguments[0].dispatchEvent(new Event('change',{bubbles:true}));", sel_elem)
+                    except Exception:
+                        pass
+                    return (Select(sel_elem).first_selected_option.text or "").strip()
+                ficou = await _run_in_thread(_set_selenium)
             print(f"[LINKEDIN] Select: {label_text[:30]} = {text} (ficou: {ficou[:20]})")
             _registrar_run_log(f"SELECT '{label_text[:30]}' = '{text}' (ficou: '{ficou[:20]}')")
             return
