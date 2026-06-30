@@ -666,7 +666,7 @@ VUE_DASHBOARD = """
                     const r = await fetch('/api/automacao/aplicar-vagas-visiveis', {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({max_vagas: 5})
+                        body: JSON.stringify({max_vagas: 20})
                     });
                     const d = await r.json();
                     if (d.success) {

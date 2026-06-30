@@ -690,11 +690,14 @@ async def _detectar_erros_validacao(driver) -> list:
                 continue
         # 2. Fallback estrutura-agnóstico: varre o texto do modal por frases de erro.
         #    LinkedIn varia as classes/idiomas; o texto é mais estável.
+        # Só FRASES DE ERRO definitivas — NÃO 'required'/'obrigatório' sozinhos
+        # (aparecem como marcador de campo obrigatório vazio, não como erro, e
+        # faziam o bot achar que travou ao chegar numa página nova de perguntas).
         FRASES = [
-            "obrigatório", "obrigatorio", "insira uma resposta válida",
-            "insira uma resposta valida", "required", "please enter",
-            "please select", "this field is required", "enter a valid",
-            "campo obrigatório", "selecione uma opção",
+            "insira uma resposta válida", "insira uma resposta valida",
+            "please enter a valid", "enter a valid", "this field is required",
+            "campo obrigatório", "campo é obrigatório", "selecione uma resposta",
+            "please select an answer", "número inválido", "resposta inválida",
         ]
         try:
             for dlg in driver.find_elements(By.CSS_SELECTOR, "div[role='dialog'], .artdeco-modal"):
@@ -831,6 +834,7 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
     perguntas_customizadas = []
     respostas_geradas = {}
     max_steps = 12
+    nao_avancou = 0   # nº de 'Avançar' consecutivos sem o step mudar (anti-loop)
 
     try:
         vaga_titulo = ""
@@ -993,28 +997,30 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
                 _registrar_run_log(f"FORM step {step}: submit clicado, sucesso NÃO confirmado — encerrando")
                 break
 
-            # Navegando (Avançar/Continuar):
-            # Keystone (estrutura-agnóstico): o clique em 'Avançar' pode ter sido
-            # recusado por campo obrigatório vazio/inválido. Detecta de DUAS formas
-            # independentes da estrutura exata do DOM:
-            #   1) mensagem de erro de validação visível;
-            #   2) a assinatura do step (progresso + nº de campos vazios) não mudou.
-            # Qualquer uma → o step travou; clicar de novo só repetiria até cair
-            # em 'Salvar candidatura?' → jobs-tracker. Dump do DOM + bail limpo.
-            if True:
-                erros = await _detectar_erros_validacao(driver)
-                sig_depois = await _obter_progresso(driver)
-                travado = bool(erros) or (sig_antes and sig_antes == sig_depois)
-                if travado:
-                    motivo = (" | ".join(erros[:3])) if erros else f"sem avanço ({sig_depois})"
-                    print(f"[LINKEDIN] Step {step}: avanço bloqueado — {motivo}")
-                    await notify_browser_step("step_"+str(step), "bloqueado", f"Travou: {motivo[:80]}")
-                    try:
-                        await _run_in_thread(_dump_form_debug_sync, driver)
-                    except Exception:
-                        pass
-                    break
+            # Navegando (Avançar/Continuar): SÓ está travado se o step NÃO avançou.
+            # Se a barra de progresso/campos mudaram, o Avançar funcionou — a página
+            # nova (com campos obrigatórios vazios) NÃO é erro, é o PRÓXIMO step a
+            # preencher. Bailar aqui pulava as perguntas (bug do "não preenche").
+            sig_depois = await _obter_progresso(driver)
+            avancou = bool(sig_antes) and (sig_antes != sig_depois)
+            if avancou:
+                nao_avancou = 0
                 continue
+            # Não avançou: confirma travamento real. Erro de validação visível OU
+            # repetiu demais sem sair do lugar → bail. Senão, segue e re-tenta.
+            nao_avancou += 1
+            erros = await _detectar_erros_validacao(driver)
+            if erros or nao_avancou >= 3:
+                motivo = (" | ".join(erros[:3])) if erros else f"sem avanço {nao_avancou}x ({sig_depois})"
+                print(f"[LINKEDIN] Step {step}: avanço bloqueado — {motivo}")
+                await notify_browser_step("step_"+str(step), "bloqueado", f"Travou: {motivo[:80]}")
+                _registrar_run_log(f"FORM step {step}: travado — {motivo[:60]}")
+                try:
+                    await _run_in_thread(_dump_form_debug_sync, driver)
+                except Exception:
+                    pass
+                break
+            continue
 
             break
 
@@ -1441,9 +1447,11 @@ _INTEGER_LABEL_KEYWORDS = {
 
 
 def _modal_scope(driver):
-    """Retorna o elemento do modal Easy Apply (ou o driver, se não achar).
-    Restringe buscas de campos AO modal — fora dele existe a barra de busca do
-    topo do LinkedIn e outros inputs que poluíam a detecção de perguntas."""
+    """Retorna o elemento do modal Easy Apply, ou None se não houver modal aberto.
+
+    NUNCA cai pro driver (página inteira): sem modal não há perguntas de formulário
+    e varrer a página pega a barra de busca do topo do LinkedIn — que era
+    'respondida', disparava uma busca/refresh e levava ao loop do jobs-tracker."""
     for sel in ("div.jobs-easy-apply-modal", ".jobs-easy-apply-modal",
                 "div[data-test-modal][role='dialog']", "div[role='dialog']",
                 ".artdeco-modal"):
@@ -1453,7 +1461,7 @@ def _modal_scope(driver):
                 return els[-1]
         except Exception:
             continue
-    return driver
+    return None
 
 
 async def _detectar_perguntas_nao_respondidas_selenium(driver) -> list:
@@ -1473,6 +1481,10 @@ async def _detectar_perguntas_nao_respondidas_selenium(driver) -> list:
     # ("Pesquisar cargo, competência ou empresa") é detectada como pergunta e
     # recebe a resposta da IA, disparando uma busca/refresh.
     scope = _modal_scope(driver)
+    if scope is None:
+        # Sem modal aberto → não há perguntas. Nunca varrer a página (barra de busca).
+        _registrar_run_log("DETECT: sem modal — 0 perguntas (não varre página)")
+        return []
 
     try:
         inputs = scope.find_elements(By.CSS_SELECTOR,
@@ -1782,7 +1794,26 @@ async def _preencher_resposta_customizada_selenium(driver, pergunta: str, respos
         else:
             pergunta_busca = pergunta
 
-        labels = _modal_scope(driver).find_elements(By.CSS_SELECTOR, "label")
+        _scope = _modal_scope(driver)
+        if _scope is None:
+            return  # sem modal → não preenche nada (nunca a barra de busca)
+
+        # React: inputs controlados revertem se só usar send_keys. Seta o value pelo
+        # NATIVE SETTER do protótipo (interceptado pelo React) + dispara input/change.
+        def _set_react_input(el, val):
+            driver.execute_script(
+                "var el=arguments[0], val=arguments[1];"
+                "var proto=el.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype"
+                ":window.HTMLInputElement.prototype;"
+                "var s=Object.getOwnPropertyDescriptor(proto,'value').set;"
+                "s.call(el, '');"
+                "s.call(el, val);"
+                "el.dispatchEvent(new Event('input',{bubbles:true}));"
+                "el.dispatchEvent(new Event('change',{bubbles:true}));",
+                el, val,
+            )
+
+        labels = _scope.find_elements(By.CSS_SELECTOR, "label")
         for label in labels:
             try:
                 label_text = (label.text or "").lower()
@@ -1796,18 +1827,24 @@ async def _preencher_resposta_customizada_selenium(driver, pergunta: str, respos
                         tag = el[0].tag_name.lower()
                         input_type = (el[0].get_attribute("type") or "").lower()
                         if tag == "textarea":
-                            el[0].clear()
-                            el[0].send_keys(resposta[:500])
-                            print(f"[LINKEDIN] Preencheu textarea: {pergunta_busca[:40]} = {resposta[:30]}")
+                            valor = resposta[:500]
                         elif input_type == "number" or is_numero or is_decimal:
-                            # resposta já foi formatada (inteiro ou decimal) antes deste ponto
-                            el[0].clear()
-                            el[0].send_keys(resposta)
-                            print(f"[LINKEDIN] Preencheu number: {pergunta_busca[:40]} = {resposta}")
+                            valor = resposta  # já formatado (inteiro/decimal)
                         else:
+                            valor = resposta[:200]
+                        try:
                             el[0].clear()
-                            el[0].send_keys(resposta[:200])
-                            print(f"[LINKEDIN] Preencheu text: {pergunta_busca[:40]} = {resposta[:30]}")
+                            el[0].send_keys(valor)
+                        except Exception:
+                            pass
+                        # Confirma/garante via React; se send_keys não fixou, isto fixa.
+                        try:
+                            _set_react_input(el[0], valor)
+                        except Exception:
+                            pass
+                        ficou = (el[0].get_attribute("value") or "")
+                        print(f"[LINKEDIN] Preencheu {tag}/{input_type}: {pergunta_busca[:35]} = {valor} (ficou: {ficou[:15]})")
+                        _registrar_run_log(f"PREENCHER {pergunta_busca[:30]} = '{valor}' (ficou: '{ficou[:15]}')")
                         return
         _registrar_run_log(f"PREENCHER: label não casou p/ '{pergunta[:40]}'")
     except Exception as e:
@@ -1986,29 +2023,43 @@ async def _preencher_select_selenium(driver, label_text: str, resposta: str) -> 
 
 
 def _clicar_radio_via_label(driver, radio_input) -> bool:
-    """Clica num radio button via label ou JS — funciona mesmo quando o input está hidden pelo CSS."""
+    """Marca um radio via label/JS e VERIFICA. Radio React-controlado pode não
+    pegar o click programático → usa o native 'checked' setter + change como
+    garantia. Funciona mesmo com o input escondido por CSS."""
     r_id = radio_input.get_attribute("id")
+    # 1) Clique real no label (dispara onChange do React)
     if r_id:
         lbls = driver.find_elements(By.CSS_SELECTOR, f"label[for='{r_id}']")
         if lbls:
             try:
                 driver.execute_script("arguments[0].click();", lbls[0])
-                return True
             except Exception:
                 pass
-    # Fallback: JS click no próprio input
+    # 2) Se não marcou, clique no próprio input
+    if not radio_input.is_selected():
+        try:
+            driver.execute_script("arguments[0].click();", radio_input)
+        except Exception:
+            pass
+    # 3) Ainda não? Native setter de 'checked' (interceptado pelo React) + eventos
+    if not radio_input.is_selected():
+        try:
+            driver.execute_script(
+                "var r=arguments[0];"
+                "var s=Object.getOwnPropertyDescriptor("
+                "window.HTMLInputElement.prototype,'checked').set;"
+                "s.call(r,true);"
+                "r.dispatchEvent(new Event('click',{bubbles:true}));"
+                "r.dispatchEvent(new Event('input',{bubbles:true}));"
+                "r.dispatchEvent(new Event('change',{bubbles:true}));",
+                radio_input,
+            )
+        except Exception:
+            pass
     try:
-        driver.execute_script("arguments[0].click();", radio_input)
-        return True
+        return radio_input.is_selected()
     except Exception:
-        pass
-    # Último recurso: click normal
-    try:
-        radio_input.click()
         return True
-    except Exception:
-        pass
-    return False
 
 
 async def _preencher_radio_selenium(driver, label_text: str, resposta: str) -> None:
@@ -2082,9 +2133,11 @@ async def _preencher_radio_selenium(driver, label_text: str, resposta: str) -> N
         return False
 
     try:
-        await _run_in_thread(_fill)
+        marcou = await _run_in_thread(_fill)
+        _registrar_run_log(f"RADIO '{label_text[:30]}' marcado={marcou}")
     except Exception as e:
         logger.debug("linkedin_selenium: erro ao preencher radio: %s", e)
+        _registrar_run_log(f"RADIO ERRO '{label_text[:30]}': {e}")
 
 
 async def _aguardar_modal_easy_apply(driver, timeout: int = 12):
@@ -2667,18 +2720,45 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
 
         resultados = {"sucesso": True, "aplicacoes": [], "falhas": 0}
         vagas_tentadas_sessao: set = set()
-        vagas_aplicadas = 0        # candidaturas submetidas (ou tentadas)
+        vagas_aplicadas = 0        # candidaturas submetidas (ou tentadas) NESTE run
         sem_cards_count = 0        # cards vazios consecutivos → scroll / próxima página
-        _MAX_SEM_CARDS = 4         # após N vezes sem card: tenta próxima página e desiste
-        _MAX_ITER = max_vagas * 8  # teto absoluto de iterações (evita loop infinito)
+        _MAX_SEM_CARDS = 6         # após N vezes sem card novo: pagina e, no fim, desiste
         _iter = 0
 
-        while vagas_aplicadas < max_vagas and sem_cards_count < _MAX_SEM_CARDS and _iter < _MAX_ITER:
+        # Teto de CANDIDATURAS APLICADAS (conta no Redis, persiste entre runs).
+        # Se LINKEDIN_TETO_APLICACOES estiver no .env, ele governa o limite — o bot
+        # aplica até atingir o teto de vagas APLICADAS, ignorando as percorridas.
+        # Sem teto definido, cai no max_vagas por run (comportamento antigo).
+        from automation import contador_aplicacoes as _cont
+        _teto = _cont.get_teto()
+
+        # Guarda-chuva anti-loop-infinito. Generoso porque os SKIPs (vagas já
+        # aplicadas) são percorridos rápido e NÃO contam pro teto — o bot precisa
+        # atravessar muitos cards até aplicar o total. Escala com o teto/lote.
+        _orcamento = (_teto if _teto > 0 else max_vagas)
+        _MAX_ITER = max(400, _orcamento * 40)
+
+        def _atingiu_limite() -> bool:
+            if _teto > 0:
+                return _cont.get_count(user_id) >= _teto
+            return vagas_aplicadas >= max_vagas
+
+        if _teto > 0:
+            _registrar_run_log(f"TETO aplicadas={_cont.get_count(user_id)}/{_teto} (Redis)")
+            if _cont.get_count(user_id) >= _teto:
+                await notify_browser_step("selenium_linkedin", "concluido",
+                                          f"Teto de {_teto} candidaturas já atingido")
+                return {"sucesso": True, "aplicacoes": [], "teto_atingido": True,
+                        "mensagem": f"Teto de {_teto} candidaturas já atingido (Redis)."}
+
+        while not _atingiu_limite() and sem_cards_count < _MAX_SEM_CARDS and _iter < _MAX_ITER:
             _iter += 1
             await wait_if_paused(None, f"vaga_{vagas_aplicadas+1}")
+            _progresso = (f"{_cont.get_count(user_id)}/{_teto} aplicadas (teto)"
+                          if _teto > 0 else f"{vagas_aplicadas+1}/{max_vagas}")
             await notify_browser_step(
                 "selenium_linkedin", "buscando",
-                f"Procurando vaga {vagas_aplicadas+1}/{max_vagas}..."
+                f"Procurando vaga — {_progresso}..."
             )
 
             driver = await get_driver()
@@ -2968,6 +3048,16 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
             if not resultado.get("sucesso"):
                 resultados["falhas"] += 1
             vagas_aplicadas += 1
+
+            # Conta no teto SÓ candidaturas que deram certo (vagas APLICADAS, não
+            # percorridas). Persiste no Redis → respeita o teto entre runs.
+            if resultado.get("sucesso"):
+                _total = _cont.incr_count(user_id)
+                _registrar_run_log(f"APLICADA +1 -> total={_total}" + (f"/{_teto}" if _teto > 0 else ""))
+                if _teto > 0 and _total >= _teto:
+                    await notify_browser_step("selenium_linkedin", "concluido",
+                                              f"Teto de {_teto} candidaturas atingido")
+                    _registrar_run_log(f"TETO atingido ({_total}/{_teto}) — encerrando")
 
             # 7. Registra no Neo4j
             if vaga_id:
