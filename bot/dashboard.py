@@ -210,6 +210,10 @@ VUE_DASHBOARD = """
             <form action="/logout" method="POST"><button class="logout" type="submit">Sair</button></form>
         </div>
 
+        <div v-if="notif.msg" :style="{background: notif.type==='error'?'#ff4444':notif.type==='success'?'#00c864':'#00d4ff', color:'#0f0f23', padding:'10px 16px', borderRadius:'6px', marginBottom:'10px', fontWeight:'bold', fontSize:'0.92rem', transition:'all 0.3s'}">
+            {{notif.msg}}
+        </div>
+
         <div class="automacao-bar">
             <div class="automacao-status">
                 <span class="status-dot" :class="automacao.running ? 'online' : (automacao.action !== 'idle' ? 'busy' : 'offline')"></span>
@@ -241,6 +245,12 @@ VUE_DASHBOARD = """
 
         <div class="browser-panel">
             <h4>🖥️ Browser em Tempo Real | {{browserStep.step || 'Monitoramento'}}</h4>
+            <div v-if="browserControl.paused" style="background:#ff4444;color:#fff;padding:8px 12px;border-radius:4px;margin-bottom:8px;font-weight:bold;text-align:center;">
+                ⏸️ AUTOMAÇÃO PAUSADA — clique em ▶️ Continuar para retomar
+            </div>
+            <div v-if="browserControl.intervention_type === 'manual'" style="background:#ffaa00;color:#0f0f23;padding:8px 12px;border-radius:4px;margin-bottom:8px;font-weight:bold;text-align:center;">
+                ✋ MODO MANUAL ATIVO — use os controles abaixo ou 🔄 Retomar Auto
+            </div>
             <div class="browser-viewport" v-if="browser.screenshot">
                 <img :src="'data:image/png;base64,' + browser.screenshot" alt="Browser screenshot">
                 <div class="browser-url">{{browser.url}}</div>
@@ -299,8 +309,8 @@ VUE_DASHBOARD = """
                  <option value="linkedin">LinkedIn</option>
                  <option value="indeed">Indeed</option>
              </select>
-             <button @click="iniciarAutomacao" :disabled="automacao.running">▶ Iniciar Busca</button>
-             <button @click="pararAutomacao" :disabled="!automacao.running">⏹ Parar</button>
+             <button @click="iniciarAutomacao" :disabled="automacao.running" :style="{opacity: automacao.running ? 0.5 : 1}">▶ Iniciar Busca</button>
+             <button @click="pararAutomacao">⏹ Parar</button>
              <button @click="limparCache">🗑 Limpar</button>
          </div>
 
@@ -357,6 +367,8 @@ VUE_DASHBOARD = """
                 plataformaSelecionada: '',
                 plataformaAplicacao: '',
                 resumoCurriculo: '',
+                notif: {msg: '', type: 'info'},
+                _notifTimer: null,
             }
         },
         computed: {
@@ -394,11 +406,18 @@ VUE_DASHBOARD = """
             if (this.browserInterval) clearInterval(this.browserInterval);
         },
         methods: {
+            showNotif(msg, type = 'info') {
+                this.notif = {msg, type};
+                if (this._notifTimer) clearTimeout(this._notifTimer);
+                this._notifTimer = setTimeout(() => { this.notif = {msg: '', type: 'info'}; }, 5000);
+            },
             async carregar() {
-                const r = await fetch('/api/candidaturas');
-                const d = await r.json();
-                this.candidaturas = d.candidaturas || [];
-                this.stats = {total: d.total, sucesso: d.sucesso, falha: d.falha, hoje: d.hoje, processando: d.processando || 0};
+                try {
+                    const r = await fetch('/api/candidaturas');
+                    const d = await r.json();
+                    this.candidaturas = d.candidaturas || [];
+                    this.stats = {total: d.total, sucesso: d.sucesso, falha: d.falha, hoje: d.hoje, processando: d.processando || 0};
+                } catch(e) { this.showNotif('Erro ao carregar candidaturas', 'error'); }
             },
             async carregarVagas() {
                 try {
@@ -454,26 +473,40 @@ VUE_DASHBOARD = """
                 this.stats.processando = this.candidaturas.filter(c => c.status === 'processando').length;
             },
             async iniciarAutomacao() {
-                await fetch('/api/vagas/buscar', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({query: this.busca || 'desenvolvedor', platform: this.plataformaSelecionada})
-                });
-                await this.carregarAutomacao();
-                setTimeout(() => { this.carregar(); this.carregarVagas(); }, 5000);
-                setTimeout(() => { this.carregar(); this.carregarVagas(); }, 15000);
-                setTimeout(() => { this.carregar(); this.carregarVagas(); }, 30000);
+                this.automacao = {...this.automacao, running: true, action: 'buscando'};
+                this.showNotif('🔍 Busca iniciada — aguardando resultados...', 'info');
+                try {
+                    const r = await fetch('/api/vagas/buscar', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({query: this.busca || 'desenvolvedor', platform: this.plataformaSelecionada})
+                    });
+                    const d = await r.json();
+                    if (!d.success) this.showNotif('Erro ao iniciar busca: ' + (d.message || ''), 'error');
+                } catch(e) {
+                    this.automacao = {...this.automacao, running: false, action: 'idle'};
+                    this.showNotif('Erro de conexão ao iniciar busca', 'error');
+                    return;
+                }
+                setTimeout(() => { this.carregar(); this.carregarVagas(); this.carregarAutomacao(); }, 5000);
+                setTimeout(() => { this.carregar(); this.carregarVagas(); this.carregarAutomacao(); }, 15000);
+                setTimeout(() => { this.carregar(); this.carregarVagas(); this.carregarAutomacao(); }, 30000);
             },
             async pararAutomacao() {
-                await fetch('/api/automacao/parar', {method: 'POST'});
-                await this.carregarAutomacao();
+                this.automacao = {...this.automacao, running: false, action: 'idle'};
+                this.showNotif('⏹ Automação parada', 'info');
+                try {
+                    await fetch('/api/automacao/parar', {method: 'POST'});
+                    await this.carregarAutomacao();
+                } catch(e) {}
             },
             async limparCache() {
-                await fetch('/api/cache/limpar', {method: 'POST'});
                 this.candidaturas = [];
                 this.vagas = [];
                 this.history = [];
                 this.stats = {total: 0, sucesso: 0, falha: 0, hoje: 0, processando: 0};
+                this.showNotif('🗑 Lista limpa', 'success');
+                try { await fetch('/api/cache/limpar', {method: 'POST'}); } catch(e) {}
             },
             async carregarBrowser() {
                 try {
@@ -497,60 +530,85 @@ VUE_DASHBOARD = """
                     }
                 } catch(e) {}
             },
+            async _postControle(cmd, extraBody = {}) {
+                try {
+                    const r = await fetch('/api/browser/controle', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({cmd, ...extraBody})
+                    });
+                    return await r.json();
+                } catch(e) {
+                    this.showNotif('Erro de conexão: ' + cmd, 'error');
+                    return {success: false};
+                }
+            },
             async browserPausar() {
-                await fetch('/api/browser/controle', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({cmd: 'pausar'})});
-                this.browserControl.paused = true;
+                this.browserControl = {...this.browserControl, paused: true, current_action: 'pausado'};
+                this.showNotif('⏸️ Automação pausada', 'info');
+                await this._postControle('pausar');
             },
             async browserContinuar() {
-                await fetch('/api/browser/controle', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({cmd: 'continuar'})});
-                this.browserControl.paused = false;
+                this.browserControl = {...this.browserControl, paused: false, current_action: 'rodando'};
+                this.showNotif('▶️ Automação continuada', 'success');
+                await this._postControle('continuar');
             },
             async browserPular() {
-                await fetch('/api/browser/controle', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({cmd: 'pular'})});
+                this.showNotif('⏭️ Pulando step atual...', 'info');
+                await this._postControle('pular');
             },
             async browserIntervirManual() {
-                await fetch('/api/browser/controle', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({cmd: 'intervir_manual'})});
-                this.browserControl.intervention_type = 'manual';
-                this.browserControl.paused = true;
+                this.browserControl = {...this.browserControl, intervention_type: 'manual', paused: true};
+                this.showNotif('✋ Modo manual ativado — assuma o controle do browser', 'info');
+                await this._postControle('intervir_manual');
             },
             async browserRetomarAuto() {
-                await fetch('/api/browser/controle', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({cmd: 'retomar_auto'})});
-                this.browserControl.intervention_type = null;
-                this.browserControl.paused = false;
+                this.browserControl = {...this.browserControl, intervention_type: null, paused: false, current_action: 'rodando'};
+                this.showNotif('🔄 Retomando automação...', 'success');
+                await this._postControle('retomar_auto');
             },
             async browserDigitar() {
-                if (!this.browserManualSelector || !this.browserManualText) return;
-                await fetch('/api/browser/controle', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({cmd: 'digitar', texto: this.browserManualText, selector: this.browserManualSelector})});
+                if (!this.browserManualSelector || !this.browserManualText) {
+                    this.showNotif('Informe o seletor CSS e o texto antes de digitar', 'error');
+                    return;
+                }
+                this.showNotif('⌨️ Digitando...', 'info');
+                await this._postControle('digitar', {texto: this.browserManualText, selector: this.browserManualSelector});
             },
             async browserClicar() {
-                if (!this.browserManualSelector) return;
-                await fetch('/api/browser/controle', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({cmd: 'clicar', selector: this.browserManualSelector})});
+                if (!this.browserManualSelector) {
+                    this.showNotif('Informe o seletor CSS antes de clicar', 'error');
+                    return;
+                }
+                this.showNotif('🖱️ Clicando...', 'info');
+                await this._postControle('clicar', {selector: this.browserManualSelector});
             },
             async browserEnviarIntervencao() {
-                await fetch('/api/browser/controle', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({cmd: 'retomar_auto'})});
-                this.browserControl.intervention_type = null;
-                this.browserControl.paused = false;
+                this.browserControl = {...this.browserControl, intervention_type: null, paused: false};
                 this.browserManualText = '';
                 this.browserManualSelector = '';
+                this.showNotif('🔄 Ação enviada — retomando automação', 'success');
+                await this._postControle('retomar_auto');
             },
             async aplicarVagaSelecionada() {
                 if (!this.vagaSelecionada) return;
                 const vaga = this.vagaSelecionada;
                 const plataforma = this.plataformaAplicacao || this._detectarPlataforma(vaga.url);
+                this.showNotif('🤖 Iniciando aplicação em ' + (vaga.empresa || 'vaga')+ '...', 'info');
                 try {
                     const r = await fetch('/api/automacao/aplicar-vaga', {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({...vaga, plataforma: plataforma})
+                        body: JSON.stringify({...vaga, plataforma})
                     });
                     const d = await r.json();
                     if (d.success) {
-                        alert('Aplicação iniciada! Veja o browser em tempo real.');
+                        this.showNotif('✅ Aplicação iniciada! Acompanhe o browser abaixo.', 'success');
                     } else {
-                        alert('Erro: ' + (d.message || 'Falha ao iniciar aplicação'));
+                        this.showNotif('❌ Falha: ' + (d.message || 'Erro ao iniciar'), 'error');
                     }
                 } catch(e) {
-                    alert('Erro de conexão ao iniciar aplicação');
+                    this.showNotif('Erro de conexão ao iniciar aplicação', 'error');
                 }
             },
             _detectarPlataforma(url) {
@@ -561,6 +619,7 @@ VUE_DASHBOARD = """
                 return '';
             },
             async extrairVagasLinkedin() {
+                this.showNotif('📥 Extraindo vagas da página do LinkedIn... aguarde até 30s', 'info');
                 try {
                     const r = await fetch('/api/automacao/extrair-vagas-linkedin', {
                         method: 'POST',
@@ -575,16 +634,23 @@ VUE_DASHBOARD = """
                         const check = setInterval(async () => {
                             await this.carregarVagas();
                             polls++;
-                            if (polls >= 10 || this.vagas.length !== prevCount) clearInterval(check);
+                            if (this.vagas.length > prevCount) {
+                                clearInterval(check);
+                                this.showNotif('✅ ' + this.vagas.length + ' vagas carregadas!', 'success');
+                            } else if (polls >= 10) {
+                                clearInterval(check);
+                                this.showNotif('Extração concluída — atualize a lista para ver vagas novas', 'info');
+                            }
                         }, 3000);
                     } else {
-                        alert('Erro: ' + (d.message || 'Falha ao extrair'));
+                        this.showNotif('❌ Falha na extração: ' + (d.message || ''), 'error');
                     }
                 } catch(e) {
-                    alert('Erro de conexão');
+                    this.showNotif('Erro de conexão ao extrair vagas', 'error');
                 }
             },
             async aplicarVagasVisiveisLinkedin() {
+                this.showNotif('🤖 Iniciando aplicação nas vagas visíveis do LinkedIn...', 'info');
                 try {
                     const r = await fetch('/api/automacao/aplicar-vagas-visiveis', {
                         method: 'POST',
@@ -593,12 +659,13 @@ VUE_DASHBOARD = """
                     });
                     const d = await r.json();
                     if (d.success) {
-                        alert('Aplicação em vagas visíveis iniciada! Veja o browser em tempo real.');
+                        this.showNotif('✅ Aplicação iniciada! Acompanhe o browser abaixo.', 'success');
+                        this.automacao = {...this.automacao, running: true, action: 'aplicando', platform: 'linkedin'};
                     } else {
-                        alert('Erro: ' + (d.message || 'Falha ao iniciar'));
+                        this.showNotif('❌ Falha: ' + (d.message || 'Erro ao iniciar'), 'error');
                     }
                 } catch(e) {
-                    alert('Erro de conexão');
+                    this.showNotif('Erro de conexão', 'error');
                 }
             },
             async carregarResumoCurriculo() {
@@ -617,12 +684,12 @@ VUE_DASHBOARD = """
                     });
                     const d = await r.json();
                     if (d.success) {
-                        alert('Currículo salvo com sucesso!');
+                        this.showNotif('✅ Currículo salvo com sucesso!', 'success');
                     } else {
-                        alert('Erro: ' + (d.error || 'Falha ao salvar'));
+                        this.showNotif('❌ Erro ao salvar: ' + (d.error || ''), 'error');
                     }
                 } catch(e) {
-                    alert('Erro de conexão');
+                    this.showNotif('Erro de conexão ao salvar currículo', 'error');
                 }
             }
         }

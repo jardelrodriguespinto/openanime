@@ -20,7 +20,7 @@ from automation.selenium_browser import (
     _wait_for_login_form_visible, clicar_entrar_com_email, forcar_formulario_login,
     _scroll_and_focus_element, _try_convert_selector
 )
-from automation.browser import notify_browser_step, get_intervention_state
+from automation.browser import notify_browser_step, get_intervention_state, wait_if_paused
 from automation.form_filler import responder_pergunta
 from selenium.webdriver.common.by import By
 from selenium.common.exceptions import InvalidSessionIdException, WebDriverException
@@ -512,27 +512,22 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
             pass
 
         for step in range(max_steps):
+            # Verifica se usuario pediu pular ANTES de pausar (skip tem prioridade)
             control = await get_intervention_state()
-            if control.get("paused") or control.get("intervention_type") == "manual":
-                logger.info("linkedin_selenium: pausado pelo usuario no step %d", step)
-                await notify_browser_step("step_"+str(step), "pausado", "Intervenção manual necessária")
-                return {
-                    "sucesso": False,
-                    "pausado": True,
-                    "mensagem": "Automação pausada pelo usuário — intervenção manual necessária",
-                    "acao_necessaria": "intervencao_manual",
-                    "step": step,
-                }
-
             if control.get("current_action") == "pular":
                 logger.info("linkedin_selenium: usuario pediu para pular step %d", step)
                 await set_intervention_state("current_action", "rodando")
                 await notify_browser_step("step_"+str(step), "pulado", "Usuário pediu pular")
                 continue
 
+            # Aguarda se pausado ou em intervencao manual (NAO sai — espera retomada)
+            if control.get("paused") or control.get("intervention_type") == "manual":
+                logger.info("linkedin_selenium: aguardando retomada no step %d", step)
+                await notify_browser_step("step_"+str(step), "pausado", "Aguardando retomada pelo usuário...")
+                await wait_if_paused(None, "step_"+str(step))
+
             await asyncio.sleep(random.uniform(0.8, 1.5))
             await notify_browser_step("step_"+str(step), "preenchendo", "Preenchendo campos do formulário")
-            await wait_if_paused(None, "step_"+str(step))
 
             await _preencher_step_selenium(driver, perfil, curriculo_path)
 
@@ -1141,10 +1136,8 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
         vagas_tentadas_sessao: set = set()  # evita re-tentar mesma vaga na sessão
 
         for i in range(max_vagas):
-            control = await get_intervention_state()
-            if control.get("paused"):
-                await asyncio.sleep(0.5)
-                continue
+            # Espera se pausado (nao avanca o contador nem pula a vaga)
+            await wait_if_paused(None, f"vaga_{i+1}")
 
             await notify_browser_step("selenium_linkedin", f"vaga_{i+1}", f"Procurando vaga {i+1}...")
 
