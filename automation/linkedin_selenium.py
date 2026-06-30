@@ -23,7 +23,9 @@ from automation.selenium_browser import (
 from automation.browser import notify_browser_step, get_intervention_state, wait_if_paused
 from automation.form_filler import responder_pergunta
 from selenium.webdriver.common.by import By
-from selenium.common.exceptions import InvalidSessionIdException, WebDriverException
+from selenium.common.exceptions import (
+    InvalidSessionIdException, WebDriverException, StaleElementReferenceException,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -834,9 +836,21 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
             await asyncio.sleep(random.uniform(0.8, 1.5))
             await notify_browser_step("step_"+str(step), "preenchendo", "Preenchendo campos do formulário")
 
-            await _preencher_step_selenium(driver, perfil, curriculo_path)
-
-            perguntas_step = await _detectar_perguntas_nao_respondidas_selenium(driver)
+            # Preenchimento resiliente a StaleElementReference: o typeahead da cidade
+            # e a seleção de CV/radio re-renderizam o DOM, invalidando refs de
+            # elementos. Em vez de abortar o form (e deixar 'Descartar' sobreposto),
+            # espera o DOM assentar e re-tenta o preenchimento do step.
+            for _tent in range(3):
+                try:
+                    await _preencher_step_selenium(driver, perfil, curriculo_path)
+                    perguntas_step = await _detectar_perguntas_nao_respondidas_selenium(driver)
+                    break
+                except StaleElementReferenceException:
+                    _registrar_run_log(f"FORM step {step}: stale no preenchimento (tent {_tent+1}) — re-tentando")
+                    await asyncio.sleep(1.0)
+                    perguntas_step = []
+            else:
+                perguntas_step = []
             pular_agora = False
             if perguntas_step:
                 await notify_browser_step("step_"+str(step), "respondendo", f"{len(perguntas_step)} pergunta(s) customizada(s)")
@@ -869,7 +883,12 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
             # Assinatura do step antes de clicar — para detectar não-avanço
             sig_antes = await _obter_progresso(driver)
 
-            btn_text, btn_clicked = await _clicar_botao_primario_modal(driver)
+            try:
+                btn_text, btn_clicked = await _clicar_botao_primario_modal(driver)
+            except StaleElementReferenceException:
+                _registrar_run_log(f"FORM step {step}: stale ao clicar botão — re-tentando step")
+                await asyncio.sleep(1.0)
+                continue
 
             if not btn_clicked:
                 # Pode haver um modal de descarte sobreposto — tenta dispensar e re-clicar
@@ -2443,6 +2462,14 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
             except Exception:
                 _url_topo = ""
             _registrar_run_log(f"ITER {_iter} url={_url_topo[:90]}")
+
+            # Limpa modal 'Salvar candidatura?/Descartar' que possa ter sobrado de um
+            # form abortado — senão fica sobreposto e bloqueia o clique no próximo card.
+            try:
+                await _fechar_modal_descarte(driver, manter=False)
+            except Exception:
+                pass
+
             if _url_eh_listagem(_url_topo):
                 _lembrar_listagem(_url_topo)  # recuperação volta para a busca atual
             else:
