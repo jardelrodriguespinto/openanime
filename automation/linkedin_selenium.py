@@ -811,6 +811,32 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
         except Exception:
             pass
 
+        async def _finalizar_se_sucesso(step_idx):
+            """Se a candidatura foi enviada, finaliza e devolve o dict de sucesso;
+            senão None. Chamado após QUALQUER clique de botão primário — o botão de
+            enviar às vezes volta com texto vazio e não casa is_submit."""
+            try:
+                _u = driver.current_url
+            except Exception:
+                _u = ""
+            try:
+                _html = driver.page_source
+            except Exception:
+                _html = ""
+            if _detectar_sucesso(_html, _u):
+                logger.info("linkedin_selenium: candidatura enviada com sucesso")
+                _registrar_run_log(f"FORM step {step_idx}: SUCESSO detectado")
+                await notify_browser_step("step_"+str(step_idx), "sucesso", "Candidatura enviada!")
+                _b64 = await screenshot_base64()
+                await _finalizar_sucesso(driver, motivo="sucesso-step")
+                return {
+                    "sucesso": True,
+                    "perguntas_respondidas": perguntas_customizadas,
+                    "mensagem": "Candidatura enviada com sucesso via LinkedIn Easy Apply!",
+                    "screenshot": _b64[:100] if _b64 else "",
+                }
+            return None
+
         for step in range(max_steps):
             # 0. Descarta qualquer modal de "Descartar candidatura" que tenha sobrado
             try:
@@ -902,6 +928,7 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
                     break
 
             print(f"[LINKEDIN] Step {step}: clicou botão '{btn_text}'")
+            _registrar_run_log(f"FORM step {step}: clicou botão '{btn_text[:40]}'")
             btn_lower = btn_text.lower()
 
             is_submit = any(s in btn_lower for s in [
@@ -911,38 +938,40 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
                 "review", "revisar",
             ])
 
-            if is_submit or is_review:
-                await asyncio.sleep(3)
-                await notify_browser_step("step_"+str(step), "enviando", f"Clicou: {btn_text}")
-                try:
-                    url_apos = driver.current_url
-                except Exception:
-                    url_apos = ""
-                html = driver.page_source
-                if _detectar_sucesso(html, url_apos):
-                    logger.info("linkedin_selenium: candidatura enviada com sucesso")
-                    await notify_browser_step("step_"+str(step), "sucesso", "Candidatura enviada!")
-                    b64 = await screenshot_base64()
-                    await _finalizar_sucesso(driver, motivo="sucesso-step")
-                    return {
-                        "sucesso": True,
-                        "perguntas_respondidas": perguntas_customizadas,
-                        "mensagem": "Candidatura enviada com sucesso via LinkedIn Easy Apply!",
-                        "screenshot": b64[:100] if b64 else "",
-                    }
-                if is_review:
-                    await asyncio.sleep(1)
-                    continue
-            else:
-                await notify_browser_step("step_"+str(step), "navegando", f"Avançando: {btn_text}")
-                await asyncio.sleep(2)
-                # Keystone (estrutura-agnóstico): o clique em 'Avançar' pode ter sido
-                # recusado por campo obrigatório vazio/inválido. Detecta de DUAS formas
-                # independentes da estrutura exata do DOM:
-                #   1) mensagem de erro de validação visível;
-                #   2) a assinatura do step (progresso + nº de campos vazios) não mudou.
-                # Qualquer uma → o step travou; clicar de novo só repetiria até cair
-                # em 'Salvar candidatura?' → jobs-tracker. Dump do DOM + bail limpo.
+            # Espera o DOM reagir ao clique (submit/review precisam de mais tempo).
+            await asyncio.sleep(3 if (is_submit or is_review) else 2)
+            await notify_browser_step("step_"+str(step),
+                                      "enviando" if is_submit else "navegando", f"Botão: {btn_text[:40]}")
+
+            # Checagem de sucesso INCONDICIONAL: cobre o caso do botão 'Enviar
+            # candidatura' vir com texto vazio (não casa is_submit) — sem isto a
+            # candidatura enviada seria tratada como falha e descartada.
+            _res = await _finalizar_se_sucesso(step)
+            if _res:
+                return _res
+
+            if is_review:
+                await asyncio.sleep(1)
+                continue
+
+            if is_submit:
+                # Clicou enviar mas sucesso ainda não confirmado — dá mais tempo e re-checa.
+                await asyncio.sleep(2.5)
+                _res = await _finalizar_se_sucesso(step)
+                if _res:
+                    return _res
+                _registrar_run_log(f"FORM step {step}: submit clicado, sucesso NÃO confirmado — encerrando")
+                break
+
+            # Navegando (Avançar/Continuar):
+            # Keystone (estrutura-agnóstico): o clique em 'Avançar' pode ter sido
+            # recusado por campo obrigatório vazio/inválido. Detecta de DUAS formas
+            # independentes da estrutura exata do DOM:
+            #   1) mensagem de erro de validação visível;
+            #   2) a assinatura do step (progresso + nº de campos vazios) não mudou.
+            # Qualquer uma → o step travou; clicar de novo só repetiria até cair
+            # em 'Salvar candidatura?' → jobs-tracker. Dump do DOM + bail limpo.
+            if True:
                 erros = await _detectar_erros_validacao(driver)
                 sig_depois = await _obter_progresso(driver)
                 travado = bool(erros) or (sig_antes and sig_antes == sig_depois)
@@ -1966,7 +1995,17 @@ async def _clicar_botao_primario_modal(driver) -> tuple:
         for btn in primary_btns:
             try:
                 if btn.is_displayed() and btn.is_enabled():
-                    text = (btn.text or btn.get_attribute("aria-label") or "").strip()
+                    _txt = (btn.text or "").strip()
+                    _aria = (btn.get_attribute("aria-label") or "").strip()
+                    # Prefere o rótulo que tenha sinal de submit/review (p/ classificar
+                    # corretamente o passo de envio); senão usa o que tiver conteúdo.
+                    _kw = ("enviar", "submit", "revisar", "review")
+                    if _aria and any(k in _aria.lower() for k in _kw):
+                        text = _aria
+                    elif _txt and any(k in _txt.lower() for k in _kw):
+                        text = _txt
+                    else:
+                        text = _txt or _aria
                     driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
                     driver.execute_script("arguments[0].click();", btn)
                     return text or "primary_button"
