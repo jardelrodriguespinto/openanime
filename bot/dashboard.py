@@ -239,9 +239,9 @@ VUE_DASHBOARD = """
             <div style="font-size:0.75rem;color:#888;margin-top:6px;">Este texto será usado pela IA para responder perguntas dos formulários. Sempre respondido em inglês.</div>
         </div>
 
-        <div class="browser-panel" v-if="browser.screenshot || browserControl.paused || browserStep.step">
+        <div class="browser-panel">
             <h4>🖥️ Browser em Tempo Real | {{browserStep.step || 'Monitoramento'}}</h4>
-            <div class="browser-viewport">
+            <div class="browser-viewport" v-if="browser.screenshot">
                 <img :src="'data:image/png;base64,' + browser.screenshot" alt="Browser screenshot">
                 <div class="browser-url">{{browser.url}}</div>
                 <div class="browser-step">
@@ -250,6 +250,7 @@ VUE_DASHBOARD = """
                     <span v-if="browserStep.detail">| {{browserStep.detail}}</span>
                 </div>
             </div>
+            <div v-else style="color:#666;font-size:0.82rem;padding:8px 0;">Nenhuma captura disponível — inicie a automação para monitorar o browser em tempo real.</div>
 <div class="browser-controls">
                   <button @click="browserPausar" :class="{pausado: browserControl.paused}">⏸️ Pausar</button>
                   <button @click="browserContinuar">▶️ Continuar</button>
@@ -318,7 +319,7 @@ VUE_DASHBOARD = """
                 <option value="processando">Processando</option>
                 <option value="tentativa_falhou">Falhou</option>
             </select>
-            <button @click="carregar">Atualizar</button>
+            <button @click="carregar(); carregarVagas()">Atualizar</button>
         </div>
 
         <div class="candidaturas">
@@ -370,9 +371,7 @@ VUE_DASHBOARD = """
                     'finalizando': '📤 Finalizando...',
                 };
                 return map[a.action] || '🟢 Rodando';
-            }
-        },
-        computed: {
+            },
             candidaturasFiltradas() {
                 let f = this.candidaturas;
                 if (this.busca) f = f.filter(c => (c.titulo||'').toLowerCase().includes(this.busca.toLowerCase()));
@@ -460,16 +459,21 @@ VUE_DASHBOARD = """
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({query: this.busca || 'desenvolvedor', platform: this.plataformaSelecionada})
                 });
-                this.carregar();
-                this.carregarVagas();
+                await this.carregarAutomacao();
+                setTimeout(() => { this.carregar(); this.carregarVagas(); }, 5000);
+                setTimeout(() => { this.carregar(); this.carregarVagas(); }, 15000);
+                setTimeout(() => { this.carregar(); this.carregarVagas(); }, 30000);
             },
             async pararAutomacao() {
                 await fetch('/api/automacao/parar', {method: 'POST'});
-                alert('Automação parada!');
+                await this.carregarAutomacao();
             },
             async limparCache() {
                 await fetch('/api/cache/limpar', {method: 'POST'});
-                alert('Cache limpo!');
+                this.candidaturas = [];
+                this.vagas = [];
+                this.history = [];
+                this.stats = {total: 0, sucesso: 0, falha: 0, hoje: 0, processando: 0};
             },
             async carregarBrowser() {
                 try {
@@ -565,7 +569,14 @@ VUE_DASHBOARD = """
                     });
                     const d = await r.json();
                     if (d.success) {
-                        alert('Extração iniciada! Veja o status e atualize a lista de vagas.');
+                        await this.carregarAutomacao();
+                        const prevCount = this.vagas.length;
+                        let polls = 0;
+                        const check = setInterval(async () => {
+                            await this.carregarVagas();
+                            polls++;
+                            if (polls >= 10 || this.vagas.length !== prevCount) clearInterval(check);
+                        }, 3000);
                     } else {
                         alert('Erro: ' + (d.message || 'Falha ao extrair'));
                     }
@@ -1205,7 +1216,7 @@ async def get_browser_controle():
 
 @fastapi_app.get("/api/browser/step")
 async def get_browser_step():
-    return JSONResponse(_browser_current_step)
+    return JSONResponse({"success": True, **_browser_current_step})
 
 
 @fastapi_app.get("/api/perfil/resumo-curriculo")

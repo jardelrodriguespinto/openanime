@@ -458,23 +458,9 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "", user_id
         print("[LINKEDIN] Clicou em Easy Apply")
         await asyncio.sleep(3)
 
-        modal = await wait_for_selector_visible(
-            ".jobs-easy-apply-modal, .jobs-easy-apply-content, "
-            "div[data-test-modal], div[role='dialog']",
-            timeout=10
-        )
+        modal = await _aguardar_modal_easy_apply(driver)
         if not modal:
-            print("[LINKEDIN] Modal nao detectado por CSS, verificando por dialog/form...")
-            driver = await get_driver()
-            if driver:
-                modal = await _run_in_thread(
-                    lambda: driver.find_elements(By.CSS_SELECTOR,
-                        "div[role='dialog'], .artdeco-modal, form[data-test-form]"
-                    )
-                )
-                modal = modal[0] if modal else None
-        if not modal:
-            print("[LINKEDIN] Modal Easy Apply nao apareceu")
+            print("[LINKEDIN] Modal Easy Apply nao apareceu — abortando vaga")
             await notify_browser_step("selenium_linkedin", "erro", "Modal nao apareceu")
             b64 = await screenshot_base64()
             await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
@@ -654,37 +640,59 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
 
 
 async def _preencher_step_selenium(driver, perfil: dict, curriculo_path: str) -> None:
-    """Preenche campos conhecidos no step atual via Selenium."""
+    """Preenche campos conhecidos no step atual via Selenium.
+    Usa find_elements (sem timeout) para não bloquear em campos ausentes."""
     nome_completo = perfil.get("nome", "")
     partes = nome_completo.split()
     primeiro_nome = partes[0] if partes else nome_completo
     ultimo_nome = " ".join(partes[1:]) if len(partes) >= 2 else ""
 
-    campos_nomes = [
-        ("input[name='firstName'], #first-name, input[id*='firstName']", primeiro_nome),
-        ("input[name='lastName'], #last-name, input[id*='lastName']", ultimo_nome),
-        ("input[name='email'], #email, input[type='email'], input[placeholder*='Email']", perfil.get("email", _get_linkedin_email())),
-        ("input[name='phone'], #phone, input[type='tel'], input[placeholder*='Phone'], input[aria-label*='Phone Number']", str(perfil.get("telefone", perfil.get("phone", "")))),
-        ("input[aria-label*='City'], input[aria-label*='Cidade'], input[name*='city']", perfil.get("localizacao", "").split(",")[0].strip() if perfil.get("localizacao") else ""),
+    # Mapa: lista de seletores CSS → valor
+    campos = [
+        (["input[name='firstName']", "#first-name", "input[id*='firstName']"], primeiro_nome),
+        (["input[name='lastName']", "#last-name", "input[id*='lastName']"], ultimo_nome),
+        (["input[name='email']", "#email", "input[type='email'][name*='email']"], perfil.get("email", _get_linkedin_email())),
+        (["input[name='phone']", "#phone", "input[type='tel']", "input[aria-label*='Phone Number']"], str(perfil.get("telefone", perfil.get("phone", "")))),
+        (["input[aria-label*='City']", "input[aria-label*='Cidade']", "input[name*='city']"], perfil.get("localizacao", "").split(",")[0].strip() if perfil.get("localizacao") else ""),
     ]
-    for seletor, texto in campos_nomes:
-        if not texto:
-            continue
-        if await digitar_com_delay(seletor, str(texto), delay_min=20, delay_max=60):
-            try:
-                print(f"[LINKEDIN] Preencheu: {seletor[:50]} = {texto[:30]}")
-            except Exception:
-                pass
+
+    def _preencher_campos():
+        for seletores, texto in campos:
+            if not texto:
+                continue
+            for sel in seletores:
+                try:
+                    els = driver.find_elements(By.CSS_SELECTOR, sel)
+                    for el in els:
+                        if el.is_displayed() and el.is_enabled():
+                            current = el.get_attribute("value") or ""
+                            if current.strip():
+                                break  # já preenchido
+                            el.click()
+                            el.clear()
+                            el.send_keys(texto[:100])
+                            print(f"[LINKEDIN] Preencheu {sel[:40]} = {texto[:30]}")
+                            break
+                    else:
+                        continue
+                    break
+                except Exception:
+                    continue
+
+    await _run_in_thread(_preencher_campos)
 
     if curriculo_path:
         try:
-            file_input = driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
-            for fi in file_input:
-                if fi.is_displayed():
-                    fi.send_keys(curriculo_path)
-                    await asyncio.sleep(1.5)
-                    print(f"[LINKEDIN] Upload curriculo: {curriculo_path}")
-                    break
+            def _upload():
+                file_inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
+                for fi in file_inputs:
+                    if fi.is_displayed():
+                        fi.send_keys(curriculo_path)
+                        print(f"[LINKEDIN] Upload curriculo: {curriculo_path}")
+                        return True
+                return False
+            if await _run_in_thread(_upload):
+                await asyncio.sleep(1.5)
         except Exception:
             pass
 
@@ -890,88 +898,94 @@ async def _preencher_radio_selenium(driver, label_text: str, resposta: str) -> N
         logger.debug("linkedin_selenium: erro ao preencher radio: %s", e)
 
 
+async def _aguardar_modal_easy_apply(driver, timeout: int = 12):
+    """Aguarda o modal Easy Apply aparecer. Retorna elemento ou None."""
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+
+    seletores = [
+        (By.CSS_SELECTOR, "div[role='dialog']"),
+        (By.CSS_SELECTOR, ".artdeco-modal"),
+        (By.CSS_SELECTOR, ".jobs-easy-apply-modal"),
+        (By.CSS_SELECTOR, ".jobs-easy-apply-content"),
+    ]
+    for by, value in seletores:
+        try:
+            el = await _run_in_thread(
+                lambda b=by, v=value: WebDriverWait(driver, timeout).until(
+                    EC.visibility_of_element_located((b, v))
+                )
+            )
+            if el:
+                print(f"[LINKEDIN] Modal detectado: {value}")
+                return el
+        except Exception:
+            continue
+    return None
+
+
 async def _clicar_botao_primario_modal(driver) -> tuple:
     """Encontra e clica o botão primário (ação principal) do modal Easy Apply.
+    Usa Selenium find_elements diretamente — mais confiável que JS.
     Retorna (texto_botao, clicou_bool)."""
 
-    _JS_FIND_PRIMARY_BTN = """
-    return (() => {
-        function norm(s) { return (s || '').replace(/\\s+/g, ' ').trim().toLowerCase(); }
+    def _selenium_find_and_click():
+        # Localiza o container do modal
+        container = driver
+        for sel in ['div[role="dialog"]', '.artdeco-modal', '.jobs-easy-apply-modal']:
+            els = driver.find_elements(By.CSS_SELECTOR, sel)
+            if els:
+                container = els[-1]
+                break
 
-        // Procura dentro do modal/dialog
-        const modals = document.querySelectorAll(
-            'div[role="dialog"], .jobs-easy-apply-modal, .artdeco-modal, .jobs-easy-apply-content'
-        );
-        const container = modals.length > 0 ? modals[modals.length - 1] : document;
+        # 1. Botão primário do artdeco (azul) — é o "Avançar"/"Enviar" do LinkedIn
+        primary_btns = container.find_elements(By.CSS_SELECTOR, "button.artdeco-button--primary")
+        for btn in primary_btns:
+            try:
+                if btn.is_displayed() and btn.is_enabled():
+                    text = (btn.text or btn.get_attribute("aria-label") or "").strip()
+                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
+                    driver.execute_script("arguments[0].click();", btn)
+                    return text or "primary_button"
+            except Exception:
+                continue
 
-        // Procura footer do modal
-        const footers = container.querySelectorAll('footer, div[class*="footer"], div[class*="actions"]');
-        const footer = footers.length > 0 ? footers[footers.length - 1] : container;
+        # 2. Botão com data-easy-apply-next-button
+        next_btns = container.find_elements(By.CSS_SELECTOR, "button[data-easy-apply-next-button]")
+        for btn in next_btns:
+            try:
+                if btn.is_displayed() and btn.is_enabled():
+                    text = (btn.text or "").strip()
+                    driver.execute_script("arguments[0].click();", btn)
+                    return text or "Next"
+            except Exception:
+                continue
 
-        // Botão primário no footer (o botão azul de ação)
-        const primaryBtns = footer.querySelectorAll(
-            'button.artdeco-button--primary, button[data-easy-apply-next-button], ' +
-            'button[type="submit"]'
-        );
-        for (const btn of primaryBtns) {
-            const rect = btn.getBoundingClientRect();
-            if (rect.width > 0 && rect.height > 0 && !btn.disabled) {
-                const text = norm(btn.textContent || btn.innerText || '');
-                btn.scrollIntoView({block: 'center'});
-                btn.click();
-                return text;
-            }
-        }
+        # 3. XPath por texto dentro do modal — Avançar / Next / Continuar / Enviar / Submit / Revisar / Review
+        is_element = hasattr(container, "find_elements") and container is not driver
+        xpath_prefix = ".//" if is_element else "//"
+        for kw in ["Avançar", "Next", "Continuar", "Continue", "Enviar candidatura",
+                   "Submit application", "Submit", "Revisar", "Review"]:
+            try:
+                btns = container.find_elements(By.XPATH, f'{xpath_prefix}button[contains(., "{kw}")]')
+                for btn in btns:
+                    if btn.is_displayed() and btn.is_enabled():
+                        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
+                        driver.execute_script("arguments[0].click();", btn)
+                        return kw
+            except Exception:
+                continue
 
-        // Fallback: qualquer botão no modal com texto de ação
-        const actionTexts = [
-            'avan', 'next', 'continuar', 'continue', 'enviar', 'submit',
-            'revisar', 'review', 'candidatura', 'application', 'finalizar'
-        ];
-        const allBtns = container.querySelectorAll('button');
-        for (const btn of allBtns) {
-            const text = norm(btn.textContent || btn.innerText || '');
-            const rect = btn.getBoundingClientRect();
-            if (rect.width > 0 && rect.height > 0 && !btn.disabled) {
-                for (const at of actionTexts) {
-                    if (text.includes(at)) {
-                        btn.scrollIntoView({block: 'center'});
-                        btn.click();
-                        return text;
-                    }
-                }
-            }
-        }
-        return null;
-    })()
-    """
+        return None
+
     try:
-        resultado = await _run_in_thread(driver.execute_script, _JS_FIND_PRIMARY_BTN)
-        if resultado:
-            print(f"[LINKEDIN] Botão primário encontrado via JS: '{resultado}'")
-            return (resultado, True)
+        result = await _run_in_thread(_selenium_find_and_click)
+        if result:
+            print(f"[LINKEDIN] Clicou botão primário via Selenium: '{result}'")
+            return (result, True)
+        print("[LINKEDIN] Nenhum botão primário encontrado no modal")
     except Exception as e:
-        print(f"[LINKEDIN] JS botão primário falhou: {e}")
-
-    seletores_next = [
-        "button[data-easy-apply-next-button]",
-        "button[aria-label='Continue to next step']",
-        "button[aria-label='Continuar para a proxima etapa']",
-        "//button[contains(., 'Avançar')]",
-        "//button[contains(., 'Next')]",
-        "//button[contains(., 'Continuar')]",
-    ]
-    seletores_submit = [
-        "button[aria-label='Submit application']",
-        "button[aria-label='Enviar candidatura']",
-        "button[aria-label='Review your application']",
-        "//button[contains(., 'Enviar candidatura')]",
-        "//button[contains(., 'Submit')]",
-        "//button[contains(., 'Revisar')]",
-    ]
-    for sel_list, default_text in [(seletores_next, "Next"), (seletores_submit, "Submit")]:
-        if await click_qualquer_selenium(driver, sel_list, timeout=2):
-            return (default_text, True)
+        print(f"[LINKEDIN] _clicar_botao_primario_modal falhou: {e}")
 
     return ("", False)
 
@@ -1124,6 +1138,7 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
         await notify_browser_step("selenium_linkedin", "iniciando", f"Resumo curriculo: {'SIM' if (perfil.get('resumo_curriculo') or await _get_resumo_curriculo(user_id)) else 'NAO'}")
 
         resultados = {"sucesso": True, "aplicacoes": [], "falhas": 0}
+        vagas_tentadas_sessao: set = set()  # evita re-tentar mesma vaga na sessão
 
         for i in range(max_vagas):
             control = await get_intervention_state()
@@ -1133,12 +1148,14 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
 
             await notify_browser_step("selenium_linkedin", f"vaga_{i+1}", f"Procurando vaga {i+1}...")
 
-            vaga_url = await _extrair_primeira_vaga_da_busca()
+            vaga_url = await _extrair_proxima_vaga_da_busca(vagas_tentadas_sessao)
             if not vaga_url:
-                await notify_browser_step("selenium_linkedin", "finalizando", "Nenhuma vaga Easy Apply encontrada")
+                await notify_browser_step("selenium_linkedin", "finalizando", "Nenhuma vaga Easy Apply disponível")
                 break
 
             vaga_id = _extrair_vaga_id(vaga_url)
+            vagas_tentadas_sessao.add(vaga_id or vaga_url)
+
             if vaga_id:
                 try:
                     from graph.neo4j_client import get_neo4j
@@ -1147,7 +1164,6 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
                     if ja_aplicou:
                         print(f"[LINKEDIN] Ja candidatou para {vaga_id} — pulando")
                         await notify_browser_step("selenium_linkedin", f"vaga_{i+1}", "Ja aplicou — pulando")
-                        await asyncio.sleep(1)
                         continue
                 except Exception:
                     pass
@@ -1306,72 +1322,67 @@ async def _driver_session_valida() -> bool:
 
 async def _extrair_primeira_vaga_da_busca() -> str | None:
     """Extrai URL da primeira vaga com Easy Apply visível na página de busca."""
+    return await _extrair_proxima_vaga_da_busca(set())
+
+
+async def _extrair_proxima_vaga_da_busca(ja_tentadas: set) -> str | None:
+    """Extrai URL da próxima vaga não tentada na página de busca.
+    Pula URLs que já estão em ja_tentadas (controle de sessão)."""
     from selenium.webdriver.common.by import By
 
     driver = await get_driver()
     if not driver:
         return None
 
+    def _extrair_id_de_href(href: str) -> str:
+        if not href:
+            return ""
+        if "/jobs/view/" in href:
+            return href.split("/jobs/view/")[1].split("/")[0].split("?")[0]
+        return href
+
     try:
         def _procurar():
             current_url = driver.current_url.lower()
             is_easy_apply_page = "easy-apply" in current_url or "collections" in current_url
-            is_jobs_search = "jobs/search" in current_url
 
-            # Estratégia para página /jobs/collections/easy-apply/
+            candidatos = []
+
+            # Estratégia 1: cards da página de coleção easy-apply
             if is_easy_apply_page:
                 try:
                     cards = driver.find_elements(By.CSS_SELECTOR,
                         ".jobs-easy-apply__card, .job-card--easy-apply, .job-card, "
                         ".job-card-container, .jobs-search__result-card"
                     )
-                    for card in cards[:10]:
+                    for card in cards[:20]:
                         try:
                             link_elem = card.find_element(By.XPATH, ".//a[contains(@href, '/jobs/view/')]")
                             href = link_elem.get_attribute("href")
                             if href:
-                                return href
+                                candidatos.append(href)
                         except Exception:
                             continue
                 except Exception:
                     pass
 
-            # Estratégia 1: Procura por botão Easy Apply e obtém o link da vaga associada
-            try:
-                buttons = driver.find_elements(By.XPATH, "//*[contains(@class,'jobs-apply-button') and contains(@aria-label,'Easy Apply')]")
-                for btn in buttons[:5]:
-                    try:
-                        link_elem = btn.find_element(By.XPATH, "./ancestor::a[contains(@href,'/jobs/view/')]")
-                        href = link_elem.get_attribute("href")
+            # Estratégia 2: todos os links de vagas na página
+            if not candidatos:
+                try:
+                    links = driver.find_elements(By.XPATH, "//a[@href and contains(@href, '/jobs/view/')]")
+                    for lnk in links[:30]:
+                        href = lnk.get_attribute("href")
                         if href:
-                            return href
-                    except Exception:
-                        continue
-            except Exception:
-                pass
+                            candidatos.append(href)
+                except Exception:
+                    pass
 
-            # Estratégia 2: Cards de vaga com botão apply visível
-            try:
-                job_cards = driver.find_elements(By.CSS_SELECTOR, ".job-card-container, .jobs-search__result-card, .base-card, .job-card")
-                for card in job_cards[:15]:
-                    try:
-                        apply_btn = card.find_element(By.CSS_SELECTOR, "button.jobs-apply-button, button[data-control-name='apply_show_modal'], .jobs-apply-button, [data-control-name='apply_show_modal']")
-                        link_elem = card.find_element(By.XPATH, ".//a[contains(@href, '/jobs/view/')]")
-                        href = link_elem.get_attribute("href")
-                        if href:
-                            return href
-                    except Exception:
-                        continue
-            except Exception:
-                pass
-
-            # Estratégia 3: Primeiro link de vaga visível (fallback)
-            try:
-                links = driver.find_elements(By.XPATH, "//a[@href and contains(@href, '/jobs/view/')]")
-                if links:
-                    return links[0].get_attribute("href")
-            except Exception:
-                pass
+            # Retorna o primeiro que ainda não foi tentado
+            for href in candidatos:
+                vaga_id = _extrair_id_de_href(href)
+                chave = vaga_id or href
+                if chave not in ja_tentadas:
+                    return href
 
             return None
 
