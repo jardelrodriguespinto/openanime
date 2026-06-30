@@ -221,11 +221,12 @@ async def notify_browser_step(step: str = "", action: str = "", detail: str = ""
 
 
 async def wait_if_paused(page=None, step_name: str = ""):
-    """Aguarda se o usuario pausou a automacao. Retorna True se deve continuar."""
+    """Aguarda se o usuario pausou a automacao.
+    Nao consome o sinal 'pular' — sai do loop para que o chamador decida pular."""
     while True:
         control = await get_intervention_state()
+        # Sai sem consumir: o loop do step verifica e faz continue
         if control.get("current_action") == "pular":
-            await set_intervention_state("current_action", "rodando")
             return True
 
         if not control.get("paused") and control.get("intervention_type") != "manual":
@@ -295,31 +296,21 @@ async def get_current_step() -> dict:
 
 
 async def set_intervention_state(key: str, value):
-    """Atualiza estado de intervencao (pausa, acao manual) — tenta Redis, fallback memoria."""
+    """Atualiza estado de intervencao em memoria e persiste no Redis como cache."""
     async with _intervention_lock:
         _intervention_state[key] = value
+        full = dict(_intervention_state)  # captura o estado atualizado com o lock
     try:
         r = _get_redis()
         if r:
-            full = await get_intervention_state()
+            # Salva direto sem reler Redis (evita sobrescrever a mudança recem feita)
             r.setex(_REDIS_INTERVENTION_KEY, 3600, json.dumps(full, default=str))
     except Exception:
         pass
 
 
 async def get_intervention_state() -> dict:
-    """Retorna copia do estado de intervencao — prioriza Redis, fallback memoria."""
-    try:
-        r = _get_redis()
-        if r:
-            raw = r.get(_REDIS_INTERVENTION_KEY)
-            if raw:
-                parsed = json.loads(raw)
-                async with _intervention_lock:
-                    _intervention_state.update(parsed)
-                return dict(_intervention_state)
-    except Exception:
-        pass
+    """Retorna copia do estado de intervencao (fonte de verdade: memoria)."""
     async with _intervention_lock:
         return dict(_intervention_state)
 

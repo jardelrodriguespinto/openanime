@@ -512,7 +512,14 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
             pass
 
         for step in range(max_steps):
-            # Verifica se usuario pediu pular ANTES de pausar (skip tem prioridade)
+            # 1. Aguarda se pausado (sai tambem se 'pular' foi solicitado)
+            control = await get_intervention_state()
+            if control.get("paused") or control.get("intervention_type") == "manual":
+                logger.info("linkedin_selenium: aguardando retomada no step %d", step)
+                await notify_browser_step("step_"+str(step), "pausado", "Aguardando retomada pelo usuário...")
+                await wait_if_paused(None, "step_"+str(step))
+
+            # 2. Verifica pular (apos pausa E ao iniciar step — consome o sinal aqui)
             control = await get_intervention_state()
             if control.get("current_action") == "pular":
                 logger.info("linkedin_selenium: usuario pediu para pular step %d", step)
@@ -520,23 +527,23 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
                 await notify_browser_step("step_"+str(step), "pulado", "Usuário pediu pular")
                 continue
 
-            # Aguarda se pausado ou em intervencao manual (NAO sai — espera retomada)
-            if control.get("paused") or control.get("intervention_type") == "manual":
-                logger.info("linkedin_selenium: aguardando retomada no step %d", step)
-                await notify_browser_step("step_"+str(step), "pausado", "Aguardando retomada pelo usuário...")
-                await wait_if_paused(None, "step_"+str(step))
-
             await asyncio.sleep(random.uniform(0.8, 1.5))
             await notify_browser_step("step_"+str(step), "preenchendo", "Preenchendo campos do formulário")
 
             await _preencher_step_selenium(driver, perfil, curriculo_path)
 
             perguntas_step = await _detectar_perguntas_nao_respondidas_selenium(driver)
+            pular_agora = False
             if perguntas_step:
                 await notify_browser_step("step_"+str(step), "respondendo", f"{len(perguntas_step)} pergunta(s) customizada(s)")
                 for pergunta in perguntas_step:
                     if pergunta not in respostas_geradas:
                         await wait_if_paused(None, "step_"+str(step))
+                        # Pular pressionado durante resposta: sai sem clicar botao
+                        ctrl = await get_intervention_state()
+                        if ctrl.get("current_action") == "pular":
+                            pular_agora = True
+                            break
                         resposta = responder_pergunta(
                             pergunta, perfil,
                             vaga_titulo=vaga_titulo,
@@ -548,6 +555,11 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
                         await _preencher_resposta_customizada_selenium(driver, pergunta, resposta)
                         perguntas_customizadas.append(pergunta)
                         await asyncio.sleep(random.uniform(0.5, 1.0))
+
+            if pular_agora:
+                await set_intervention_state("current_action", "rodando")
+                await notify_browser_step("step_"+str(step), "pulado", "Usuário pediu pular")
+                continue
 
             btn_text, btn_clicked = await _clicar_botao_primario_modal(driver)
 
