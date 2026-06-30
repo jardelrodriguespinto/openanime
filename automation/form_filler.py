@@ -87,6 +87,19 @@ def _responder_pergunta_raw(
     opcoes_disponiveis = ""
     pergunta_real = pergunta
 
+    # CHECKBOX: responde "sim" para consentimentos/termos, ou pergunta ao LLM
+    if pergunta.startswith("CHECKBOX:"):
+        pergunta_real = pergunta[9:].strip()
+        consent_kw = ("agree", "consent", "aceito", "concordo", "confirmo", "autorizo",
+                      "terms", "termos", "privacy", "privacidade", "policy", "política",
+                      "acknowledge", "declaro", "confirm")
+        if any(kw in pergunta_real.lower() for kw in consent_kw):
+            return "sim"
+        return _responder_pergunta_raw(
+            f"[RESPONDA APENAS: sim OU não] Você marcaria este checkbox? {pergunta_real}",
+            perfil, vaga_titulo, vaga_empresa, resumo_curriculo, idioma
+        )
+
     if pergunta.startswith("SELECT:") or pergunta.startswith("RADIO:"):
         parts = pergunta.split(":", 2)
         pergunta_real = parts[1] if len(parts) > 1 else pergunta

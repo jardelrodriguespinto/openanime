@@ -1098,14 +1098,91 @@ async def _detectar_perguntas_nao_respondidas_selenium(driver) -> list:
                             _add(f"RADIO:{legend_text}:{','.join(options_text[:10])}")
             except Exception:
                 continue
+
+        # Checkboxes standalone (fora de fieldset — termos, consents, perguntas booleanas)
+        checkboxes = driver.find_elements(By.CSS_SELECTOR, "input[type='checkbox']")
+        for chk in checkboxes:
+            try:
+                if chk.is_selected():
+                    continue  # já marcado
+                chk_id = chk.get_attribute("id") or ""
+                label = ""
+                if chk_id:
+                    lbs = driver.find_elements(By.CSS_SELECTOR, f"label[for='{chk_id}']")
+                    if lbs:
+                        label = (lbs[0].text or "").strip()
+                if not label:
+                    try:
+                        parent = chk.find_element(By.XPATH, "./ancestor::div[1]")
+                        label = (parent.text or "").strip().split("\n")[0]
+                    except Exception:
+                        pass
+                if not label or any(p in label.lower() for p in _CAMPOS_PADRAO):
+                    continue
+                # Não detectar checkboxes de upload de CV (tratados por _selecionar_cv_ingles)
+                if any(kw in label.lower() for kw in ("resume", "currículo", ".pdf", ".doc", "upload")):
+                    continue
+                _add(f"CHECKBOX:{label}")
+            except Exception:
+                continue
     except Exception:
         pass
     return perguntas[:12]
 
 
+async def _preencher_checkbox_selenium(driver, label_text: str, resposta: str) -> None:
+    """Marca checkbox pelo texto da label. Usa JS click (LinkedIn oculta com CSS)."""
+    def _check():
+        checkboxes = driver.find_elements(By.CSS_SELECTOR, "input[type='checkbox']")
+        for chk in checkboxes:
+            try:
+                if chk.is_selected():
+                    continue
+                chk_id = chk.get_attribute("id") or ""
+                found_label = ""
+                if chk_id:
+                    lbs = driver.find_elements(By.CSS_SELECTOR, f"label[for='{chk_id}']")
+                    if lbs:
+                        found_label = (lbs[0].text or "").strip()
+                if not found_label:
+                    try:
+                        found_label = chk.find_element(
+                            By.XPATH, "./ancestor::div[1]"
+                        ).text.strip().split("\n")[0]
+                    except Exception:
+                        pass
+                if not found_label:
+                    continue
+                if label_text.lower()[:30] in found_label.lower() or found_label.lower()[:30] in label_text.lower():
+                    # Clica via label element (se existir) ou via JS direto no input
+                    if chk_id:
+                        lbs = driver.find_elements(By.CSS_SELECTOR, f"label[for='{chk_id}']")
+                        if lbs:
+                            driver.execute_script("arguments[0].click();", lbs[0])
+                            return True
+                    driver.execute_script("arguments[0].click();", chk)
+                    return True
+            except Exception:
+                continue
+        return False
+
+    try:
+        deveria_marcar = resposta.strip().lower() not in ("não", "nao", "no", "n", "false", "0")
+        if not deveria_marcar:
+            print(f"[LINKEDIN] Checkbox '{label_text[:40]}' → IA respondeu não marcar")
+            return
+        result = await _run_in_thread(_check)
+        if result:
+            print(f"[LINKEDIN] Marcou checkbox: {label_text[:40]}")
+        else:
+            print(f"[LINKEDIN] Checkbox não encontrado: {label_text[:40]}")
+    except Exception as e:
+        logger.debug("_preencher_checkbox_selenium erro: %s", e)
+
+
 async def _preencher_resposta_customizada_selenium(driver, pergunta: str, resposta: str) -> None:
     """Preenche campo de pergunta customizada pela label via Selenium.
-    Suporta text, number, textarea, select, radio, NUMERO (int), DECIMAL (float) e COMBO."""
+    Suporta text, number, textarea, select, radio, checkbox, NUMERO, DECIMAL e COMBO."""
     try:
         if pergunta.startswith("SELECT:"):
             parts = pergunta.split(":", 2)
@@ -1117,6 +1194,11 @@ async def _preencher_resposta_customizada_selenium(driver, pergunta: str, respos
             parts = pergunta.split(":", 2)
             label_text = parts[1] if len(parts) > 1 else ""
             await _preencher_radio_selenium(driver, label_text, resposta)
+            return
+
+        if pergunta.startswith("CHECKBOX:"):
+            label_text = pergunta[9:].strip()
+            await _preencher_checkbox_selenium(driver, label_text, resposta)
             return
 
         if pergunta.startswith("COMBO:"):
@@ -1213,12 +1295,20 @@ async def _preencher_combobox_linkedin(driver, label_text: str, resposta: str) -
                 return cb
         return None
 
+    def _js_click(el):
+        driver.execute_script("arguments[0].scrollIntoView({block:'nearest'}); arguments[0].click();", el)
+
     def _click_option(resposta_lower: str):
-        # Opções visíveis após abrir o combobox
-        for sel in [
-            "[role='option']", "[role='listbox'] li", ".artdeco-dropdown__item",
-            ".basic-typeahead__selectable", "li[data-test-text-selectable-option]",
-        ]:
+        # Opções podem estar fora do modal (portal no body) — busca global
+        all_selectors = [
+            "[role='option']",
+            "[role='listbox'] li",
+            ".artdeco-dropdown__item",
+            ".basic-typeahead__selectable",
+            "li[data-test-text-selectable-option]",
+            ".jobs-easy-apply-form-element__listbox li",
+        ]
+        for sel in all_selectors:
             opts = driver.find_elements(By.CSS_SELECTOR, sel)
             visible = [o for o in opts if o.is_displayed() and (o.text or "").strip()]
             if not visible:
@@ -1226,41 +1316,46 @@ async def _preencher_combobox_linkedin(driver, label_text: str, resposta: str) -
             # Correspondência exata
             for opt in visible:
                 if opt.text.strip().lower() == resposta_lower:
-                    opt.click()
+                    _js_click(opt)
                     return True
             # Correspondência parcial
             for opt in visible:
                 t = opt.text.strip().lower()
                 if resposta_lower in t or t in resposta_lower:
-                    opt.click()
+                    _js_click(opt)
                     return True
-            # "Sim"/"Não" heurística: se a resposta sugere positivo, pega a 1ª opção
+            # "Sim"/"Não" heurística
             if resposta_lower in ("sim", "yes", "s", "y") and visible:
-                visible[0].click()
+                _js_click(visible[0])
                 return True
             if resposta_lower in ("não", "nao", "no", "n") and len(visible) >= 2:
-                visible[1].click()
+                _js_click(visible[1])
                 return True
-            # Fallback: primeira opção disponível
-            visible[0].click()
+            # Fallback: primeira opção
+            _js_click(visible[0])
             return True
         return False
 
     try:
         trigger = await _run_in_thread(_find_trigger)
         if not trigger:
-            # Tenta via <select> como fallback
             await _preencher_select_selenium(driver, label_text, resposta)
             return False
 
-        await _run_in_thread(trigger.click)
-        await asyncio.sleep(0.8)
+        # Abre o dropdown via JS click
+        await _run_in_thread(lambda: _js_click(trigger))
+        await asyncio.sleep(1.2)  # aguarda renderização das opções
 
         resultado = await _run_in_thread(lambda: _click_option(resposta.strip().lower()))
+        if not resultado:
+            # Segunda tentativa: aguarda mais e tenta de novo
+            await asyncio.sleep(1.0)
+            resultado = await _run_in_thread(lambda: _click_option(resposta.strip().lower()))
+
         if resultado:
             print(f"[LINKEDIN] Preencheu combobox: {label_text[:40]} = {resposta[:30]}")
         else:
-            print(f"[LINKEDIN] Combobox: nenhuma opção encontrada para '{label_text[:30]}'")
+            print(f"[LINKEDIN] Combobox: nenhuma opção para '{label_text[:30]}'")
         return resultado
     except Exception as e:
         logger.debug("_preencher_combobox_linkedin erro: %s", e)
@@ -1648,6 +1743,58 @@ async def _clicar_proximo_card_vaga(driver, ja_tentadas: set) -> tuple:
         return "", ""
 
 
+async def _scroll_lista_vagas(driver) -> None:
+    """Rola o painel esquerdo da lista de vagas para carregar mais cards."""
+    def _scroll():
+        for sel in [
+            ".jobs-search-results-list",
+            ".scaffold-layout__list",
+            "[class*='jobs-search-results']",
+            ".jobs-job-board-list",
+        ]:
+            els = driver.find_elements(By.CSS_SELECTOR, sel)
+            if els and els[0].is_displayed():
+                driver.execute_script(
+                    "arguments[0].scrollTop = arguments[0].scrollTop + arguments[0].clientHeight * 0.8;",
+                    els[0]
+                )
+                return
+        driver.execute_script("window.scrollBy(0, window.innerHeight * 0.8);")
+    try:
+        await asyncio.wait_for(_run_in_thread(_scroll), timeout=8)
+    except Exception as e:
+        logger.debug("_scroll_lista_vagas erro: %s", e)
+
+
+async def _ir_proxima_pagina_vagas(driver) -> bool:
+    """Clica no botão 'Próximo' da paginação LinkedIn. Retorna True se navegou."""
+    def _click_next():
+        for sel in [
+            "button[aria-label='Next']",
+            "button[aria-label='Próximo']",
+            "button[aria-label='Próxima']",
+            ".artdeco-pagination__button--next",
+            "li[data-test-pagination-page-btn].selected + li button",
+        ]:
+            btns = driver.find_elements(By.CSS_SELECTOR, sel)
+            for btn in btns:
+                try:
+                    if btn.is_displayed() and btn.is_enabled():
+                        driver.execute_script("arguments[0].click();", btn)
+                        return True
+                except Exception:
+                    continue
+        return False
+    try:
+        result = await asyncio.wait_for(_run_in_thread(_click_next), timeout=8)
+        if result:
+            await asyncio.sleep(2.5)
+        return bool(result)
+    except Exception as e:
+        logger.debug("_ir_proxima_pagina_vagas erro: %s", e)
+        return False
+
+
 async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, user_id: str = "admin") -> dict:
     """
     Aplica em vagas visíveis na página atual do LinkedIn.
@@ -1704,99 +1851,153 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
         curriculo_path = perfil.get("curriculo_path", "") or ""
 
         resultados = {"sucesso": True, "aplicacoes": [], "falhas": 0}
-        vagas_tentadas_sessao: set = set()  # vaga_ids já processados nesta sessão
+        vagas_tentadas_sessao: set = set()
+        vagas_aplicadas = 0        # candidaturas submetidas (ou tentadas)
+        sem_cards_count = 0        # cards vazios consecutivos → scroll / próxima página
+        _MAX_SEM_CARDS = 4         # após N vezes sem card: tenta próxima página e desiste
+        _MAX_ITER = max_vagas * 8  # teto absoluto de iterações (evita loop infinito)
+        _iter = 0
 
-        for i in range(max_vagas):
-            await wait_if_paused(None, f"vaga_{i+1}")
-            await notify_browser_step("selenium_linkedin", f"vaga_{i+1}", f"Procurando vaga {i+1}...")
+        while vagas_aplicadas < max_vagas and sem_cards_count < _MAX_SEM_CARDS and _iter < _MAX_ITER:
+            _iter += 1
+            await wait_if_paused(None, f"vaga_{vagas_aplicadas+1}")
+            await notify_browser_step(
+                "selenium_linkedin", "buscando",
+                f"Procurando vaga {vagas_aplicadas+1}/{max_vagas}..."
+            )
 
-            # 1. Clica no próximo card da lista (sem navegar — painel direito atualiza)
             driver = await get_driver()
             if not driver:
                 break
-            vaga_id, vaga_url = await _clicar_proximo_card_vaga(driver, vagas_tentadas_sessao)
+
+            # 1. Clica no próximo card (timeout 12s — evita freeze)
+            try:
+                vaga_id, vaga_url = await asyncio.wait_for(
+                    _clicar_proximo_card_vaga(driver, vagas_tentadas_sessao),
+                    timeout=12
+                )
+            except asyncio.TimeoutError:
+                logger.warning("linkedin_selenium: timeout ao buscar próximo card")
+                vaga_id, vaga_url = "", ""
+            except Exception as _ce:
+                logger.warning("linkedin_selenium: erro ao buscar card: %s", _ce)
+                vaga_id, vaga_url = "", ""
+
+            # Se não achou card: rola a lista para carregar mais ou vai para próxima página
             if not vaga_id and not vaga_url:
-                await notify_browser_step("selenium_linkedin", "finalizando", "Nenhuma vaga disponível na lista")
-                break
+                sem_cards_count += 1
+                await notify_browser_step(
+                    "selenium_linkedin", "scroll",
+                    f"Sem cards visíveis ({sem_cards_count}/{_MAX_SEM_CARDS}) — carregando mais..."
+                )
+                await _scroll_lista_vagas(driver)
+                await asyncio.sleep(2.5)
+                if sem_cards_count >= _MAX_SEM_CARDS - 1:
+                    # Tenta clicar em "Próximo" na paginação
+                    foi_proxima = await _ir_proxima_pagina_vagas(driver)
+                    if foi_proxima:
+                        sem_cards_count = 0
+                        await asyncio.sleep(3)
+                        print("[LINKEDIN] Avançou para a próxima página de vagas")
+                        await notify_browser_step("selenium_linkedin", "pagina", "Próxima página de vagas")
+                    else:
+                        print("[LINKEDIN] Sem mais vagas para processar")
+                continue  # tenta de novo sem contar como vaga processada
 
+            sem_cards_count = 0
             vagas_tentadas_sessao.add(vaga_id or vaga_url)
-            await notify_browser_step("selenium_linkedin", f"vaga_{i+1}", f"Card clicado: {vaga_id or vaga_url[:40]}")
-            await asyncio.sleep(2)  # aguarda painel direito carregar
+            await notify_browser_step("selenium_linkedin", "card", f"Card: {vaga_id}")
+            await asyncio.sleep(1.5)  # aguarda painel direito carregar
 
-            # 2. Verifica já candidatado via Neo4j (sem abrir modal)
+            # 2. Verifica já candidatado via Neo4j
             if vaga_id:
                 try:
                     from graph.neo4j_client import get_neo4j
-                    _neo4j_check = get_neo4j()
-                    if _neo4j_check.ja_se_candidatou(user_id, vaga_id):
-                        print(f"[LINKEDIN] Vaga {vaga_id} já candidatada (Neo4j) — pulando")
-                        await notify_browser_step("selenium_linkedin", f"vaga_{i+1}", "Já candidatou (Neo4j) — pulando")
+                    if get_neo4j().ja_se_candidatou(user_id, vaga_id):
+                        print(f"[LINKEDIN] {vaga_id} já candidatada (Neo4j) — pulando")
+                        await notify_browser_step("selenium_linkedin", "pulando", f"{vaga_id} — já candidatou (Neo4j)")
                         continue
                 except Exception:
                     pass
 
-            # 3. Verifica badge "Candidatou-se" visível no painel direito
-            if await _verificar_ja_aplicado_na_pagina(driver):
-                print(f"[LINKEDIN] Vaga {vaga_id} mostra badge 'Aplicado' — pulando")
-                await notify_browser_step("selenium_linkedin", f"vaga_{i+1}", "Badge 'Candidatou-se' visível — pulando")
-                # Registra para não tentar de novo
+            # 3. Badge "Candidatou-se" no painel direito
+            try:
+                ja_na_pag = await asyncio.wait_for(_verificar_ja_aplicado_na_pagina(driver), timeout=5)
+            except asyncio.TimeoutError:
+                ja_na_pag = False
+            if ja_na_pag:
+                print(f"[LINKEDIN] {vaga_id} — badge 'Aplicado' visível — pulando")
+                await notify_browser_step("selenium_linkedin", "pulando", f"{vaga_id} — badge Aplicado")
                 if vaga_id:
                     try:
                         from graph.neo4j_client import get_neo4j
-                        get_neo4j().registrar_candidatura(user_id=user_id, vaga_id=vaga_id,
-                                                          plataforma="linkedin", status="ja_aplicado")
+                        get_neo4j().registrar_candidatura(
+                            user_id=user_id, vaga_id=vaga_id,
+                            plataforma="linkedin", status="ja_aplicado"
+                        )
                     except Exception:
                         pass
                 continue
 
-            # 4. Extrai descrição do painel direito e avalia match (sem navegar)
+            # 4. Match com currículo (timeout 30s para LLM)
             idioma_vaga = "pt"
             if resumo_curriculo:
-                descricao_vaga = await _extrair_descricao_vaga(driver)
+                try:
+                    descricao_vaga = await asyncio.wait_for(
+                        _extrair_descricao_vaga(driver), timeout=8
+                    )
+                except asyncio.TimeoutError:
+                    descricao_vaga = ""
                 if descricao_vaga:
-                    await notify_browser_step("selenium_linkedin", f"vaga_{i+1}", "Avaliando match com currículo...")
-                    avaliacao = await _avaliar_match_vaga(descricao_vaga, resumo_curriculo)
+                    await notify_browser_step("selenium_linkedin", "avaliando", f"Verificando match: {vaga_id}")
+                    try:
+                        avaliacao = await asyncio.wait_for(
+                            _avaliar_match_vaga(descricao_vaga, resumo_curriculo), timeout=30
+                        )
+                    except asyncio.TimeoutError:
+                        avaliacao = {"aplicar": True, "idioma": "pt", "motivo": "timeout LLM"}
                     idioma_vaga = avaliacao.get("idioma", "pt")
                     logger.info("linkedin_selenium: vaga=%s match=%s idioma=%s motivo=%s",
                                 vaga_id, avaliacao.get("aplicar"), idioma_vaga, avaliacao.get("motivo"))
                     if not avaliacao.get("aplicar", True):
                         motivo = avaliacao.get("motivo", "sem match")
                         print(f"[LINKEDIN] Sem match — pulando {vaga_id}: {motivo}")
-                        await notify_browser_step("selenium_linkedin", f"vaga_{i+1}", f"Sem match: {motivo}")
+                        await notify_browser_step("selenium_linkedin", "pulando", f"Sem match: {motivo}")
                         continue
 
-            # 5. Clica em Easy Apply (botão já visível no painel direito)
-            await notify_browser_step("selenium_linkedin", f"vaga_{i+1}", "Abrindo candidatura simplificada...")
+            # 5. Clica em Easy Apply (já visível no painel direito)
+            await notify_browser_step("selenium_linkedin", "candidatando", f"Abrindo Easy Apply: {vaga_id}")
             clicou = await _clicar_easy_apply_js(driver)
             if not clicou:
-                await asyncio.sleep(3)
+                await asyncio.sleep(2)
                 clicou = await _clicar_easy_apply_js(driver)
             if not clicou:
-                print(f"[LINKEDIN] Easy Apply não encontrado para {vaga_id} — pulando")
-                await notify_browser_step("selenium_linkedin", f"vaga_{i+1}", "Easy Apply não encontrado — pulando")
+                print(f"[LINKEDIN] Easy Apply não encontrado para {vaga_id}")
+                await notify_browser_step("selenium_linkedin", "pulando", f"{vaga_id} — Easy Apply não encontrado")
                 continue
 
             await asyncio.sleep(2)
             modal = await _aguardar_modal_easy_apply(driver)
             if not modal:
                 print(f"[LINKEDIN] Modal não apareceu para {vaga_id}")
-                await notify_browser_step("selenium_linkedin", f"vaga_{i+1}", "Modal não apareceu — pulando")
+                await notify_browser_step("selenium_linkedin", "pulando", f"{vaga_id} — modal não apareceu")
                 try:
                     await _fechar_modal_descarte(driver)
                 except Exception:
                     pass
                 continue
 
-            # 6. Preenche formulário multi-step
-            await notify_browser_step("selenium_linkedin", f"vaga_{i+1}", "Preenchendo formulário...")
+            # 6. Preenche formulário
+            await notify_browser_step("selenium_linkedin", "formulario", f"Preenchendo: {vaga_id}")
             resultado = await _processar_formulario_multistep_selenium(
                 driver, perfil, curriculo_path, vaga_url, resumo_curriculo, idioma=idioma_vaga
             )
             resultados["aplicacoes"].append(resultado)
             if not resultado.get("sucesso"):
                 resultados["falhas"] += 1
+            vagas_aplicadas += 1
 
-            # 7. Registra no Neo4j (evita re-aplicação em sessões futuras)
+            # 7. Registra no Neo4j
             if vaga_id:
                 try:
                     from graph.neo4j_client import get_neo4j
@@ -1805,15 +2006,15 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
                         user_id=user_id, vaga_id=vaga_id,
                         plataforma="linkedin", status=_status,
                     )
-                except Exception as _e:
-                    logger.warning("linkedin_selenium: erro ao registrar candidatura: %s", _e)
+                except Exception as _re:
+                    logger.warning("linkedin_selenium: erro ao registrar candidatura: %s", _re)
 
-            # 8. Após o formulário, o painel direito ainda mostra a vaga — aguarda e prossegue
+            # 8. Após formulário: se browser saiu de jobs, volta
             await asyncio.sleep(2)
-
-            # Se o browser saiu da página de jobs por algum motivo, volta
             try:
-                cur = await _run_in_thread(lambda: driver.current_url)
+                cur = await asyncio.wait_for(
+                    _run_in_thread(lambda: driver.current_url), timeout=5
+                )
                 if "jobs" not in cur.lower():
                     await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
                     await asyncio.sleep(3)
@@ -1941,16 +2142,31 @@ async def _verificar_ja_aplicado_na_pagina(driver) -> bool:
 
 
 async def _fechar_modal_descarte(driver) -> bool:
-    """Detecta e fecha modal 'Descartar candidatura' clicando em Continuar editando.
-    Retorna True se um modal de descarte foi encontrado e dispensado."""
+    """Detecta e fecha modal 'Descartar candidatura' ou 'Salvar candidatura'.
+    Tenta clicar em 'Continuar'; se não existir, manda Escape para voltar ao form."""
     keep_labels = [
         "continue applying", "continuar candidatura", "continuar editando",
         "keep editing", "manter candidatura", "go back", "voltar",
         "não, continuar", "no, continue",
     ]
-    discard_markers = ["discard", "descartar", "abandon"]
+    discard_markers = ["descartar", "abandon", "discard"]
+    # Cabeçalho do modal "Salvar candidatura?" — não tem botão Continuar, só Escape resolve
+    save_markers = [
+        "salvar esta candidatura", "save this application",
+        "save application", "salve para voltar",
+    ]
 
     def _dismiss():
+        from selenium.webdriver.common.keys import Keys
+        from selenium.webdriver.common.action_chains import ActionChains
+
+        def _escape():
+            try:
+                ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+                return True
+            except Exception:
+                return False
+
         try:
             dialogs = driver.find_elements(
                 By.CSS_SELECTOR,
@@ -1961,9 +2177,15 @@ async def _fechar_modal_descarte(driver) -> bool:
                     text = (dialog.text or "").lower()
                 except Exception:
                     continue
+
+                # Modal "Salvar esta candidatura?" — manda Escape para voltar ao form
+                if any(m in text for m in save_markers):
+                    return _escape()
+
                 if not any(k in text for k in discard_markers):
                     continue
-                # Found a discard dialog — look for the "keep" button
+
+                # Modal de descarte — tenta botão "Continuar"
                 btns = dialog.find_elements(By.TAG_NAME, "button")
                 for btn in btns:
                     try:
@@ -1974,6 +2196,9 @@ async def _fechar_modal_descarte(driver) -> bool:
                                 return True
                     except Exception:
                         continue
+
+                # Nenhum botão "Continuar" encontrado → Escape como fallback
+                return _escape()
         except Exception:
             pass
         return False
@@ -1981,7 +2206,7 @@ async def _fechar_modal_descarte(driver) -> bool:
     try:
         result = await _run_in_thread(_dismiss)
         if result:
-            await asyncio.sleep(0.8)
+            await asyncio.sleep(0.9)
         return result
     except Exception:
         return False
