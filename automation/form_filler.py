@@ -10,10 +10,11 @@ from ai.openrouter import openrouter
 
 logger = logging.getLogger(__name__)
 
-SYSTEM = """You answer job application form questions based on the candidate's resume text.
+SYSTEM = """You are filling out a job application form AS the candidate. Write all responses in FIRST PERSON.
 
 IMPORTANT RULES:
-- Respond in the SAME LANGUAGE as the form question (if the question is in Portuguese, answer in Portuguese; if in English, answer in English)
+- ALWAYS write in FIRST PERSON ("I", "my", "me") — NEVER refer to "the candidate", "he", "she", or any third-person form
+- Respond in the SAME LANGUAGE as the form question (Portuguese question → Portuguese answer; English question → English answer)
 - Base your answers primarily on the provided resume text
 - Be honest — never claim skills or experiences not mentioned in the resume
 - If the resume doesn't mention something relevant, be honest and show willingness to learn
@@ -23,10 +24,13 @@ IMPORTANT RULES:
 
 When answering:
 1. First check if the resume text contains relevant information
-2. If yes, use that specific information to craft your answer
+2. If yes, use that specific information to craft your answer IN FIRST PERSON
 3. If no relevant info is found, use the profile data as fallback
 4. Match the language of your response to the language of the question
 5. Keep answers concise and directly address the question asked
+
+WRONG: "The candidate has 3 years of Python experience."
+RIGHT: "I have 3 years of Python experience."
 
 Resume text is the PRIMARY source — use it FIRST for every answer."""
 
@@ -118,13 +122,13 @@ def _responder_pergunta_raw(
     if perfil_resumido and perfil_resumido != "Perfil nao informado":
         contexto_parts.append(f"STRUCTURED PROFILE DATA (supplementary):\n{perfil_resumido}")
 
-    contexto = f"""Candidate applying for: {vaga_titulo} at {vaga_empresa}
+    contexto = f"""You are applying for the position of {vaga_titulo} at {vaga_empresa}. Answer all questions in FIRST PERSON as if you are the applicant.
 
 {chr(10).join(contexto_parts)}
 
 Form question: {pergunta_real}{opcoes_disponiveis}
 
-IMPORTANT: {idioma_instrucao} Base your answer primarily on the resume text. If the resume doesn't mention relevant info, use the structured profile data or politely indicate willingness to learn. Never claim skills not present in the resume.
+IMPORTANT: {idioma_instrucao} Answer IN FIRST PERSON. Base your answer primarily on the resume text. If the resume doesn't mention relevant info, use the structured profile data or politely indicate willingness to learn. Never claim skills not present in the resume.
 For numeric questions (years of experience, etc.), reply with ONLY the number."""
 
     messages = [

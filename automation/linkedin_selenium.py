@@ -776,9 +776,9 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
             }
 
         b64 = await screenshot_base64()
-        # Tenta fechar qualquer modal aberto antes de navegar
+        # Fecha modal Easy Apply ainda aberto (se houver) antes de navegar — descarta candidatura
         try:
-            await _fechar_modal_sucesso(driver)
+            await _escapar_modal_ativo(driver)
         except Exception:
             pass
         await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
@@ -792,6 +792,7 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
     except Exception as e:
         logger.error(f"_processar_formulario_multistep_selenium erro: {e}")
         try:
+            await _escapar_modal_ativo(driver)
             await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
             await asyncio.sleep(2)
         except Exception:
@@ -803,6 +804,89 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
         }
 
 
+async def _preencher_cidade_autocomplete(driver, cidade: str) -> None:
+    """Preenche campo cidade/localização com suporte ao autocomplete do LinkedIn.
+
+    O campo de cidade usa typeahead — só enviar teclas não basta; é preciso selecionar
+    uma sugestão ou pressionar Tab para comprometer o valor, evitando que o dropdown
+    aberto interfira nos cliques seguintes (ex.: botão Avançar fora do modal).
+    """
+    CITY_SELS = [
+        "input[aria-label*='City']",
+        "input[aria-label*='Cidade']",
+        "input[aria-label*='city']",
+        "input[name*='city']",
+        "input[id*='city']",
+        "input[placeholder*='City']",
+        "input[placeholder*='Cidade']",
+    ]
+    SUGGESTION_SELS = [
+        "[role='option']",
+        "[role='listbox'] li",
+        ".basic-typeahead__selectable",
+        ".artdeco-dropdown__item",
+        "li[data-test-text-selectable-option]",
+    ]
+
+    def _type_city():
+        import time
+        for sel in CITY_SELS:
+            els = driver.find_elements(By.CSS_SELECTOR, sel)
+            for el in els:
+                try:
+                    if not el.is_displayed() or not el.is_enabled():
+                        continue
+                    current = (el.get_attribute("value") or "").strip()
+                    if current:
+                        print(f"[LINKEDIN] Cidade já preenchida: {current[:30]}")
+                        return "already_filled"
+                    el.click()
+                    time.sleep(0.2)
+                    el.clear()
+                    el.send_keys(cidade[:60])
+                    print(f"[LINKEDIN] Cidade digitada: {cidade[:40]}")
+                    return "typed"
+                except Exception:
+                    continue
+        print("[LINKEDIN] Cidade: campo não encontrado neste step")
+        return False
+
+    result = await _run_in_thread(_type_city)
+    if result != "typed":
+        return
+
+    await asyncio.sleep(1.5)
+
+    def _click_first_suggestion():
+        for sel in SUGGESTION_SELS:
+            opts = driver.find_elements(By.CSS_SELECTOR, sel)
+            visible = [o for o in opts if o.is_displayed() and (o.text or "").strip()]
+            if visible:
+                driver.execute_script("arguments[0].click();", visible[0])
+                print(f"[LINKEDIN] Cidade autocomplete selecionado: {visible[0].text.strip()[:40]}")
+                return True
+        return False
+
+    clicked = await _run_in_thread(_click_first_suggestion)
+    if not clicked:
+        # Sem sugestão — Tab compromete o valor e fecha qualquer dropdown
+        def _tab_commit():
+            from selenium.webdriver.common.keys import Keys
+            for sel in CITY_SELS:
+                els = driver.find_elements(By.CSS_SELECTOR, sel)
+                for el in els:
+                    try:
+                        if el.is_displayed():
+                            el.send_keys(Keys.TAB)
+                            print("[LINKEDIN] Cidade: nenhuma sugestão, comprometido via Tab")
+                            return True
+                    except Exception:
+                        continue
+            return False
+        await _run_in_thread(_tab_commit)
+        await asyncio.sleep(0.3)
+
+
 async def _preencher_step_selenium(driver, perfil: dict, curriculo_path: str) -> None:
     """Preenche campos conhecidos no step atual via Selenium.
     Usa find_elements (sem timeout) para não bloquear em campos ausentes."""
@@ -811,13 +895,12 @@ async def _preencher_step_selenium(driver, perfil: dict, curriculo_path: str) ->
     primeiro_nome = partes[0] if partes else nome_completo
     ultimo_nome = " ".join(partes[1:]) if len(partes) >= 2 else ""
 
-    # Mapa: lista de seletores CSS → valor
+    # Mapa: lista de seletores CSS → valor (cidade tratada separadamente com autocomplete)
     campos = [
         (["input[name='firstName']", "#first-name", "input[id*='firstName']"], primeiro_nome),
         (["input[name='lastName']", "#last-name", "input[id*='lastName']"], ultimo_nome),
         (["input[name='email']", "#email", "input[type='email'][name*='email']"], perfil.get("email", _get_linkedin_email())),
         (["input[name='phone']", "#phone", "input[type='tel']", "input[aria-label*='Phone Number']"], str(perfil.get("telefone", perfil.get("phone", "")))),
-        (["input[aria-label*='City']", "input[aria-label*='Cidade']", "input[name*='city']"], perfil.get("localizacao", "").split(",")[0].strip() if perfil.get("localizacao") else ""),
     ]
 
     def _preencher_campos():
@@ -844,6 +927,11 @@ async def _preencher_step_selenium(driver, perfil: dict, curriculo_path: str) ->
                     continue
 
     await _run_in_thread(_preencher_campos)
+
+    # Cidade com autocomplete — separado para evitar dropdown aberto ao clicar Avançar
+    cidade_val = perfil.get("localizacao", "").split(",")[0].strip() if perfil.get("localizacao") else ""
+    if cidade_val:
+        await _preencher_cidade_autocomplete(driver, cidade_val)
 
     # Seleciona CV em inglês se houver múltiplos CVs já enviados ao LinkedIn
     def _selecionar_cv_ingles():
@@ -1939,8 +2027,22 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
                         pass
                 continue
 
-            # 4. Match com currículo (timeout 30s para LLM)
+            # 4. Match com currículo — verifica cache Neo4j antes de chamar LLM
             idioma_vaga = "pt"
+            descricao_vaga = ""
+            if vaga_id and resumo_curriculo:
+                # 4a. Cache: se já avaliado negativamente, pula sem LLM
+                try:
+                    from graph.neo4j_client import get_neo4j
+                    match_cache = get_neo4j().get_match_vaga(user_id, vaga_id)
+                    if match_cache and not match_cache.get("aplicar", True):
+                        motivo_cache = match_cache.get("motivo", "match ruim (Neo4j cache)")
+                        print(f"[LINKEDIN] Sem match (Neo4j cache) — pulando {vaga_id}: {motivo_cache}")
+                        await notify_browser_step("selenium_linkedin", "pulando", f"Cache: {motivo_cache}")
+                        continue
+                except Exception:
+                    pass
+
             if resumo_curriculo:
                 try:
                     descricao_vaga = await asyncio.wait_for(
@@ -1948,6 +2050,46 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
                     )
                 except asyncio.TimeoutError:
                     descricao_vaga = ""
+
+                # 4b. Salva vaga no Neo4j com descrição (enriquece grafo)
+                if descricao_vaga and vaga_id:
+                    try:
+                        from graph.neo4j_client import get_neo4j
+                        def _titulo_empresa_rapido():
+                            titulo_v, empresa_v = "", ""
+                            for s in [".jobs-unified-top-card__job-title h1",
+                                      ".job-details-jobs-unified-top-card__job-title h1",
+                                      "h1[class*='job-title']", "h1"]:
+                                els = driver.find_elements(By.CSS_SELECTOR, s)
+                                for e in els:
+                                    t = (e.text or "").strip()
+                                    if t and len(t) < 120:
+                                        titulo_v = t; break
+                                if titulo_v: break
+                            for s in [".jobs-unified-top-card__company-name a",
+                                      ".job-details-jobs-unified-top-card__company-name",
+                                      "a[data-tracking-control-name*='company']"]:
+                                els = driver.find_elements(By.CSS_SELECTOR, s)
+                                for e in els:
+                                    t = (e.text or "").strip()
+                                    if t and len(t) < 100:
+                                        empresa_v = t; break
+                                if empresa_v: break
+                            return titulo_v, empresa_v
+                        titulo_v, empresa_v = await _run_in_thread(_titulo_empresa_rapido)
+                        get_neo4j().upsert_vaga({
+                            "id": vaga_id,
+                            "titulo": titulo_v,
+                            "empresa": empresa_v,
+                            "url": vaga_url,
+                            "fonte": "linkedin",
+                            "descricao": descricao_vaga,
+                            "salario": "",
+                            "modalidade": "",
+                        })
+                    except Exception as _uve:
+                        logger.debug("linkedin_selenium: upsert_vaga falhou: %s", _uve)
+
                 if descricao_vaga:
                     await notify_browser_step("selenium_linkedin", "avaliando", f"Verificando match: {vaga_id}")
                     try:
@@ -1959,6 +2101,20 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
                     idioma_vaga = avaliacao.get("idioma", "pt")
                     logger.info("linkedin_selenium: vaga=%s match=%s idioma=%s motivo=%s",
                                 vaga_id, avaliacao.get("aplicar"), idioma_vaga, avaliacao.get("motivo"))
+
+                    # 4c. Salva avaliação de match no Neo4j para uso futuro (cache + priorização)
+                    if vaga_id:
+                        try:
+                            from graph.neo4j_client import get_neo4j
+                            get_neo4j().registrar_match_vaga(
+                                user_id=user_id,
+                                vaga_id=vaga_id,
+                                aplicar=bool(avaliacao.get("aplicar", True)),
+                                motivo=avaliacao.get("motivo", ""),
+                            )
+                        except Exception as _mve:
+                            logger.debug("linkedin_selenium: registrar_match_vaga falhou: %s", _mve)
+
                     if not avaliacao.get("aplicar", True):
                         motivo = avaliacao.get("motivo", "sem match")
                         print(f"[LINKEDIN] Sem match — pulando {vaga_id}: {motivo}")
@@ -1982,7 +2138,8 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
                 print(f"[LINKEDIN] Modal não apareceu para {vaga_id}")
                 await notify_browser_step("selenium_linkedin", "pulando", f"{vaga_id} — modal não apareceu")
                 try:
-                    await _fechar_modal_descarte(driver)
+                    # manter=False: descarta modal residual (não queremos continuar esta candidatura)
+                    await _fechar_modal_descarte(driver, manter=False)
                 except Exception:
                     pass
                 continue
@@ -2141,16 +2298,22 @@ async def _verificar_ja_aplicado_na_pagina(driver) -> bool:
         return False
 
 
-async def _fechar_modal_descarte(driver) -> bool:
+async def _fechar_modal_descarte(driver, manter: bool = True) -> bool:
     """Detecta e fecha modal 'Descartar candidatura' ou 'Salvar candidatura'.
-    Tenta clicar em 'Continuar'; se não existir, manda Escape para voltar ao form."""
+
+    manter=True  → tenta clicar 'Continuar candidatura' (voltar ao form).
+    manter=False → tenta clicar 'Descartar' (abandonar candidatura).
+    Fallback em ambos os casos: Escape.
+    """
     keep_labels = [
         "continue applying", "continuar candidatura", "continuar editando",
         "keep editing", "manter candidatura", "go back", "voltar",
         "não, continuar", "no, continue",
     ]
+    discard_labels = [
+        "descartar", "discard", "não salvar", "don't save", "delete", "excluir",
+    ]
     discard_markers = ["descartar", "abandon", "discard"]
-    # Cabeçalho do modal "Salvar candidatura?" — não tem botão Continuar, só Escape resolve
     save_markers = [
         "salvar esta candidatura", "save this application",
         "save application", "salve para voltar",
@@ -2178,14 +2341,27 @@ async def _fechar_modal_descarte(driver) -> bool:
                 except Exception:
                     continue
 
-                # Modal "Salvar esta candidatura?" — manda Escape para voltar ao form
                 if any(m in text for m in save_markers):
+                    # Modal "Salvar esta candidatura?" — ação depende de manter
+                    btns = dialog.find_elements(By.TAG_NAME, "button")
+                    target_labels = keep_labels if manter else discard_labels
+                    for btn in btns:
+                        try:
+                            t = (btn.text or "").strip().lower()
+                            if any(k in t for k in target_labels):
+                                if btn.is_displayed() and btn.is_enabled():
+                                    btn.click()
+                                    print(f"[LINKEDIN] _fechar_modal_descarte: clicou '{btn.text.strip()}' (manter={manter})")
+                                    return True
+                        except Exception:
+                            continue
+                    print(f"[LINKEDIN] _fechar_modal_descarte: Escape em 'Salvar candidatura?' (manter={manter})")
                     return _escape()
 
                 if not any(k in text for k in discard_markers):
                     continue
 
-                # Modal de descarte — tenta botão "Continuar"
+                # Modal de descarte "Tem certeza?" — tenta botão "Continuar" (sempre)
                 btns = dialog.find_elements(By.TAG_NAME, "button")
                 for btn in btns:
                     try:
@@ -2193,11 +2369,13 @@ async def _fechar_modal_descarte(driver) -> bool:
                         if any(k in t for k in keep_labels):
                             if btn.is_displayed() and btn.is_enabled():
                                 btn.click()
+                                print(f"[LINKEDIN] _fechar_modal_descarte: clicou 'Continuar' em modal de descarte")
                                 return True
                     except Exception:
                         continue
 
                 # Nenhum botão "Continuar" encontrado → Escape como fallback
+                print("[LINKEDIN] _fechar_modal_descarte: Escape (fallback modal de descarte)")
                 return _escape()
         except Exception:
             pass
@@ -2210,6 +2388,44 @@ async def _fechar_modal_descarte(driver) -> bool:
         return result
     except Exception:
         return False
+
+
+async def _escapar_modal_ativo(driver) -> None:
+    """Fecha modal Easy Apply ativo (se aberto) antes de navegar para outra URL.
+
+    Pressiona Escape para fechar o form. Se aparecer 'Salvar candidatura?', DESCARTA
+    (manter=False) pois estamos abandonando esta candidatura de qualquer forma.
+    """
+    from selenium.webdriver.common.keys import Keys
+    from selenium.webdriver.common.action_chains import ActionChains
+
+    def _has_modal():
+        for sel in ["div[role='dialog']", ".artdeco-modal", ".jobs-easy-apply-modal"]:
+            els = driver.find_elements(By.CSS_SELECTOR, sel)
+            if any(e.is_displayed() for e in els):
+                return True
+        return False
+
+    def _escape():
+        try:
+            ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+        except Exception:
+            pass
+
+    try:
+        if not await _run_in_thread(_has_modal):
+            print("[LINKEDIN] _escapar_modal_ativo: nenhum modal detectado")
+            return
+        print("[LINKEDIN] _escapar_modal_ativo: modal detectado, enviando Escape")
+        await _run_in_thread(_escape)
+        await asyncio.sleep(1.0)
+        # Escape pode ter exibido "Salvar candidatura?" — descarta (não queremos continuar)
+        dispensado = await _fechar_modal_descarte(driver, manter=False)
+        if dispensado:
+            print("[LINKEDIN] _escapar_modal_ativo: 'Salvar candidatura?' descartado com sucesso")
+        await asyncio.sleep(0.5)
+    except Exception as e:
+        print(f"[LINKEDIN] _escapar_modal_ativo: erro não crítico: {e}")
 
 
 async def _extrair_descricao_vaga(driver) -> str:

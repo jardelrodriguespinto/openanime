@@ -2367,6 +2367,136 @@ class Neo4jClient:
             return [dict(rec) for rec in session.run(cypher, **params)]
 
 
+    # ─── Match e priorização de vagas via grafo ──────────────────────────────
+
+    def registrar_favoritou(self, user_id: str, vaga_id: str) -> None:
+        """Marca vaga como favorita — alimenta vagas_similares_a_favoritas."""
+        cypher = """
+        MERGE (u:Usuario {user_id: $uid})
+        MERGE (v:Vaga {id: $vaga_id})
+        MERGE (u)-[r:FAVORITOU]->(v)
+        SET r.data = datetime()
+        """
+        with self.driver.session() as session:
+            session.run(cypher, uid=user_id, vaga_id=vaga_id)
+
+    def registrar_match_vaga(
+        self,
+        user_id: str,
+        vaga_id: str,
+        aplicar: bool,
+        motivo: str = "",
+        score: float = -1.0,
+    ) -> None:
+        """Salva resultado de avaliação de match (LLM ou heurística) no grafo.
+        score 0.0–1.0; omitir ou passar -1.0 para derivar do booleano."""
+        score_real = score if score >= 0.0 else (1.0 if aplicar else 0.0)
+        cypher = """
+        MERGE (u:Usuario {user_id: $uid})
+        MERGE (v:Vaga {id: $vaga_id})
+        MERGE (u)-[r:MATCH_VAGA]->(v)
+        SET r.aplicar = $aplicar,
+            r.score   = $score,
+            r.motivo  = $motivo,
+            r.data    = datetime()
+        """
+        with self.driver.session() as session:
+            session.run(
+                cypher,
+                uid=user_id,
+                vaga_id=vaga_id,
+                aplicar=aplicar,
+                score=score_real,
+                motivo=motivo,
+            )
+
+    def get_match_vaga(self, user_id: str, vaga_id: str) -> dict | None:
+        """Retorna avaliação de match salva. None se nunca avaliado."""
+        cypher = """
+        MATCH (u:Usuario {user_id: $uid})-[r:MATCH_VAGA]->(v:Vaga {id: $vaga_id})
+        RETURN r.aplicar AS aplicar, r.score AS score, r.motivo AS motivo
+        """
+        with self.driver.session() as session:
+            record = session.run(cypher, uid=user_id, vaga_id=vaga_id).single()
+            if not record:
+                return None
+            return {
+                "aplicar": record["aplicar"],
+                "score": float(record["score"] or 0.0),
+                "motivo": record["motivo"] or "",
+            }
+
+    def vagas_similares_a_favoritas(self, user_id: str, limit: int = 10) -> list[dict]:
+        """Vagas não candidatadas cujo título/empresa se sobrepõe às favoritas do usuário.
+
+        Traversal puro em Neo4j: favoritas → palavras em comum → outras vagas.
+        Exclui vagas já avaliadas negativamente (match_vaga.aplicar=false).
+        """
+        cypher = """
+        MATCH (u:Usuario {user_id: $uid})-[:FAVORITOU]->(fav:Vaga)
+        WITH u,
+             collect(toLower(fav.titulo))  AS titulos_fav,
+             collect(toLower(fav.empresa)) AS empresas_fav
+        MATCH (v:Vaga)
+        WHERE NOT (u)-[:SE_CANDIDATOU]->(v)
+          AND NOT (u)-[:FAVORITOU]->(v)
+          AND NOT (u)-[:MATCH_VAGA {aplicar: false}]->(v)
+          AND (
+            any(t IN titulos_fav WHERE
+              any(p IN split(t, ' ')
+                WHERE size(p) > 3 AND toLower(v.titulo) CONTAINS p)
+            )
+            OR any(e IN empresas_fav WHERE toLower(v.empresa) = e)
+          )
+        OPTIONAL MATCH (u)-[m:MATCH_VAGA]->(v)
+        RETURN v.id AS id, v.titulo AS titulo, v.empresa AS empresa,
+               v.url AS url, v.modalidade AS modalidade, v.salario AS salario,
+               coalesce(m.score, 0.5) AS match_score
+        ORDER BY match_score DESC, v.data_indexacao DESC
+        LIMIT $limit
+        """
+        with self.driver.session() as session:
+            return [dict(r) for r in session.run(cypher, uid=user_id, limit=limit)]
+
+    def buscar_vagas_para_candidatura(self, user_id: str, limit: int = 30) -> list[dict]:
+        """Vagas abertas não candidatadas, ordenadas por prioridade:
+        favoritas > match alto > match médio > recentes.
+        Exclui vagas com avaliação negativa de match."""
+        cypher = """
+        MATCH (v:Vaga {status: 'aberta'})
+        WHERE NOT ((:Usuario {user_id: $uid})-[:SE_CANDIDATOU]->(v))
+          AND NOT ((:Usuario {user_id: $uid})-[:MATCH_VAGA {aplicar: false}]->(v))
+        OPTIONAL MATCH (:Usuario {user_id: $uid})-[fav:FAVORITOU]->(v)
+        OPTIONAL MATCH (:Usuario {user_id: $uid})-[m:MATCH_VAGA]->(v)
+        WITH v,
+             CASE WHEN fav IS NOT NULL THEN 3.0 ELSE 0.0 END AS boost_favorita,
+             coalesce(m.score, 0.5) AS match_score
+        RETURN v.id AS id, v.titulo AS titulo, v.empresa AS empresa,
+               v.url AS url, v.modalidade AS modalidade, v.salario AS salario,
+               v.fonte AS fonte, (boost_favorita + match_score) AS prioridade
+        ORDER BY prioridade DESC, v.data_indexacao DESC
+        LIMIT $limit
+        """
+        with self.driver.session() as session:
+            return [dict(r) for r in session.run(cypher, uid=user_id, limit=limit)]
+
+    def get_vagas_candidatadas_com_match(self, user_id: str, limit: int = 50) -> list[dict]:
+        """Candidaturas com score de match — permite correlacionar sucesso com relevância."""
+        cypher = """
+        MATCH (u:Usuario {user_id: $uid})-[c:SE_CANDIDATOU]->(v:Vaga)
+        OPTIONAL MATCH (u)-[m:MATCH_VAGA]->(v)
+        RETURN v.titulo AS titulo, v.empresa AS empresa, v.url AS url,
+               c.status AS status, c.plataforma AS plataforma,
+               toString(c.data) AS data,
+               coalesce(m.score, null) AS match_score,
+               m.motivo AS motivo
+        ORDER BY c.data DESC
+        LIMIT $limit
+        """
+        with self.driver.session() as session:
+            return [dict(r) for r in session.run(cypher, uid=user_id, limit=limit)]
+
+
 _client: Neo4jClient | None = None
 
 
