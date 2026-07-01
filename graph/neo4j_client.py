@@ -1745,6 +1745,33 @@ class Neo4jClient:
             record = result.single()
             return record["resumo"] if record else ""
 
+    def salvar_dados_pessoais(self, user_id: str, nome: str = None, telefone: str = None,
+                              linkedin: str = None, email: str = None,
+                              remuneracao_clt: str = None, remuneracao_pj: str = None,
+                              remuneracao_dolar: str = None) -> None:
+        """Grava os dados pessoais usados nos formulários (nome/telefone/LinkedIn/email/
+        remuneração CLT/PJ/dólar). Só sobrescreve os campos passados (não-None)."""
+        sets, params = [], {"tid": user_id}
+        if nome is not None:
+            sets.append("u.nome_real = $nome"); params["nome"] = nome
+        if telefone is not None:
+            sets.append("u.telefone = $telefone"); params["telefone"] = telefone
+        if linkedin is not None:
+            sets.append("u.linkedin_url = $linkedin"); params["linkedin"] = linkedin
+        if email is not None:
+            sets.append("u.email = $email"); params["email"] = email
+        if remuneracao_clt is not None:
+            sets.append("u.remuneracao_clt = $rem_clt"); params["rem_clt"] = remuneracao_clt
+        if remuneracao_pj is not None:
+            sets.append("u.remuneracao_pj = $rem_pj"); params["rem_pj"] = remuneracao_pj
+        if remuneracao_dolar is not None:
+            sets.append("u.remuneracao_dolar = $rem_dolar"); params["rem_dolar"] = remuneracao_dolar
+        if not sets:
+            return
+        cypher = "MERGE (u:Usuario {user_id: $tid})\nSET " + ", ".join(sets)
+        with self.driver.session() as session:
+            session.run(cypher, **params)
+
     def salvar_curriculo_path(self, user_id: str, path: str) -> None:
         """Caminho do PDF de currículo (o dashboard define; a automação faz upload dele)."""
         cypher = """
@@ -1798,6 +1825,9 @@ class Neo4jClient:
                 "objetivo": u.get("objetivo_profissional", ""),
                 "resumo_curriculo": u.get("resumo_curriculo", ""),
                 "curriculo_path": u.get("curriculo_path", ""),
+                "remuneracao_clt": u.get("remuneracao_clt", ""),
+                "remuneracao_pj": u.get("remuneracao_pj", ""),
+                "remuneracao_dolar": u.get("remuneracao_dolar", ""),
                 "habilidades": [h for h in record["habilidades"] if h.get("nome")],
                 "experiencias": [e for e in record["experiencias"] if e.get("empresa")],
                 "formacao": [f for f in record["formacao"] if f.get("curso")],

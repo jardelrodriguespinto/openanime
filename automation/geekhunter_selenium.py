@@ -123,6 +123,21 @@ _BTN_FECHAR_MODAL = [
     'button:has-text("Continuar")',
 ]
 
+# Frases ESPECÍFICAS de candidatura enviada no GeekHunter (só sinais de envio — NADA
+# de "voltar"/"post-apply" genérico, que aparece no detalhe ANTES de enviar e dava
+# falso sucesso). Inclui o modal "confirme sua candidatura pelo e-mail" (a vaga já
+# foi enviada; a confirmação por e-mail é ação do usuário, não do bot → segue).
+_FRASES_SUCESSO_GEEK = (
+    "confirmar sua candidatura pelo e-mail",
+    "confirmar sua candidatura pelo email",
+    "para que ela seja enviada",
+    "sua candidatura foi enviada",
+    "candidatura enviada com sucesso",
+    "candidatura foi enviada",
+    "recebemos sua candidatura",
+    "sua candidatura foi realizada",
+)
+
 # Botões de avançar dentro de um fluxo multi-step do formulário.
 _BTN_CONTINUAR = [
     'button:has-text("Continuar")',
@@ -372,73 +387,334 @@ def _get_telefone(perfil: dict) -> str:
                or os.getenv("CANDIDATO_TELEFONE") or os.getenv("LINKEDIN_TELEFONE") or "").strip()
 
 
+def _telefone_digitos(tel: str) -> str:
+    """Só dígitos do telefone (máscara 'Celular com DDD' rejeita +, espaço, hífen).
+    Remove o código de país 55 se presente, deixando DDD+número (10-11 dígitos)."""
+    import re as _re
+    d = _re.sub(r"\D", "", tel or "")
+    if len(d) > 11 and d.startswith("55"):
+        d = d[2:]
+    return d
+
+
+def _contexto_input(driver, el) -> str:
+    """Texto que identifica UM input: aria-label/placeholder/name + label[for] +
+    texto do wrapper MAIS PRÓXIMO (ancestor::div[1]). Usar o wrapper mais próximo é
+    o que separa 'CLT?' de 'PJ?' — um ancestral mais alto pegaria os dois juntos."""
+    partes = []
+    for attr in ("aria-label", "placeholder", "name"):
+        v = el.get_attribute(attr)
+        if v and v.strip():
+            partes.append(v.strip())
+    iid = el.get_attribute("id")
+    if iid:
+        try:
+            lab = driver.find_element(By.CSS_SELECTOR, f"label[for='{iid}']")
+            if (lab.text or "").strip():
+                partes.append(lab.text.strip())
+        except Exception:
+            pass
+    try:
+        anc = el.find_element(By.XPATH, "./ancestor::div[1]")
+        if (anc.text or "").strip():
+            partes.append(anc.text.strip())
+    except Exception:
+        pass
+    return " ".join(partes).lower()
+
+
+def _digitar_no_input(el, valor: str) -> None:
+    """Foca, limpa e digita — robusto pra inputs com máscara (React/Chakra). Pausa no
+    fim (pacing): o GeekHunter é React e se preenchermos rápido demais ele 'se perde'
+    (re-render não acompanha). O pequeno sleep deixa o estado assentar entre campos."""
+    import time as _t
+    try:
+        el.click()
+    except Exception:
+        pass
+    try:
+        el.clear()
+    except Exception:
+        pass
+    el.send_keys(valor)
+    _t.sleep(random.uniform(0.4, 0.9))
+
+
 async def _preencher_contato_geekhunter(driver, perfil: dict) -> None:
     """Preenche os campos de contato do form do GeekHunter POR RÓTULO (Confirmar
     Email, Nome completo, Celular com DDD, LinkedIn) — os inputs Chakra não têm
     name/type confiáveis, então casamos pelo texto do label. Preenche só se vazio.
     Feito ANTES da detecção de perguntas: campo preenchido não vira 'pergunta'."""
     nome = _get_nome(perfil)
-    telefone = _get_telefone(perfil)
     email = perfil.get("email", "") or _get_email()
     linkedin = _get_linkedin_url(perfil)
-
-    def _contexto_de(el):
-        """Junta aria-label/placeholder/name + label[for] + texto do bloco ancestral
-        (rótulo do Chakra costuma ser um <p> irmão dentro do wrapper, não linkado por
-        'for'). Match por 'contains' no texto inteiro é mais tolerante."""
-        partes = []
-        for attr in ("aria-label", "placeholder", "name"):
-            v = el.get_attribute(attr)
-            if v and v.strip():
-                partes.append(v.strip())
-        iid = el.get_attribute("id")
-        if iid:
-            try:
-                lab = driver.find_element(By.CSS_SELECTOR, f"label[for='{iid}']")
-                if (lab.text or "").strip():
-                    partes.append(lab.text.strip())
-            except Exception:
-                pass
-        try:
-            anc = el.find_element(By.XPATH, "./ancestor::div[1]")
-            if (anc.text or "").strip():
-                partes.append(anc.text.strip())
-        except Exception:
-            pass
-        return " ".join(partes).lower()
 
     def _fill():
         for el in driver.find_elements(By.CSS_SELECTOR, "input, textarea"):
             try:
                 if not el.is_displayed():
                     continue
+                tipo = (el.get_attribute("type") or "").lower()
+                name = (el.get_attribute("name") or "").lower()
+                # Telefone tem tratamento próprio (widget +55) — pula aqui.
+                if tipo == "tel" or "phone" in name or "celular" in name:
+                    continue
                 if (el.get_attribute("value") or "").strip():
                     continue
-                ctx = _contexto_de(el)
-                tipo = (el.get_attribute("type") or "").lower()
+                ctx = _contexto_input(driver, el)
                 val = ""
                 if "linkedin" in ctx:
                     val = linkedin
                 elif "email" in ctx or "e-mail" in ctx or tipo == "email":
                     val = email
-                elif tipo == "tel" or any(k in ctx for k in ("celular", "telefone", "ddd", "phone", "whatsapp")):
-                    val = telefone
                 elif "nome" in ctx or "name" in ctx:
                     val = nome
                 if val:
-                    try:
-                        el.clear()
-                    except Exception:
-                        pass
-                    el.send_keys(val)
+                    _digitar_no_input(el, val)
                     print(f"[GEEK] Contato preenchido ({ctx[:25]}) = {val[:30]}")
             except Exception:
                 continue
 
     try:
         await _run_in_thread(_fill)
+        await _preencher_telefone_geekhunter(driver, perfil)
     except Exception as e:
         logger.warning("geekhunter _preencher_contato erro: %s", e)
+
+
+async def _preencher_telefone_geekhunter(driver, perfil: dict) -> None:
+    """Telefone do GeekHunter é react-phone-input-2 (input[type=tel][name=phone] que
+    já vem com '+55 ' pré-preenchido). NÃO pular por ter valor: se só tem o DDI, vai
+    pro fim e digita o número NACIONAL (DDD+número, sem 55) — o widget formata."""
+    import re as _re
+    nacional = _telefone_digitos(_get_telefone(perfil))  # DDD+número, sem 55
+    if not nacional:
+        return
+
+    def _fill():
+        for el in driver.find_elements(
+            By.CSS_SELECTOR,
+            "input[type='tel'], input[name='phone'], input[name*='phone' i], input[name*='celular' i]",
+        ):
+            try:
+                if not el.is_displayed():
+                    continue
+                atual = _re.sub(r"\D", "", el.get_attribute("value") or "")
+                if len(atual) >= 10:      # já tem número real
+                    return
+                el.click()
+                if len(atual) <= 3:       # só o DDI (+55) → vai pro fim e digita o nacional
+                    try:
+                        el.send_keys(Keys.END)
+                    except Exception:
+                        pass
+                    el.send_keys(nacional)
+                else:                     # valor parcial estranho → limpa e digita
+                    try:
+                        el.send_keys(Keys.CONTROL, "a")
+                        el.send_keys(Keys.DELETE)
+                    except Exception:
+                        pass
+                    el.send_keys(nacional)
+                print(f"[GEEK] Telefone preenchido: ...{nacional[-4:]}")
+                return
+            except Exception:
+                continue
+
+    try:
+        await _run_in_thread(_fill)
+    except Exception as e:
+        logger.warning("geekhunter _preencher_telefone erro: %s", e)
+
+
+async def _preencher_remuneracao_geekhunter(driver, perfil: dict) -> None:
+    """Preenche remuneração (CLT/PJ/dólar) ancorando na LABEL do Chakra
+    (`label.chakra-form__label`, que tem o texto distintivo 'CLT?' / 'PJ?') e achando
+    o input do MESMO FormControl. Corrige o bug de CLT e PJ pegarem ambos o valor PJ
+    (a label sem `for` não linkava, e o rótulo genérico misturava os dois)."""
+    from automation.form_filler import _eh_pergunta_remuneracao, _valor_remuneracao
+    import re as _re
+
+    def _fill():
+        # Rótulo da remuneração pode ser <label> OU <p> (Chakra varia). Ancora nele e
+        # acha o input associado — prioridade: o PRÓXIMO input/textarea em ordem de
+        # documento (layout 'rótulo → campo'), que separa CLT do PJ com precisão.
+        rotulos = driver.find_elements(By.CSS_SELECTOR, "label.chakra-form__label, label, legend, p.chakra-text")
+        vistos = set()
+        for lab in rotulos:
+            try:
+                txt = (lab.text or "").strip().lower()
+                if not txt or not _eh_pergunta_remuneracao(txt):
+                    continue
+                if txt in vistos:
+                    continue
+                vistos.add(txt)
+                val = _valor_remuneracao(perfil, txt)  # CLT/PJ/dólar pelo TEXTO deste rótulo
+                if not val:
+                    print(f"[GEEK] Remuneração SEM valor configurado p/ '{txt[:35]}'")
+                    continue
+                digs = _re.sub(r"[^\d]", "", val) or val
+                inp = None
+                for xp in (
+                    "./following::input[1]",
+                    "./following::textarea[1]",
+                    "./ancestor::div[contains(@class,'form-control')][1]//input",
+                    "./ancestor::div[1]//input",
+                ):
+                    try:
+                        cand = lab.find_element(By.XPATH, xp)
+                        if cand is not None and cand.is_displayed():
+                            inp = cand
+                            break
+                    except Exception:
+                        continue
+                if inp is None:
+                    print(f"[GEEK] Remuneração: input não encontrado p/ '{txt[:35]}'")
+                    continue
+                if (inp.get_attribute("value") or "").strip():
+                    continue
+                _digitar_no_input(inp, digs)
+                tipo = "PJ" if ("pj" in txt or "jur" in txt) else ("dólar" if any(k in txt for k in ("dólar", "dolar", "usd", "dollar")) else "CLT")
+                print(f"[GEEK] Remuneração {tipo} = {digs}")
+            except Exception:
+                continue
+
+    try:
+        await _run_in_thread(_fill)
+    except Exception as e:
+        logger.warning("geekhunter _preencher_remuneracao erro: %s", e)
+
+
+def _label_pergunta_gh(driver, el) -> str:
+    """Rótulo de uma pergunta do GeekHunter: o texto está num <p> separado (não é
+    linkado por 'for', e o 'name' do input é um número tipo '130317'). Pega o <p>
+    imediatamente anterior ou o texto do FormControl ancestral. Remove o '*'."""
+    try:
+        p = el.find_element(By.XPATH, "./preceding::p[normalize-space(.)!=''][1]")
+        t = (p.text or "").strip()
+        if t:
+            return t.lstrip("* ").strip()
+    except Exception:
+        pass
+    try:
+        fc = el.find_element(By.XPATH, "./ancestor::div[contains(@class,'form-control')][1]")
+        t = (fc.text or "").strip()
+        if t:
+            return t.split("\n")[0].lstrip("* ").strip()
+    except Exception:
+        pass
+    return ""
+
+
+async def _responder_perguntas_geekhunter(driver, perfil: dict, resumo_curriculo: str,
+                                          idioma: str, vaga_titulo: str) -> list:
+    """Responde as perguntas customizadas (textarea/input de texto) do GeekHunter.
+    O rótulo vem do <p> da pergunta (não do 'name', que é numérico). Uma de cada vez,
+    com pausa (pacing). Ignora contato/salário/consentimento (tratados à parte)."""
+    _IGNORAR = ("nome", "email", "e-mail", "linkedin", "celular", "telefone", "ddd",
+                "remunera", "salári", "salari", "pretens", "currículo", "curriculo",
+                "política de privacidade", "politica de privacidade", "ciente de que")
+
+    def _coletar():
+        achados = []
+        for el in driver.find_elements(By.CSS_SELECTOR, "textarea, input[type='text'], input:not([type])"):
+            try:
+                if not el.is_displayed():
+                    continue
+                if (el.get_attribute("value") or "").strip():
+                    continue
+                tipo = (el.get_attribute("type") or "").lower()
+                name = (el.get_attribute("name") or "").lower()
+                if tipo == "tel" or "phone" in name or "celular" in name:
+                    continue
+                label = _label_pergunta_gh(driver, el)
+                if not label or label.lower() in ("", "*"):
+                    continue
+                if any(k in label.lower() for k in _IGNORAR):
+                    continue
+                achados.append((el.get_attribute("id") or "", el.get_attribute("name") or "", label))
+            except Exception:
+                continue
+        return achados
+
+    feitas = []
+    try:
+        perguntas = await _run_in_thread(_coletar)
+    except Exception as e:
+        logger.warning("geekhunter _coletar perguntas erro: %s", e)
+        return feitas
+
+    for eid, ename, label in perguntas:
+        try:
+            resp = responder_pergunta(label, perfil, vaga_titulo=vaga_titulo, vaga_empresa="",
+                                      resumo_curriculo=resumo_curriculo, idioma=idioma)
+        except Exception as e:
+            logger.warning("responder_pergunta erro: %s", e)
+            from automation.form_filler import resposta_segura
+            resp = resposta_segura(label, idioma)
+
+        def _fill(eid=eid, ename=ename, resp=resp, label=label):
+            el = None
+            if eid:
+                try:
+                    el = driver.find_element(By.ID, eid)
+                except Exception:
+                    el = None
+            if el is None and ename:
+                try:
+                    el = driver.find_element(By.CSS_SELECTOR, f"[name='{ename}']")
+                except Exception:
+                    el = None
+            if el is None:
+                return
+            _digitar_no_input(el, str(resp))
+            print(f"[GEEK] Pergunta '{label[:35]}' = {str(resp)[:30]}")
+
+        for _tp in range(3):
+            try:
+                await _run_in_thread(_fill)
+                break
+            except StaleElementReferenceException:
+                await asyncio.sleep(0.6)
+        feitas.append(label)
+        await asyncio.sleep(random.uniform(0.6, 1.2))  # pacing entre perguntas
+    return feitas
+
+
+async def _marcar_consentimentos_geekhunter(driver) -> None:
+    """Marca os checkboxes de consentimento (LGPD) do GeekHunter. São Chakra
+    (span.chakra-checkbox__control com input escondido) — clica o control só se ainda
+    não estiver marcado (atributo data-checked ausente)."""
+    def _marcar():
+        for ctrl in driver.find_elements(By.CSS_SELECTOR, "span.chakra-checkbox__control"):
+            try:
+                if ctrl.get_attribute("data-checked") is not None:
+                    continue  # já marcado
+                driver.execute_script("arguments[0].click();", ctrl)
+                print("[GEEK] Consentimento marcado")
+            except Exception:
+                continue
+    try:
+        await _run_in_thread(_marcar)
+        await asyncio.sleep(random.uniform(0.4, 0.8))
+    except Exception as e:
+        logger.warning("geekhunter _marcar_consentimentos erro: %s", e)
+
+
+async def _geek_confirmacao_sucesso(driver) -> bool:
+    """Detecta a confirmação de candidatura ENVIADA no GeekHunter por frases
+    específicas (inclui 'confirme sua candidatura pelo e-mail'). Estrito de propósito
+    — não usa 'voltar'/'post-apply', que davam falso sucesso antes de enviar."""
+    def _check():
+        try:
+            html = (driver.page_source or "").lower()
+        except Exception:
+            return False
+        return any(f in html for f in _FRASES_SUCESSO_GEEK)
+    try:
+        return await _run_in_thread(_check)
+    except Exception:
+        return False
 
 
 async def _fechar_modal_atencao(driver) -> None:
@@ -470,7 +746,11 @@ async def _preencher_e_enviar_formulario(driver, perfil: dict, resumo_curriculo:
         await asyncio.sleep(random.uniform(0.6, 1.2))
         await notify_browser_step(f"geek_step_{step}", "preenchendo", "Preenchendo candidatura GeekHunter")
 
-        if await _candidatura_enviada(driver):
+        # Confirmação de ENVIO (estrita): inclui o modal "confirme sua candidatura pelo
+        # e-mail". Pode surgir após um clique anterior mesmo sem 'Finalizar' explícito
+        # (ex.: vagas sem perguntas) → fecha o modal pelo X e conclui como enviada.
+        if await _geek_confirmacao_sucesso(driver):
+            await _fechar_modal_atencao(driver)
             b64 = await screenshot_base64()
             await notify_browser_step(f"geek_step_{step}", "sucesso", "Candidatura enviada!")
             return {"sucesso": True, "perguntas_respondidas": perguntas_feitas,
@@ -488,44 +768,29 @@ async def _preencher_e_enviar_formulario(driver, perfil: dict, resumo_curriculo:
                         "screenshot": b64[:100] if b64 else ""}
             continue
 
-        # Contato (por rótulo: Confirmar Email, Nome completo, Celular, LinkedIn) +
-        # upload do currículo (se houver input de arquivo) + perguntas customizadas.
-        for _tent in range(3):
-            try:
-                await _preencher_contato_geekhunter(driver, perfil)
-                await _preencher_contato_smartapply(driver, perfil)  # supl.: campos com name/type
-                if curriculo_path:
-                    await _tratar_curriculo_smartapply(driver, curriculo_path)
-                perguntas = await _detectar_perguntas_smartapply(driver)
-                break
-            except StaleElementReferenceException:
-                await asyncio.sleep(0.8)
-                perguntas = []
-        else:
-            perguntas = []
-
-        if perguntas:
-            await notify_browser_step(f"geek_step_{step}", "respondendo", f"{len(perguntas)} pergunta(s)")
-            for p in perguntas:
-                if p not in respostas:
-                    try:
-                        respostas[p] = responder_pergunta(
-                            p, perfil, vaga_titulo=vaga_titulo, vaga_empresa="",
-                            resumo_curriculo=resumo_curriculo, idioma=idioma,
-                        )
-                    except Exception as e:
-                        logger.warning("responder_pergunta erro: %s", e)
-                        from automation.form_filler import resposta_segura
-                        respostas[p] = resposta_segura(p, idioma)
-                for _tp in range(3):
-                    try:
-                        await _preencher_resposta_smartapply(driver, p, respostas[p])
-                        break
-                    except StaleElementReferenceException:
-                        await asyncio.sleep(0.6)
+        # Preenchimento SEQUENCIAL e pausado (o GeekHunter é React e 'se perde' se
+        # preenchermos tudo de uma vez): contato → remuneração → currículo →
+        # perguntas → consentimento. Cada campo já pausa dentro de _digitar_no_input.
+        try:
+            await _preencher_contato_geekhunter(driver, perfil)      # nome/email/linkedin + telefone
+            await asyncio.sleep(random.uniform(0.6, 1.1))
+            await _preencher_remuneracao_geekhunter(driver, perfil)  # CLT/PJ/dólar (por label)
+            await asyncio.sleep(random.uniform(0.6, 1.1))
+            if curriculo_path:
+                await _tratar_curriculo_smartapply(driver, curriculo_path)
+                await asyncio.sleep(random.uniform(0.5, 1.0))
+            novas = await _responder_perguntas_geekhunter(
+                driver, perfil, resumo_curriculo, idioma, vaga_titulo
+            )
+            for p in novas:
                 if p not in perguntas_feitas:
                     perguntas_feitas.append(p)
-                await asyncio.sleep(random.uniform(0.5, 1.0))
+            await asyncio.sleep(random.uniform(0.5, 1.0))
+            await _marcar_consentimentos_geekhunter(driver)          # checkbox LGPD (Chakra)
+            await asyncio.sleep(random.uniform(0.5, 1.0))
+        except StaleElementReferenceException:
+            await asyncio.sleep(1.0)
+            continue
 
         # Assinatura antes de clicar (detecta não-avanço).
         try:
@@ -554,8 +819,25 @@ async def _preencher_e_enviar_formulario(driver, perfil: dict, resumo_curriculo:
         print(f"[GEEK] Step {step}: clicou '{btn_text[:40]}'")
         await asyncio.sleep(3 if is_submit else 2)
 
-        if await _candidatura_enviada(driver):
+        # "Finalizar candidatura" = ENVIO FINAL → candidatura enviada. (Só 'finalizar'
+        # pra não confundir com botões intermediários como 'Continuar'/'Candidatar-se'
+        # e pular o modal das perguntas.) Fecha o modal de confirmação pelo X e conclui,
+        # pra o caller fechar a aba, marcar a vaga como aplicada e ir pra próxima.
+        if is_submit and "finalizar" in btn_text.lower():
+            await asyncio.sleep(1.5)
+            await _fechar_modal_atencao(driver)
             b64 = await screenshot_base64()
+            await notify_browser_step(f"geek_step_{step}", "sucesso", "Candidatura enviada!")
+            return {"sucesso": True, "perguntas_respondidas": perguntas_feitas,
+                    "mensagem": "Candidatura enviada com sucesso no GeekHunter!",
+                    "screenshot": b64[:100] if b64 else ""}
+
+        # Confirmação de envio pode aparecer logo após o clique (ex.: modal "confirme
+        # pelo e-mail" em vagas sem perguntas) → fecha o X e conclui como enviada.
+        if await _geek_confirmacao_sucesso(driver):
+            await _fechar_modal_atencao(driver)
+            b64 = await screenshot_base64()
+            await notify_browser_step(f"geek_step_{step}", "sucesso", "Candidatura enviada!")
             return {"sucesso": True, "perguntas_respondidas": perguntas_feitas,
                     "mensagem": "Candidatura enviada com sucesso no GeekHunter!",
                     "screenshot": b64[:100] if b64 else ""}
@@ -580,10 +862,6 @@ async def _preencher_e_enviar_formulario(driver, perfil: dict, resumo_curriculo:
             nao_avancou = 0
 
     b64 = await screenshot_base64()
-    if await _candidatura_enviada(driver):
-        return {"sucesso": True, "perguntas_respondidas": perguntas_feitas,
-                "mensagem": "Candidatura enviada com sucesso no GeekHunter!",
-                "screenshot": b64[:100] if b64 else ""}
     return {"sucesso": False, "motivo_falha": "formulario_incompleto",
             "mensagem": f"Não consegui concluir o formulário. Candidate-se à mão: {vaga_url}",
             "screenshot": b64[:100] if b64 else ""}

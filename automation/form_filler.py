@@ -49,6 +49,23 @@ def responder_pergunta(
     Responde no idioma da pergunta (detectado externamente via idioma param).
     Suporta perguntas SELECT:label:opcoes, RADIO:label:opcoes e NUMERO:label.
     """
+    # REMUNERAÇÃO: NUNCA deixa a IA "chutar" salário (chegou a gerar R$ 75 trilhões).
+    # Usa os valores configurados no perfil (CLT/PJ/dólar). Vale p/ todas as automações.
+    _plain = pergunta
+    for _pre in ("NUMERO:", "DECIMAL:", "SELECT:", "RADIO:", "CHECKBOX:"):
+        if _plain.startswith(_pre):
+            _plain = _plain.split(":", 1)[1] if _pre in ("SELECT:", "RADIO:") else _plain[len(_pre):]
+            break
+    if _eh_pergunta_remuneracao(_plain):
+        val = _valor_remuneracao(perfil, _plain)
+        if val:
+            if pergunta.startswith(("NUMERO:", "DECIMAL:")):
+                if pergunta.startswith("DECIMAL:"):
+                    m = re.search(r'\d+(?:[.,]\d+)?', val)
+                    return m.group().replace(",", ".") if m else re.sub(r'[^\d]', '', val)
+                return re.sub(r'[^\d]', '', val) or val  # NUMERO: só dígitos
+            return val
+
     # NUMERO: campo inteiro — retorna apenas dígitos (ex: anos de experiência).
     # Sem info (ex: "anos de experiência com .NET" e o candidato não tem) → "0",
     # nunca vazio: campo obrigatório em branco faz o LinkedIn descartar a candidatura.
@@ -164,6 +181,29 @@ For numeric questions (years of experience, etc.), reply with ONLY the number.""
     except Exception as e:
         logger.error("form_filler: erro LLM: %s", e)
         return _resposta_fallback(pergunta, perfil, idioma)
+
+
+def _eh_pergunta_remuneracao(pergunta: str) -> bool:
+    p = (pergunta or "").lower()
+    return any(k in p for k in (
+        "remunera", "salári", "salari", "pretens", "salary", "compensation",
+        "remuneration", "expected pay", "expected salary",
+    ))
+
+
+def _valor_remuneracao(perfil: dict, pergunta: str) -> str:
+    """Escolhe o valor de remuneração configurado conforme o TIPO pedido na pergunta
+    (PJ / CLT / dólar). Fallback: CLT → pretensao_salarial."""
+    p = (pergunta or "").lower()
+    if any(k in p for k in ("dólar", "dolar", "usd", "us$", "dollar")):
+        v = perfil.get("remuneracao_dolar")
+    elif any(k in p for k in ("pj", "pessoa jur", "cnpj", "jurídica", "juridica")):
+        v = perfil.get("remuneracao_pj")
+    elif "clt" in p:
+        v = perfil.get("remuneracao_clt")
+    else:
+        v = perfil.get("remuneracao_clt") or perfil.get("pretensao_salarial")
+    return str(v).strip() if v not in (None, "") else ""
 
 
 def _resumir_perfil(perfil: dict) -> str:

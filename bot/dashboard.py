@@ -298,6 +298,23 @@ VUE_DASHBOARD = """
 
         <div style="background:#16213e;padding:12px 15px;border-radius:8px;margin-bottom:15px;">
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+                <strong style="color:#00d4ff">👤 Dados Pessoais (usados nos formulários)</strong>
+                <button @click="salvarDadosPessoais" style="padding:6px 14px;background:#00ff88;border:none;border-radius:4px;color:#0f0f23;font-weight:bold;cursor:pointer;">💾 Salvar Dados</button>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+                <input v-model="dadosPessoais.nome" placeholder="Nome completo" style="padding:8px;border-radius:4px;background:#1a1a2e;color:#fff;border:1px solid #333;">
+                <input v-model="dadosPessoais.telefone" placeholder="Celular com DDD (ex: +55 51 99999-9999)" style="padding:8px;border-radius:4px;background:#1a1a2e;color:#fff;border:1px solid #333;">
+                <input v-model="dadosPessoais.linkedin" placeholder="URL do LinkedIn" style="padding:8px;border-radius:4px;background:#1a1a2e;color:#fff;border:1px solid #333;">
+                <input v-model="dadosPessoais.email" placeholder="E-mail" style="padding:8px;border-radius:4px;background:#1a1a2e;color:#fff;border:1px solid #333;">
+                <input v-model="dadosPessoais.remuneracao_clt" placeholder="Remuneração CLT (R$ mensal, ex: 8000)" style="padding:8px;border-radius:4px;background:#1a1a2e;color:#fff;border:1px solid #333;">
+                <input v-model="dadosPessoais.remuneracao_pj" placeholder="Remuneração PJ (R$ mensal, ex: 12000)" style="padding:8px;border-radius:4px;background:#1a1a2e;color:#fff;border:1px solid #333;">
+                <input v-model="dadosPessoais.remuneracao_dolar" placeholder="Remuneração em dólar (US$ mensal, ex: 4000)" style="padding:8px;border-radius:4px;background:#1a1a2e;color:#fff;border:1px solid #333;">
+            </div>
+            <div style="font-size:0.75rem;color:#888;margin-top:6px;">Preenchem os campos obrigatórios das candidaturas (Nome, Celular, LinkedIn, Remuneração CLT/PJ/dólar) no GeekHunter/Indeed/LinkedIn. Valor numérico simples (ex: 8000) — a automação escolhe CLT, PJ ou dólar conforme a pergunta.</div>
+        </div>
+
+        <div style="background:#16213e;padding:12px 15px;border-radius:8px;margin-bottom:15px;">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
                 <strong style="color:#00d4ff">📝 Currículo / Informações Pessoais</strong>
                 <button @click="salvarResumoCurriculo" style="padding:6px 14px;background:#00ff88;border:none;border-radius:4px;color:#0f0f23;font-weight:bold;cursor:pointer;">💾 Salvar Currículo</button>
             </div>
@@ -448,6 +465,7 @@ VUE_DASHBOARD = """
                 plataformaSelecionada: '',
                 plataformaAplicacao: '',
                 resumoCurriculo: '',
+                dadosPessoais: {nome: '', telefone: '', linkedin: '', email: '', remuneracao_clt: '', remuneracao_pj: '', remuneracao_dolar: ''},
                 curriculoNome: '',
                 uploadingCurriculo: false,
                 notif: {msg: '', type: 'info'},
@@ -488,6 +506,7 @@ VUE_DASHBOARD = """
             this.carregarBrowser();
             this.carregarResumoCurriculo();
             this.carregarCurriculoPath();
+            this.carregarDadosPessoais();
             this.historicoInterval = setInterval(this.carregarAutomacao, 3000);
             this.browserInterval = setInterval(this.carregarBrowser, 1000);
         },
@@ -875,6 +894,36 @@ VUE_DASHBOARD = """
                     }
                 } catch(e) {
                     this.showNotif('Erro de conexão ao salvar currículo', 'error');
+                }
+            },
+            async carregarDadosPessoais() {
+                try {
+                    const r = await fetch('/api/perfil/dados-pessoais');
+                    const d = await r.json();
+                    this.dadosPessoais = {
+                        nome: d.nome || '', telefone: d.telefone || '',
+                        linkedin: d.linkedin || '', email: d.email || '',
+                        remuneracao_clt: d.remuneracao_clt || '',
+                        remuneracao_pj: d.remuneracao_pj || '',
+                        remuneracao_dolar: d.remuneracao_dolar || ''
+                    };
+                } catch(e) {}
+            },
+            async salvarDadosPessoais() {
+                try {
+                    const r = await fetch('/api/perfil/dados-pessoais', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(this.dadosPessoais)
+                    });
+                    const d = await r.json();
+                    if (d.success) {
+                        this.showNotif('✅ Dados pessoais salvos!', 'success');
+                    } else {
+                        this.showNotif('❌ ' + (d.error || 'Erro ao salvar'), 'error');
+                    }
+                } catch(e) {
+                    this.showNotif('Erro de conexão ao salvar dados pessoais', 'error');
                 }
             },
             async carregarCurriculoPath() {
@@ -1841,6 +1890,44 @@ async def set_resumo_curriculo(request: Request):
     try:
         neo4j = get_neo4j()
         neo4j.salvar_resumo_curriculo(user_id, resumo)
+        return JSONResponse({"success": True})
+    except Exception as e:
+        return JSONResponse({"success": False, "error": str(e)})
+
+
+@fastapi_app.get("/api/perfil/dados-pessoais")
+async def get_dados_pessoais():
+    user_id = os.getenv("DASHBOARD_USER_ID", "admin")
+    try:
+        p = get_neo4j().get_perfil_profissional(user_id) or {}
+        return JSONResponse({
+            "nome": p.get("nome", ""), "telefone": p.get("telefone", ""),
+            "linkedin": p.get("linkedin", ""), "email": p.get("email", ""),
+            "remuneracao_clt": p.get("remuneracao_clt", ""),
+            "remuneracao_pj": p.get("remuneracao_pj", ""),
+            "remuneracao_dolar": p.get("remuneracao_dolar", ""),
+        })
+    except Exception as e:
+        return JSONResponse({"nome": "", "telefone": "", "linkedin": "", "email": "", "error": str(e)})
+
+
+@fastapi_app.post("/api/perfil/dados-pessoais")
+async def set_dados_pessoais(request: Request):
+    """Salva nome/telefone/LinkedIn/email usados para preencher os formulários
+    (GeekHunter exige Nome completo e Celular com DDD obrigatórios)."""
+    body = await request.json()
+    user_id = os.getenv("DASHBOARD_USER_ID", "admin")
+    try:
+        get_neo4j().salvar_dados_pessoais(
+            user_id,
+            nome=(body.get("nome") or "").strip(),
+            telefone=(body.get("telefone") or "").strip(),
+            linkedin=(body.get("linkedin") or "").strip(),
+            email=(body.get("email") or "").strip() or None,
+            remuneracao_clt=(body.get("remuneracao_clt") or "").strip(),
+            remuneracao_pj=(body.get("remuneracao_pj") or "").strip(),
+            remuneracao_dolar=(body.get("remuneracao_dolar") or "").strip(),
+        )
         return JSONResponse({"success": True})
     except Exception as e:
         return JSONResponse({"success": False, "error": str(e)})
