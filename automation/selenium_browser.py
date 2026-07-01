@@ -5,6 +5,7 @@ API async para compatibilidade com o codigo existente.
 
 import asyncio
 import base64
+import contextvars
 import glob
 import logging
 import os
@@ -234,15 +235,24 @@ def _get_driver():
 
 
 async def _run_in_thread(fn, *args, **kwargs):
-    """Executa funcao Selenium (sincrona) em thread separada."""
+    """Executa funcao Selenium (sincrona) em thread separada.
+
+    IMPORTANTE: propaga o contexto (contextvars) da task para a thread. Sem isto, a
+    thread do executor roda com contexto ZERADO e `run_context.get_platform()` cai no
+    default "default" — o que fazia LinkedIn/Indeed/GeekHunter resolverem o MESMO
+    perfil `firefox_profile/default` e um matar o Firefox do outro (bug "abre só uma
+    automação por vez"). Com `copy_context().run`, cada plataforma mantém o seu."""
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, lambda: fn(*args, **kwargs))
+    ctx = contextvars.copy_context()
+    return await loop.run_in_executor(None, lambda: ctx.run(lambda: fn(*args, **kwargs)))
 
 
 async def _run_in_thread_no_args(fn):
-    """Executa funcao Selenium sem argumentos em thread separada."""
+    """Executa funcao Selenium sem argumentos em thread separada.
+    Propaga o contexto (contextvars) — ver nota em _run_in_thread."""
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, fn)
+    ctx = contextvars.copy_context()
+    return await loop.run_in_executor(None, lambda: ctx.run(fn))
 
 
 async def _driver_session_valida() -> bool:

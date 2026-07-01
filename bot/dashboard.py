@@ -267,6 +267,12 @@ VUE_DASHBOARD = """
             </div>
         </div>
 
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:15px;background:#16213e;padding:12px 15px;border-radius:8px;">
+            <strong style="color:#00ff88">🚀 Rodar todas</strong>
+            <span style="color:#aaa;font-size:0.85rem;flex:1;">Abre LinkedIn, Indeed e GeekHunter ao mesmo tempo (cada um no seu browser) e aplica</span>
+            <button @click="iniciarTodas" style="padding:8px 18px;background:#00ff88;border:none;border-radius:4px;color:#0f0f23;font-weight:bold;cursor:pointer;">▶ Iniciar as 3 Plataformas</button>
+        </div>
+
         <div class="linkedin-bar" style="background:#16213e;padding:12px 15px;border-radius:8px;margin-bottom:15px;display:flex;align-items:center;justify-content:space-between;gap:15px;">
             <div style="display:flex;align-items:center;gap:10px;">
                 <strong style="color:#00d4ff">🔗 LinkedIn</strong>
@@ -733,6 +739,18 @@ VUE_DASHBOARD = """
                 if (u.includes('linkedin.com')) return 'linkedin';
                 if (u.includes('indeed.com') || u.includes('br.indeed.com')) return 'indeed';
                 return '';
+            },
+            async iniciarTodas() {
+                // Dispara as 3 plataformas em paralelo. Cada endpoint agenda uma task
+                // de fundo (background) no backend e retorna na hora — os 3 Firefox
+                // sobem juntos, cada um no seu perfil (firefox_profile/<plataforma>).
+                this.showNotif('🚀 Iniciando LinkedIn + Indeed + GeekHunter em paralelo...', 'info');
+                await Promise.allSettled([
+                    this.aplicarVagasVisiveisLinkedin(),
+                    this.aplicarVagasVisiveisIndeed(),
+                    this.aplicarVagasVisiveisGeekhunter(),
+                ]);
+                await this.carregarAutomacao();
             },
             async extrairVagasLinkedin() {
                 this.showNotif('📥 Extraindo vagas da página do LinkedIn... aguarde até 30s', 'info');

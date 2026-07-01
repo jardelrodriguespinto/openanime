@@ -57,7 +57,10 @@
       "Bash(python -c \"import multipart; print\\('python-multipart OK'\\)\")",
       "Bash(grep -rniE \"nome_real|CANDIDATO|_NOME|_TELEFONE|_PHONE|getenv\\\\\\(.{0,3}\\(NOME|TELEFONE|PHONE\\)\" automation/)",
       "Bash(python -c \"import ast; ast.parse\\(open\\('bot/dashboard.py'\\).read\\(\\)\\); ast.parse\\(open\\('graph/neo4j_client.py'\\).read\\(\\)\\); print\\('sintaxe OK'\\)\")",
-      "Bash(python -c \"import ast; ast.parse\\(open\\('automation/geekhunter_selenium.py'\\).read\\(\\)\\); print\\('sintaxe OK'\\)\")"
+      "Bash(python -c \"import ast; ast.parse\\(open\\('automation/geekhunter_selenium.py'\\).read\\(\\)\\); print\\('sintaxe OK'\\)\")",
+      "Bash(python3 -c ' *)",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('bot/dashboard.py'\\).read\\(\\)\\); ast.parse\\(open\\('automation/selenium_browser.py'\\).read\\(\\)\\); print\\('OK sintaxe'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('automation/indeed_selenium.py'\\).read\\(\\)\\); ast.parse\\(open\\('automation/geekhunter_selenium.py'\\).read\\(\\)\\); print\\('OK: sintaxe válida nos dois arquivos'\\)\")"
     ],
     "additionalDirectories": [
       "/tmp/claude-1000/-home-jard-Documents-projetos-openanime/1a53c565-4c8f-4f74-a284-3b4533a83336/scratchpad"

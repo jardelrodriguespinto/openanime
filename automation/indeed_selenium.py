@@ -1590,10 +1590,21 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
     if not extra.get("sucesso"):
         return {"sucesso": False, "aplicacoes": [], "mensagem": extra.get("mensagem", "Falha ao extrair vagas")}
 
-    elegiveis = [v for v in extra.get("vagas", []) if v.get("easy_apply")]
+    todas = extra.get("vagas", [])
+    elegiveis = [v for v in todas if v.get("easy_apply")]
+    # Fallback: se a heurística de "Candidatura simplificada" (string no innerHTML do
+    # card) não marcou NENHUMA vaga, NÃO desiste — era exatamente isso que fazia o
+    # Indeed "logar e não fazer nada": o rótulo no card muda de tempos em tempos e
+    # zerava `elegiveis`. Cai pra TODAS as vagas e deixa o aplicar() decidir de
+    # verdade — ele clica o botão Indeed Apply e devolve 'sem_indeed_apply' pras que
+    # não têm candidatura simplificada (tratado como pulada abaixo, sem contar falha).
     if not elegiveis:
-        return {"sucesso": True, "aplicacoes": [],
-                "mensagem": "Nenhuma vaga com Candidatura Simplificada na página."}
+        if not todas:
+            return {"sucesso": True, "aplicacoes": [],
+                    "mensagem": "Nenhuma vaga encontrada na busca do Indeed."}
+        print(f"[INDEED] Nenhuma vaga pré-marcada como Candidatura Simplificada — "
+              f"tentando todas ({len(todas)}) e deixando o aplicar() checar de verdade")
+        elegiveis = todas
 
     resultados = {"sucesso": True, "aplicacoes": [], "falhas": 0}
     aplicadas = 0
@@ -1627,7 +1638,10 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
             logger.error("aplicar_vagas_visiveis: erro em %s: %s", vaga.get("url"), e)
             res = {"sucesso": False, "mensagem": str(e)}
 
-        if res.get("pulada"):
+        # 'pulada' (sem match) ou vaga sem Candidatura Simplificada de verdade
+        # (gate real do aplicar(), especialmente no fallback acima): segue para a
+        # próxima SEM contar como falha — não é erro, só não é aplicável.
+        if res.get("pulada") or res.get("motivo_falha") == "sem_indeed_apply":
             continue
 
         status = "candidatado" if res.get("sucesso") else "tentativa_falhou"

@@ -728,6 +728,73 @@ async def _fechar_modal_atencao(driver) -> None:
         pass
 
 
+# ── Instrumentação (fim do chute) ─────────────────────────────────────────────
+# O apply do GeekHunter falha por depender de rótulos/frases que não conhecemos do
+# DOM real. Antes de mais um "fix" às cegas, este dump captura a VERDADE em UM run:
+# URL, inventário de TODOS os botões visíveis (o rótulo do botão final — 'Finalizar'?
+# 'Enviar'? — e se é <a>/<button>/type) e dos campos, mais um trecho do HTML. Espelha
+# o _linkedin_form_debug.txt. Gate por env; ligado por padrão pra já capturar agora.
+
+def _dump_geek_debug_sync(driver, tag: str = "") -> str:
+    import os
+    try:
+        try:
+            url = driver.current_url
+        except Exception:
+            url = ""
+        botoes = []
+        for b in driver.find_elements(By.CSS_SELECTOR, "button, [role='button'], a"):
+            try:
+                if not b.is_displayed():
+                    continue
+                txt = (b.text or "").strip().replace("\n", " ")
+                aria = (b.get_attribute("aria-label") or "").strip()
+                tipo = (b.get_attribute("type") or "").strip()
+                if not (txt or aria):
+                    continue
+                botoes.append(f"<{b.tag_name}> type='{tipo}' text='{txt[:70]}' aria='{aria[:40]}'")
+            except Exception:
+                continue
+        campos = []
+        for c in driver.find_elements(By.CSS_SELECTOR, "input, textarea, select"):
+            try:
+                if not c.is_displayed():
+                    continue
+                campos.append(
+                    f"<{c.tag_name}> type='{c.get_attribute('type') or ''}' "
+                    f"name='{c.get_attribute('name') or ''}' "
+                    f"placeholder='{c.get_attribute('placeholder') or ''}' "
+                    f"value='{(c.get_attribute('value') or '')[:30]}'"
+                )
+            except Exception:
+                continue
+        try:
+            html = driver.page_source
+        except Exception:
+            html = ""
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_geekhunter_form_debug.txt")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"\n\n========== DUMP [{tag}] url={url} ==========\n")
+            f.write("--- BOTÕES VISÍVEIS ---\n" + "\n".join(botoes) + "\n")
+            f.write("--- CAMPOS ---\n" + "\n".join(campos) + "\n")
+            f.write("--- HTML (8000 chars) ---\n" + (html or "")[:8000])
+        print(f"[GEEK] DOM salvo em: {path} (tag={tag})")
+        return path
+    except Exception as e:
+        print(f"[GEEK] _dump_geek_debug falhou: {e}")
+        return ""
+
+
+async def _dump_geek_debug(driver, tag: str = "") -> None:
+    """Wrapper async do dump — no-op se GEEK_HUNTER_DEBUG=false. Nunca quebra o fluxo."""
+    if os.getenv("GEEK_HUNTER_DEBUG", "true").lower() != "true":
+        return
+    try:
+        await _run_in_thread(lambda: _dump_geek_debug_sync(driver, tag))
+    except Exception:
+        pass
+
+
 async def _preencher_e_enviar_formulario(driver, perfil: dict, resumo_curriculo: str,
                                          idioma: str, vaga_titulo: str, vaga_url: str,
                                          curriculo_path: str = "") -> dict:
@@ -800,6 +867,10 @@ async def _preencher_e_enviar_formulario(driver, perfil: dict, resumo_curriculo:
         except Exception:
             sig_antes = ""
 
+        # Instrumentação: captura o DOM REAL logo antes de decidir o clique — é aqui
+        # que se vê o rótulo do botão final e se o form abriu inline/modal.
+        await _dump_geek_debug(driver, f"step{step}-antes-clique")
+
         # Candidatar (envio) > Continuar (avança).
         btn_text, clicou = await _clicar_botao_smartapply(driver, _BTN_CANDIDATAR)
         is_submit = clicou
@@ -818,6 +889,10 @@ async def _preencher_e_enviar_formulario(driver, perfil: dict, resumo_curriculo:
 
         print(f"[GEEK] Step {step}: clicou '{btn_text[:40]}'")
         await asyncio.sleep(3 if is_submit else 2)
+
+        # Instrumentação: captura o DOM logo após o clique — mostra a tela de
+        # confirmação real (as frases de sucesso) ou o próximo step do form.
+        await _dump_geek_debug(driver, f"step{step}-apos-clique-{btn_text[:20]}")
 
         # "Finalizar candidatura" = ENVIO FINAL → candidatura enviada. (Só 'finalizar'
         # pra não confundir com botões intermediários como 'Continuar'/'Candidatar-se'
