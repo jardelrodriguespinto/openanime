@@ -245,6 +245,16 @@ VUE_DASHBOARD = """
             <button @click="aplicarVagasVisiveisLinkedin" style="padding:8px 16px;background:#00ff88;border:none;border-radius:4px;color:#0f0f23;font-weight:bold;cursor:pointer;">🤖 Aplicar Vagas Visíveis</button>
         </div>
 
+        <div class="indeed-bar" style="background:#16213e;padding:12px 15px;border-radius:8px;margin-bottom:15px;display:flex;align-items:center;justify-content:space-between;gap:15px;flex-wrap:wrap;">
+            <div style="display:flex;align-items:center;gap:10px;">
+                <strong style="color:#2557a7">🟦 Indeed</strong>
+                <span style="color:#aaa;font-size:0.85rem;">Busca por palavra-chave e aplica só em Candidatura Simplificada</span>
+            </div>
+            <input v-model="queryBusca" placeholder="Palavra-chave (ex: desenvolvedor python)" style="flex:1;min-width:200px;padding:8px;border-radius:4px;background:#1a1a2e;color:#fff;border:1px solid #2557a7;">
+            <button @click="extrairVagasIndeed" style="padding:8px 16px;background:#2557a7;border:none;border-radius:4px;color:#fff;font-weight:bold;cursor:pointer;">🔎 Buscar Vagas Indeed</button>
+            <button @click="aplicarVagasVisiveisIndeed" style="padding:8px 16px;background:#00ff88;border:none;border-radius:4px;color:#0f0f23;font-weight:bold;cursor:pointer;">🤖 Aplicar Vagas Indeed</button>
+        </div>
+
         <div style="background:#16213e;padding:12px 15px;border-radius:8px;margin-bottom:15px;">
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
                 <strong style="color:#00d4ff">📝 Currículo / Informações Pessoais</strong>
@@ -368,6 +378,7 @@ VUE_DASHBOARD = """
                 automacao: {running: false, action: 'idle', platform: '', vagas_processadas: 0, ultima_mensagem: '', updated_at: ''},
                 history: [],
                 busca: '',
+                queryBusca: '',
                 filtroStatus: '',
                 browser: {screenshot: '', url: '', title: ''},
                 browserControl: {paused: false, current_action: 'idle', manual_input: '', intervention_type: null},
@@ -490,7 +501,7 @@ VUE_DASHBOARD = """
                     const r = await fetch('/api/vagas/buscar', {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({query: this.busca || 'desenvolvedor', platform: this.plataformaSelecionada})
+                        body: JSON.stringify({query: this.queryBusca || this.busca || 'desenvolvedor', platform: this.plataformaSelecionada})
                     });
                     const d = await r.json();
                     if (!d.success) this.showNotif('Erro ao iniciar busca: ' + (d.message || ''), 'error');
@@ -679,6 +690,56 @@ VUE_DASHBOARD = """
                     this.showNotif('Erro de conexão', 'error');
                 }
             },
+            async extrairVagasIndeed() {
+                this.showNotif('🔎 Buscando vagas no Indeed... aguarde (login/verificação pode ser manual)', 'info');
+                try {
+                    const r = await fetch('/api/automacao/extrair-vagas-indeed', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({max_vagas: 20, query: this.queryBusca || this.busca || ''})
+                    });
+                    const d = await r.json();
+                    if (d.success) {
+                        await this.carregarAutomacao();
+                        const prevCount = this.vagas.length;
+                        let polls = 0;
+                        const check = setInterval(async () => {
+                            await this.carregarVagas();
+                            polls++;
+                            if (this.vagas.length > prevCount) {
+                                clearInterval(check);
+                                this.showNotif('✅ ' + this.vagas.length + ' vagas carregadas!', 'success');
+                            } else if (polls >= 15) {
+                                clearInterval(check);
+                                this.showNotif('Busca concluída — atualize a lista para ver vagas novas', 'info');
+                            }
+                        }, 3000);
+                    } else {
+                        this.showNotif('❌ Falha na busca: ' + (d.message || ''), 'error');
+                    }
+                } catch(e) {
+                    this.showNotif('Erro de conexão ao buscar vagas no Indeed', 'error');
+                }
+            },
+            async aplicarVagasVisiveisIndeed() {
+                this.showNotif('🤖 Iniciando aplicação nas vagas do Indeed...', 'info');
+                try {
+                    const r = await fetch('/api/automacao/aplicar-vagas-visiveis-indeed', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({max_vagas: 5, query: this.queryBusca || this.busca || ''})
+                    });
+                    const d = await r.json();
+                    if (d.success) {
+                        this.showNotif('✅ Aplicação iniciada! Acompanhe o browser abaixo.', 'success');
+                        this.automacao = {...this.automacao, running: true, action: 'aplicando', platform: 'indeed'};
+                    } else {
+                        this.showNotif('❌ Falha: ' + (d.message || 'Erro ao iniciar'), 'error');
+                    }
+                } catch(e) {
+                    this.showNotif('Erro de conexão', 'error');
+                }
+            },
             async carregarResumoCurriculo() {
                 try {
                     const r = await fetch('/api/perfil/resumo-curriculo');
@@ -835,6 +896,17 @@ async def buscar_vagas_dashboard(request: Request):
                     vagas = resultado.get("vagas", [])
                     for v in vagas:
                         v["fonte"] = v.get("fonte") or "LinkedIn"
+                elif plataforma == "indeed":
+                    from automation.indeed_selenium import extrair_vagas_da_busca as extrair_vagas_indeed
+
+                    _set_automacao_status(True, "buscando", "indeed", f"Abrindo Indeed para buscar: {query}")
+                    set_browser_current_step("busca_indeed", "navegando", f"Query: {query}")
+                    emit_status_update()
+
+                    resultado = await extrair_vagas_indeed({}, max_vagas=20, query=query)
+                    vagas = resultado.get("vagas", [])
+                    for v in vagas:
+                        v["fonte"] = v.get("fonte") or "Indeed"
                 else:
                     vagas = await buscar_vagas_browser_use(query)
             except Exception as e:
@@ -863,8 +935,12 @@ async def buscar_vagas_dashboard(request: Request):
             emit_status_update()
 
             async def _auto_aplicar():
-                vagas_linkedin_ea = [v for v in vagas if (v.get("fonte") or "") == "LinkedIn" and v.get("easy_apply")]
-                if not vagas_linkedin_ea:
+                # Aplica automaticamente em vagas "simplificadas" (Easy Apply/Indeed
+                # Apply) da fonte pesquisada. plataforma_run governa a fonte do lote.
+                fonte_alvo = "Indeed" if plataforma == "indeed" else "LinkedIn"
+                plataforma_run = "indeed" if plataforma == "indeed" else "linkedin"
+                vagas_ea = [v for v in vagas if (v.get("fonte") or "") == fonte_alvo and v.get("easy_apply")]
+                if not vagas_ea:
                     return
                 try:
                     from graph.neo4j_client import get_neo4j
@@ -873,13 +949,13 @@ async def buscar_vagas_dashboard(request: Request):
 
                     neo4j = get_neo4j()
                     perfil = neo4j.get_perfil_profissional(user_id) or {}
-                    lote = vagas_linkedin_ea[:5]
+                    lote = vagas_ea[:5]
                     for i, vaga in enumerate(lote):
-                        _set_automacao_status(True, "aplicando", "linkedin", f"Aplicando em {vaga.get('empresa','?')} ({i+1}/{len(lote)})")
+                        _set_automacao_status(True, "aplicando", plataforma_run, f"Aplicando em {vaga.get('empresa','?')} ({i+1}/{len(lote)})")
                         set_browser_current_step("auto_" + str(i), "aplicando", f"Vaga {i+1}: {vaga.get('titulo','')[:40]}")
                         emit_status_update()
                         try:
-                            resultado = await executar_candidatura(user_id, vaga, perfil, "linkedin")
+                            resultado = await executar_candidatura(user_id, vaga, perfil, plataforma_run)
                             status = "candidatado" if resultado.get("sucesso") else "tentativa_falhou"
                         except Exception as e:
                             logger.error(f"Erro auto-aplicando vaga {vaga.get('url')}: {e}")
@@ -888,13 +964,13 @@ async def buscar_vagas_dashboard(request: Request):
                             neo4j.registrar_candidatura(
                                 user_id=user_id,
                                 vaga_id=vaga.get("id", vaga.get("url", "")),
-                                plataforma="linkedin",
+                                plataforma=plataforma_run,
                                 status=status,
                             )
                         except Exception:
                             pass
 
-                    _set_automacao_status(False, "idle", "linkedin", f"Auto-aplicação concluída: {len(lote)} vagas processadas")
+                    _set_automacao_status(False, "idle", plataforma_run, f"Auto-aplicação concluída: {len(lote)} vagas processadas")
                     set_browser_current_step("auto_fim", "concluido", "Auto-aplicação finalizada")
                     try:
                         await fechar_browser_linkedin()
@@ -1166,6 +1242,119 @@ async def aplicar_vagas_visiveis_linkedin_endpoint(request: Request):
 
     _track_task(_run_apply_visiveis())
     return JSONResponse({"success": True, "message": f"Iniciando aplicação em até {max_vagas} vagas visíveis no LinkedIn"})
+
+
+@fastapi_app.post("/api/automacao/extrair-vagas-indeed")
+async def extrair_vagas_indeed_endpoint(request: Request):
+    """Extrai vagas da busca do Indeed (usa a palavra-chave customizável do dashboard)."""
+    body = await request.json()
+    max_vagas = int(body.get("max_vagas", 20))
+    query = (body.get("query") or "").strip()
+    user_id = os.getenv("DASHBOARD_USER_ID", "admin")
+
+    try:
+        from automation.browser import set_intervention_state, get_intervention_state
+        ctrl = await get_intervention_state()
+        if ctrl.get("current_action") == "parar":
+            await set_intervention_state("current_action", "rodando")
+    except Exception:
+        pass
+
+    async def _run_extracao():
+        try:
+            from graph.neo4j_client import get_neo4j
+            from automation.indeed_selenium import extrair_vagas_da_busca
+
+            neo4j = get_neo4j()
+            perfil = neo4j.get_perfil_profissional(user_id) or {}
+
+            _set_automacao_status(True, "extraindo", "indeed", f"Buscando no Indeed: {query or 'padrão'}")
+            set_browser_current_step("extracao_indeed", "extraindo", f"Buscando até {max_vagas} vagas")
+            emit_status_update()
+
+            resultado = await extrair_vagas_da_busca(perfil, max_vagas=max_vagas, query=query)
+
+            if resultado.get("sucesso"):
+                vagas = resultado.get("vagas", [])
+                for vaga in vagas:
+                    try:
+                        neo4j.upsert_vaga({
+                            "id": vaga.get("id", ""),
+                            "titulo": vaga.get("titulo", ""),
+                            "empresa": vaga.get("empresa", ""),
+                            "url": vaga.get("url", ""),
+                            "fonte": vaga.get("fonte", "Indeed"),
+                            "salario": vaga.get("salario", ""),
+                            "modalidade": vaga.get("modalidade", ""),
+                            "descricao": vaga.get("descricao", "")[:500],
+                        })
+                    except Exception:
+                        pass
+
+                _set_automacao_status(False, "idle", "indeed", f"Extraídas {len(vagas)} vagas do Indeed")
+                set_browser_current_step("extracao_indeed_fim", "concluido", f"{len(vagas)} vagas salvas")
+            else:
+                _set_automacao_status(False, "idle", "indeed", resultado.get("mensagem", "Falha na extração"))
+                set_browser_current_step("extracao_indeed_fim", "falha", resultado.get("mensagem", ""))
+
+            emit_status_update()
+        except Exception as e:
+            logger.error(f"Erro em extrair_vagas_indeed: {e}")
+            _set_automacao_status(False, "erro", "indeed", str(e))
+            set_browser_current_step("extracao_indeed_fim", "falha", str(e))
+            emit_status_update()
+
+    _track_task(_run_extracao())
+    return JSONResponse({"success": True, "message": f"Extraindo até {max_vagas} vagas do Indeed"})
+
+
+@fastapi_app.post("/api/automacao/aplicar-vagas-visiveis-indeed")
+async def aplicar_vagas_visiveis_indeed_endpoint(request: Request):
+    """Aplica em vagas com Candidatura Simplificada (Indeed Apply) da busca atual."""
+    body = await request.json()
+    max_vagas = int(body.get("max_vagas", 5))
+    query = (body.get("query") or "").strip()
+    user_id = os.getenv("DASHBOARD_USER_ID", "admin")
+
+    try:
+        from automation.browser import set_intervention_state, get_intervention_state
+        ctrl = await get_intervention_state()
+        if ctrl.get("current_action") == "parar":
+            await set_intervention_state("current_action", "rodando")
+    except Exception:
+        pass
+
+    async def _run_apply_visiveis():
+        try:
+            from automation.indeed_selenium import aplicar_vagas_visiveis_na_pagina, extrair_vagas_da_busca
+            from graph.neo4j_client import get_neo4j
+
+            neo4j = get_neo4j()
+            perfil = neo4j.get_perfil_profissional(user_id) or {}
+
+            _set_automacao_status(True, "aplicando", "indeed", f"Aplicando em até {max_vagas} vagas do Indeed")
+            set_browser_current_step("visiveis_indeed", "aplicando", "Buscando vagas na página")
+            emit_status_update()
+
+            # Se veio palavra-chave nova, refaz a busca antes de aplicar.
+            if query:
+                await extrair_vagas_da_busca(perfil, max_vagas=max(max_vagas * 3, 15), query=query)
+
+            resultado = await aplicar_vagas_visiveis_na_pagina(perfil, max_vagas, user_id)
+
+            _set_automacao_status(
+                False, "finalizando", "indeed",
+                f"Concluído: {len(resultado.get('aplicacoes', []))} vagas processadas"
+            )
+            set_browser_current_step("visiveis_indeed_fim", "concluido", resultado.get("mensagem", ""))
+            emit_status_update()
+        except Exception as e:
+            logger.error(f"Erro em aplicar_vagas_visiveis_indeed: {e}")
+            _set_automacao_status(False, "erro", "indeed", str(e))
+            emit_status_update()
+
+    _track_task(_run_apply_visiveis())
+    return JSONResponse({"success": True, "message": f"Iniciando aplicação em até {max_vagas} vagas do Indeed"})
 
 
 def _detectar_plataforma(url: str) -> str:

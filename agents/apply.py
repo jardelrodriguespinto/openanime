@@ -383,13 +383,13 @@ async def executar_candidatura(user_id: str, vaga: dict, perfil: dict, plataform
         await notify_browser_step("inicio", "aplicando", f"Plataforma: {plataforma} | URL: {vaga_url}")
         if plataforma == "linkedin":
             from automation.linkedin_selenium import aplicar as linkedin_aplicar
-            resultado = await linkedin_aplicar(vaga_url, perfil, curriculo_path)
+            resultado = await linkedin_aplicar(vaga_url, perfil, curriculo_path, user_id=user_id)
         elif plataforma == "gupy":
             from automation.gupy_selenium import aplicar as gupy_aplicar
             resultado = await gupy_aplicar(vaga_url, perfil, curriculo_path)
         elif plataforma == "indeed":
             from automation.indeed_selenium import aplicar as indeed_aplicar
-            resultado = await indeed_aplicar(vaga_url, perfil, curriculo_path)
+            resultado = await indeed_aplicar(vaga_url, perfil, curriculo_path, user_id=user_id)
         elif plataforma in ("greenhouse", "lever"):
             resultado = await _aplicar_generico(vaga_url, perfil, curriculo_path, plataforma)
         else:

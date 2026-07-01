@@ -7,6 +7,13 @@ não ultrapassa o teto.
 
 .env:
   LINKEDIN_TETO_APLICACOES=50   # 0 ou ausente = sem teto (usa max_vagas por run)
+  INDEED_TETO_APLICACOES=50     # idem, contagem/teto separados para o Indeed
+
+Cada plataforma tem sua própria chave no Redis e sua própria variável de teto.
+As funções de módulo (get_teto/get_count/...) mantêm o comportamento antigo do
+LinkedIn. Para o Indeed use o objeto pronto `INDEED` (PlatformCounter), que amarra
+prefixo + env num só lugar — assim nenhum call site esquece um argumento e faz o
+Indeed incrementar o contador do LinkedIn.
 
 Reset (começar um novo lote): apague a chave no Redis ou chame reset_count().
 """
@@ -79,3 +86,56 @@ def teto_atingido(user_id: str = "admin") -> bool:
     if teto <= 0:
         return False
     return get_count(user_id) >= teto
+
+
+class PlatformCounter:
+    """Contador por plataforma: amarra o prefixo da chave Redis e a env do teto
+    num só objeto. Assim o código do Indeed usa `INDEED.incr_count(...)` sem risco
+    de mexer no contador do LinkedIn por um argumento esquecido."""
+
+    def __init__(self, prefix: str, teto_env: str):
+        self._key = prefix + ":aplicacoes:{user_id}"
+        self._teto_env = teto_env
+
+    def get_teto(self) -> int:
+        try:
+            return int(os.getenv(self._teto_env, "0"))
+        except (TypeError, ValueError):
+            return 0
+
+    def get_count(self, user_id: str = "admin") -> int:
+        r = _redis()
+        if not r:
+            return 0
+        try:
+            v = r.get(self._key.format(user_id=user_id))
+            return int(v) if v else 0
+        except Exception:
+            return 0
+
+    def incr_count(self, user_id: str = "admin", n: int = 1) -> int:
+        r = _redis()
+        if not r:
+            return 0
+        try:
+            return int(r.incrby(self._key.format(user_id=user_id), n))
+        except Exception:
+            return 0
+
+    def reset_count(self, user_id: str = "admin") -> None:
+        r = _redis()
+        if r:
+            try:
+                r.delete(self._key.format(user_id=user_id))
+            except Exception:
+                pass
+
+    def teto_atingido(self, user_id: str = "admin") -> bool:
+        teto = self.get_teto()
+        if teto <= 0:
+            return False
+        return self.get_count(user_id) >= teto
+
+
+# Contador dedicado do Indeed — chave 'indeed:aplicacoes:*' e env INDEED_TETO_APLICACOES.
+INDEED = PlatformCounter("indeed", "INDEED_TETO_APLICACOES")
