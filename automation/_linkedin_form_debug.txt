@@ -1,0 +1,214 @@
+=== INVENTÁRIO DE CONTROLES ===
+
+
+=== HTML DO MODAL ===
+<div data-test-modal="" role="dialog" tabindex="-1" class="artdeco-modal artdeco-modal--layer-default jobs-easy-apply-modal" size="large" aria-labelledby="jobs-apply-header">
+        <span class="a11y-text">Início do conteúdo do diálogo.</span>
+            <button aria-label="Fechar" id="ember593" class="artdeco-button artdeco-button--circle artdeco-button--muted artdeco-button--2 artdeco-button--tertiary ember-view artdeco-modal__dismiss" data-test-modal-close-btn="">        <svg role="none" aria-hidden="true" class="artdeco-button__icon " xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" data-supported-dps="24x24" data-test-icon="close-medium">
+<!---->    
+    <use href="#close-medium" width="24" height="24"></use>
+</svg>
+
+
+<span class="artdeco-button__text">
+    
+</span></button>
+        
+      <div id="ember594" class="artdeco-modal__header ember-view">
+        <h2 id="jobs-apply-header">
+          Candidate-se na CI&amp;T
+        </h2>
+      
+<!----></div>
+      <div id="ember595" class="artdeco-modal__content jobs-easy-apply-modal__content p0 ember-view">
+        
+    <div class="mPCFftAXWsEqlPFqQljVNBiMdWWVnDQQcg" tabindex="-1" aria-label="O andamento da sua candidatura está em 9 porcento." role="region">
+        <div class="display-flex ph5 pv2">
+          <div id="ember596" class="flex-grow-1 artdeco-completeness-meter-linear ember-view"><div class="artdeco-completeness-meter-linear__progress-container ">
+  <progress max="100" value="9" class="artdeco-completeness-meter-linear__progress-element" aria-valuetext="Valor atual: 9" aria-valuemin="0" aria-valuenow="9" aria-valuemax="100" style="--offset-value: 9%;">
+    Valor atual: 9
+  </progress>
+<!----></div>
+<!----></div>
+          <span class="pl3 t-14 t-black--light" aria-label="O andamento da sua candidatura está em 9 porcento." role="note">
+            9%
+          </span>
+        </div>
+
+      <div>
+          
+    <form>
+        <div class="ph5">
+            
+    <div class="uZdebQGVHHNfuHAoruDmMWFdxnaIsCqhJdz">
+        <h3 class="t-16 t-bold">
+          Resume
+        </h3>
+<!----><!---->        
+        
+    <div class="full-width mt1 full-width display-flex flex-column">
+      <span class="t-14
+          jobs-document-upload__title--is-required">
+          Be sure to include an updated resume
+      </span>
+        <div class="mt2">
+            
+    <div class="ui-attachment jobs-document-upload-redesign-card__container
+        jobs-document-upload-redesign-card__container--cursor-pointer
+        
+        
+        
+        ui-attachment--pdf" tabindex="0" aria-label="Select this resume">
+      <p class="jobs-document-upload-redesign-card__header truncate" aria-labelledby="jobsDocumentCardToggleLabel-ember611">
+        <h3 class="t-12 t-bold jobs-document-upload-redesign-card__file-name
+            
+            truncate">
+          curriculo.pdf
+        </h3>
+        <p class="pt1 t-12 t-black--light">
+            57 KB · Última utilização em 01/07/2026
+        </p>
+      </p>
+
+        <div class="display-flex flex-direction-row">
+          <button aria-label="Baixar resume curriculo.pdf" id="ember612" class="artdeco-button artdeco-button--circle artdeco-button--muted artdeco-button--2 artdeco-button--tertiary ember-view jobs-document-upload-redesign-card__download-button jobs-document-upload-redesign-card__action-button" type="button">        <svg role="none" aria-hidden="true" class="artdeco-button__icon " xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" data-supported-dps="24x24" data-test-icon="download-medium">
+<!---->    
+    <use href="#download-medium" width="24" height="24"></use>
+</svg>
+
+
+<span class="artdeco-button__text">
+    
+</span></button>
+          <div class="jobs-document-upload-redesign-card__divider"></div>
+            <input id="jobsDocumentCardToggle-ember611" type="radio">
+          <label id="jobsDocumentCardToggleLabel-ember611" class="jobs-document-upload-redesign-card__toggle-label t-bold" for="jobsDocumentCardToggle-ember611">
+            <span class="a11y-text">
+              Selecionar resume curriculo.pdf
+            </span>
+          </label>
+        </div>
+          </div>
+<!---->  
+            
+    <div class="ui-attachment jobs-document-upload-redesign-card__container
+        jobs-document-upload-redesign-card__container--cursor-pointer
+        
+        
+        
+        ui-attachment--pdf" tabindex="0" aria-label="Select this resume">
+      <p class="jobs-document-upload-redesign-card__header truncate" aria-labelledby="jobsDocumentCardToggleLabel-ember613">
+        <h3 class="t-12 t-bold jobs-document-upload-redesign-card__file-name
+            
+            truncate">
+          resume.pdf
+        </h3>
+        <p class="pt1 t-12 t-black--light">
+            64 KB · Última utilização em 01/07/2026
+        </p>
+      </p>
+
+        <div class="display-flex flex-direction-row">
+          <button aria-label="Baixar resume resume.pdf" id="ember614" class="artdeco-button artdeco-button--circle artdeco-button--muted artdeco-button--2 artdeco-button--tertiary ember-view jobs-document-upload-redesign-card__download-button jobs-document-upload-redesign-card__action-button" type="button">        <svg role="none" aria-hidden="true" class="artdeco-button__icon " xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" data-supported-dps="24x24" data-test-icon="download-medium">
+<!---->    
+    <use href="#download-medium" width="24" height="24"></use>
+</svg>
+
+
+<span class="artdeco-button__text">
+    
+</span></button>
+          <div class="jobs-document-upload-redesign-card__divider"></div>
+            <input id="jobsDocumentCardToggle-ember613" type="radio">
+          <label id="jobsDocumentCardToggleLabel-ember613" class="jobs-document-upload-redesign-card__toggle-label t-bold" for="jobsDocumentCardToggle-ember613">
+            <span class="a11y-text">
+              Selecionar resume resume.pdf
+            </span>
+          </label>
+        </div>
+          </div>
+<!---->  
+        </div>
+
+<!---->
+      <div class="display-flex
+          ">
+          <div class="js-jobs-document-upload__container
+              display-flex flex-wrap" tabindex="-1">
+            <label class="jobs-document-upload__upload-button artdeco-button artdeco-button--secondary artdeco-button--2 mt2" for="jobs-document-upload-file-input-upload-resume-urn:li:fsu_jobApplicationFileUploadFormElement:urn:li:jobs_applyformcommon_easyApplyFormElement:(4430948980,33307683050,document)" tabindex="0" aria-controls="jobs-document-upload-file-input-upload-resume-urn:li:fsu_jobApplicationFileUploadFormElement:urn:li:jobs_applyformcommon_easyApplyFormElement:(4430948980,33307683050,document)">
+              <span role="button" aria-label="Botão para carregar currículo. São aceitos apenas os formatos DOC, DOCX, PDF. Tamanho máximo do arquivo: (2 MB).">
+                Upload resume
+              </span>
+            </label>
+            <input name="file" class="hidden" id="jobs-document-upload-file-input-upload-resume-urn:li:fsu_jobApplicationFileUploadFormElement:urn:li:jobs_applyformcommon_easyApplyFormElement:(4430948980,33307683050,document)" accept="application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/pdf" type="file">
+
+              <p class="jobs-document-upload__format-text t-12 t-black--light full-width" aria-hidden="true">
+                DOC, DOCX, PDF (2 MB)
+              </p>
+
+              <div id="ember617" class="jobs-document-upload__input-error-text t-14 artdeco-inline-feedback artdeco-inline-feedback--error ember-view" role="alert">    <li-icon aria-hidden="true" type="error-pebble-icon" animate="true" class="artdeco-inline-feedback__icon" size="small"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" data-supported-dps="16x16" fill="currentColor" class="mercado-match" width="16" height="16" focusable="false">
+      <path d="M10.8 1H5.2L1 5.2v5.6L5.2 15h5.6l4.2-4.2V5.2zM12 9H4V7h8z"></path>
+    </svg></li-icon>
+
+  <span class="artdeco-inline-feedback__message">
+      A resume is required
+<!---->  </span>
+</div>
+          </div>
+
+<!---->
+          <div class="jobs-document-upload__show-more-less-button-container">
+              <button aria-label="+3 currículos" id="ember615" class="artdeco-button artdeco-button--icon-right artdeco-button--2 artdeco-button--tertiary ember-view jobs-document-upload__show-more-less-button" type="button">        <svg role="none" aria-hidden="true" class="artdeco-button__icon " xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" data-supported-dps="16x16" data-test-icon="chevron-down-small">
+<!---->    
+    <use href="#chevron-down-small" width="16" height="16"></use>
+</svg>
+
+
+<span class="artdeco-button__text">
+    +3 currículos
+</span></button>
+          </div>
+      </div>
+    </div>
+  
+  
+<!----><!----><!---->    </div>
+  
+
+<!---->
+<!---->        </div>
+
+        
+    <footer role="presentation">
+<!---->
+      <div class="jobs-easy-apply-footer__info">
+          <p class="t-12 t-black--light">
+            O envio desta candidatura não alterará seu perfil no LinkedIn.
+          </p>
+                  <p class="t-12 t-black--light mt1">
+              Candidatura via Lever. <a href="/help/linkedin/answer/71792?lang=pt_BR" target="_blank" rel="noopener noreferrer" class="link-without-visited-state" data-control-name="help_center_unify" aria-label="Visite a Central de Ajuda para saber mais" data-test-easy-apply-footer-ats-help="true">Central de Ajuda</a>
+          </p>
+      </div>
+      <div class="display-flex justify-flex-end ph5 pv4">
+          <button aria-label="Voltar para etapa anterior" id="ember616" class="mr2 artdeco-button artdeco-button--2 artdeco-button--tertiary ember-view" type="button"><!---->
+<span class="artdeco-button__text">
+    Voltar
+</span></button>
+
+          <button aria-label="Avançar para próxima etapa" id="ember610" class="artdeco-button artdeco-button--2 artdeco-button--primary ember-view" data-easy-apply-next-button="" data-live-test-easy-apply-next-button="" type="button"><!---->
+<span class="artdeco-button__text">
+    Avançar
+</span></button>
+              </div>
+    </footer>
+  
+    </form>
+  
+
+<!---->      </div>
+    </div>
+  
+      </div>
+    
+        <span class="a11y-text">Término do conteúdo do diálogo.</span>
+      </div>

@@ -11,6 +11,8 @@ import os
 import random
 from pathlib import Path
 
+from automation.run_context import get_platform
+
 logger = logging.getLogger(__name__)
 
 PLAYWRIGHT_HEADLESS = os.getenv("PLAYWRIGHT_HEADLESS", "false").lower() == "true"
@@ -25,13 +27,21 @@ _lock = asyncio.Lock()
 _active_page = None
 _active_page_lock = asyncio.Lock()
 
-_intervention_state = {
-    "paused": False,
-    "current_action": "idle",
-    "manual_input": "",
-    "intervention_type": None,
-    "intervention_selector": None,
-}
+# Estado de intervenção POR PLATAFORMA (LinkedIn e Indeed em paralelo, cada um com
+# sua própria pausa/manual). A plataforma vem do run_context (nas tasks) ou é
+# passada explicitamente (nos endpoints HTTP do dashboard, que controlam a
+# plataforma selecionada).
+def _default_intervention() -> dict:
+    return {
+        "paused": False,
+        "current_action": "idle",
+        "manual_input": "",
+        "intervention_type": None,
+        "intervention_selector": None,
+    }
+
+
+_intervention_states: dict = {}
 _intervention_lock = asyncio.Lock()
 _REDIS_INTERVENTION_KEY = "automacao:intervencao"
 
@@ -212,6 +222,7 @@ async def notify_browser_step(step: str = "", action: str = "", detail: str = ""
             "step": step or "",
             "action": action or "",
             "detail": detail or "",
+            "platform": get_platform(),
             "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
         }
         async with httpx.AsyncClient(timeout=httpx.Timeout(2.0)) as client:
@@ -278,15 +289,19 @@ async def sio_emit_browser_screenshot(data: dict):
         pass
 
 
-_global_step_info = {"step": "", "action": "", "detail": "", "updated_at": ""}
+_global_step_infos: dict = {}
 _step_lock = asyncio.Lock()
 
 
-async def set_current_step(step: str = "", action: str = "", detail: str = ""):
-    """Atualiza step atual em memoria e notifica dashboard."""
-    global _global_step_info
+def _default_step() -> dict:
+    return {"step": "", "action": "", "detail": "", "updated_at": ""}
+
+
+async def set_current_step(step: str = "", action: str = "", detail: str = "", platform: str = None):
+    """Atualiza step atual (da plataforma) em memoria."""
+    plat = platform or get_platform()
     async with _step_lock:
-        _global_step_info = {
+        _global_step_infos[plat] = {
             "step": step,
             "action": action,
             "detail": detail,
@@ -294,29 +309,35 @@ async def set_current_step(step: str = "", action: str = "", detail: str = ""):
         }
 
 
-async def get_current_step() -> dict:
+async def get_current_step(platform: str = None) -> dict:
+    plat = platform or get_platform()
     async with _step_lock:
-        return dict(_global_step_info)
+        return dict(_global_step_infos.get(plat, _default_step()))
 
 
-async def set_intervention_state(key: str, value):
-    """Atualiza estado de intervencao em memoria e persiste no Redis como cache."""
+async def set_intervention_state(key: str, value, platform: str = None):
+    """Atualiza estado de intervencao (da plataforma) em memoria e persiste no Redis.
+    platform=None → usa a plataforma do run_context (task de automação)."""
+    plat = platform or get_platform()
     async with _intervention_lock:
-        _intervention_state[key] = value
-        full = dict(_intervention_state)  # captura o estado atualizado com o lock
+        st = _intervention_states.setdefault(plat, _default_intervention())
+        st[key] = value
+        full = dict(st)  # captura o estado atualizado com o lock
     try:
         r = _get_redis()
         if r:
             # Salva direto sem reler Redis (evita sobrescrever a mudança recem feita)
-            r.setex(_REDIS_INTERVENTION_KEY, 3600, json.dumps(full, default=str))
+            r.setex(f"{_REDIS_INTERVENTION_KEY}:{plat}", 3600, json.dumps(full, default=str))
     except Exception:
         pass
 
 
-async def get_intervention_state() -> dict:
-    """Retorna copia do estado de intervencao (fonte de verdade: memoria)."""
+async def get_intervention_state(platform: str = None) -> dict:
+    """Retorna copia do estado de intervencao da plataforma (fonte de verdade: memoria).
+    platform=None → plataforma do run_context (task de automação)."""
+    plat = platform or get_platform()
     async with _intervention_lock:
-        return dict(_intervention_state)
+        return dict(_intervention_states.setdefault(plat, _default_intervention()))
 
 
 async def nova_pagina(stealth: bool = True):

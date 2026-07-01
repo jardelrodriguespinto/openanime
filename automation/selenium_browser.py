@@ -19,26 +19,77 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, InvalidSessionIdException, WebDriverException
 
+from automation.run_context import get_platform
+
 logger = logging.getLogger(__name__)
+
+# Registro de drivers POR PLATAFORMA (chave = run_context.get_platform()).
+# Permite LinkedIn e Indeed rodarem em paralelo, cada um no seu Firefox. Callers
+# sem plataforma definida (ex.: Gupy, endpoints HTTP) caem na chave "default".
+_drivers: dict = {}
 
 GECKODRIVER_PATH = os.getenv("GECKODRIVER_PATH", str(Path(__file__).parent.parent / "geckodriver"))
 FIREFOX_BINARY = os.getenv("FIREFOX_BINARY", "/snap/firefox/8568/usr/lib/firefox/firefox")
 PLAYWRIGHT_HEADLESS = os.getenv("PLAYWRIGHT_HEADLESS", "false").lower() == "true"
 
+# Perfil Firefox PERSISTENTE: mantém cookies/sessão entre runs. Assim o usuário
+# loga uma vez (ex.: Indeed, com código por e-mail) e não precisa passar por
+# verificação/CAPTCHA a cada execução — a maior causa do "Additional Verification
+# Required" era abrir um perfil zerado toda vez. Desligue com FIREFOX_PERSIST_PROFILE=false.
+FIREFOX_PERSIST_PROFILE = os.getenv("FIREFOX_PERSIST_PROFILE", "true").lower() == "true"
+FIREFOX_PROFILE_DIR = os.getenv(
+    "FIREFOX_PROFILE_DIR",
+    str(Path(__file__).parent.parent / "data" / "firefox_profile"),
+)
+
+
+def _preparar_profile_dir() -> str | None:
+    """Garante o diretório do perfil (SEPARADO por plataforma — dois Firefox não
+    podem compartilhar o mesmo perfil) e remove locks órfãos de um crash anterior.
+    Só mexe no diretório da PRÓPRIA plataforma."""
+    if not FIREFOX_PERSIST_PROFILE:
+        return None
+    try:
+        p = Path(FIREFOX_PROFILE_DIR) / get_platform()
+        p.mkdir(parents=True, exist_ok=True)
+        for lock in ("lock", ".parentlock", "parent.lock"):
+            f = p / lock
+            try:
+                if f.exists() or f.is_symlink():
+                    f.unlink()
+            except Exception:
+                pass
+        return str(p)
+    except Exception as e:
+        logger.warning("selenium_browser: falha ao preparar perfil persistente: %s", e)
+        return None
+
 
 def _get_driver():
-    """Cria instancia do Firefox com Selenium."""
+    """Cria instancia do Firefox com Selenium (perfil persistente por padrão)."""
     options = Options()
     options.binary_location = FIREFOX_BINARY
     options.headless = PLAYWRIGHT_HEADLESS
+
+    profile_dir = _preparar_profile_dir()
+    if profile_dir:
+        # Usa o perfil em disco EM PLACE (persiste cookies/sessão). Precede as prefs.
+        options.add_argument("-profile")
+        options.add_argument(profile_dir)
+        logger.info("selenium_browser: usando perfil persistente %s", profile_dir)
+
     if not PLAYWRIGHT_HEADLESS:
         options.set_preference("browser.startup.homepage", "about:blank")
         options.set_preference("browser.startup.page", 0)
     options.set_preference("dom.disable_beforeunload", True)
     options.set_preference("browser.tabs.warnOnClose", False)
-    options.set_preference("network.http.use-cache", False)
-    options.set_preference("browser.cache.disk.enable", False)
-    options.set_preference("browser.cache.memory.enable", False)
+    # Com perfil persistente NÃO desligamos o cache — cache/histórico ajudam a
+    # parecer um browser real e a reduzir verificações. Sem persistência, mantém
+    # o comportamento antigo (cache off) para não crescer disco à toa.
+    if not profile_dir:
+        options.set_preference("network.http.use-cache", False)
+        options.set_preference("browser.cache.disk.enable", False)
+        options.set_preference("browser.cache.memory.enable", False)
     options.set_preference("dom.webdriver.enabled", False)
     options.set_preference("browser.selfsupport.autostart", False)
 
@@ -79,8 +130,8 @@ async def nova_pagina(url: str = "about:blank", reutilizar: bool = False) -> web
     """Abre uma nova aba/guia no Firefox e navega para a URL.
     Se reutilizar=True e já existe um driver com sessão ativa, apenas navega para a URL na mesma aba.
     """
-    driver = getattr(nova_pagina, "_driver", None)
-    
+    driver = _drivers.get(get_platform())
+
     # Verifica se o driver existe e tem sessão válida
     if reutilizar and driver:
         sessao_ok = await _driver_session_valida()
@@ -88,12 +139,12 @@ async def nova_pagina(url: str = "about:blank", reutilizar: bool = False) -> web
             await _run_in_thread(driver.get, url)
             return driver
         # Sessão inválida - limpa driver antigo
-        nova_pagina._driver = None
+        _drivers.pop(get_platform(), None)
         try:
             await _run_in_thread(driver.quit)
         except Exception:
             pass
-    
+
     def _open():
         driver = _get_driver()
         driver.get(url)
@@ -104,13 +155,13 @@ async def nova_pagina(url: str = "about:blank", reutilizar: bool = False) -> web
 
 
 async def get_driver() -> webdriver.Firefox | None:
-    """Retorna driver existente ou None."""
-    return getattr(nova_pagina, "_driver", None)
+    """Retorna o driver da plataforma atual (run_context) ou None."""
+    return _drivers.get(get_platform())
 
 
 async def _set_driver(driver):
-    """Armazena driver globalmente."""
-    nova_pagina._driver = driver
+    """Armazena o driver da plataforma atual (run_context)."""
+    _drivers[get_platform()] = driver
 
 
 async def navegar(url: str):
@@ -437,8 +488,8 @@ async def fechar():
             await _run_in_thread(driver.quit)
         except (InvalidSessionIdException, Exception):
             pass
-        nova_pagina._driver = None
-        logger.info("selenium_browser: Firefox fechado")
+        _drivers.pop(get_platform(), None)
+        logger.info("selenium_browser: Firefox fechado (%s)", get_platform())
 
 
 async def _ensure_driver_alive():
@@ -449,7 +500,7 @@ async def _ensure_driver_alive():
             await _run_in_thread(lambda: driver.current_url)
             return True
     except (InvalidSessionIdException, Exception):
-        nova_pagina._driver = None
+        _drivers.pop(get_platform(), None)
     return False
 
 
@@ -531,7 +582,7 @@ async def clicar_entrar_com_email(driver):
                     return True
         except (InvalidSessionIdException, WebDriverException) as e:
             print(f"[SELENIUM] Sessão inválida ao clicar em {sel}: {type(e).__name__}")
-            nova_pagina._driver = None
+            _drivers.pop(get_platform(), None)
             raise
         except StaleElementReferenceException:
             continue

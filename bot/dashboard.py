@@ -24,7 +24,8 @@ ADMIN_USER = os.getenv("DASHBOARD_USER", "admin")
 ADMIN_PASS = os.getenv("DASHBOARD_PASS", "")
 SECRET_KEY = os.getenv("DASHBOARD_SECRET", "change-me-in-production")
 
-# Estado global da automação
+# Estado global da automação (visão agregada — último a escrever) + por plataforma,
+# para LinkedIn e Indeed rodarem em paralelo e ambos aparecerem no dashboard.
 _automacao_status = {
     "running": False,
     "action": "idle",
@@ -33,6 +34,7 @@ _automacao_status = {
     "ultima_mensagem": "",
     "updated_at": datetime.now().isoformat(),
 }
+_automacao_status_por_plataforma: dict = {}
 
 _status_history = []
 _MAX_HISTORY = 50
@@ -41,15 +43,24 @@ _MAX_HISTORY = 50
 _status_history = []
 _MAX_HISTORY = 50
 
-# Rastreamento de tasks de automação em andamento
+# Rastreamento de tasks de automação em andamento (com plataforma p/ Parar seletivo)
 _current_tasks: set = set()
+_task_platform: dict = {}
 
 
-def _track_task(coro):
-    """Cria task rastreada para poder cancelar com o botão Parar."""
+def _track_task(coro, platform: str = ""):
+    """Cria task rastreada para poder cancelar com o botão Parar.
+    platform permite parar só uma plataforma (LinkedIn ou Indeed) sem afetar a outra."""
     task = asyncio.create_task(coro)
     _current_tasks.add(task)
-    task.add_done_callback(_current_tasks.discard)
+    if platform:
+        _task_platform[task] = platform
+
+    def _cleanup(t):
+        _current_tasks.discard(t)
+        _task_platform.pop(t, None)
+
+    task.add_done_callback(_cleanup)
     return task
 
 
@@ -60,6 +71,15 @@ def _set_automacao_status(running: bool, action: str = "idle", platform: str = "
         "action": action,
         "platform": platform,
         "vagas_processadas": _automacao_status.get("vagas_processadas", 0),
+        "ultima_mensagem": mensagem,
+        "updated_at": datetime.now().isoformat(),
+    }
+    # Estado por plataforma (para exibir LinkedIn e Indeed simultaneamente).
+    chave = platform or "geral"
+    _automacao_status_por_plataforma[chave] = {
+        "running": running,
+        "action": action,
+        "platform": platform,
         "ultima_mensagem": mensagem,
         "updated_at": datetime.now().isoformat(),
     }
@@ -75,7 +95,8 @@ def _set_automacao_status(running: bool, action: str = "idle", platform: str = "
 
 def emit_status_update():
     try:
-        asyncio.create_task(sio.emit("automacao_status", _automacao_status))
+        payload = {**_automacao_status, "por_plataforma": _automacao_status_por_plataforma}
+        asyncio.create_task(sio.emit("automacao_status", payload))
         asyncio.create_task(sio.emit("status_history", _status_history[:10]))
     except Exception:
         pass
@@ -95,18 +116,20 @@ def emit_browser_step(step_data: dict):
         pass
 
 
-_browser_current_step = {"step": "", "action": "", "detail": "", "updated_at": ""}
+_browser_current_step_por_plataforma: dict = {}
 
 
-def set_browser_current_step(step: str = "", action: str = "", detail: str = ""):
-    global _browser_current_step
-    _browser_current_step = {
-        "step": step or _browser_current_step.get("step", ""),
-        "action": action or _browser_current_step.get("action", ""),
-        "detail": detail or _browser_current_step.get("detail", ""),
+def set_browser_current_step(step: str = "", action: str = "", detail: str = "", platform: str = "geral"):
+    plat = platform or "geral"
+    prev = _browser_current_step_por_plataforma.get(plat, {})
+    _browser_current_step_por_plataforma[plat] = {
+        "step": step or prev.get("step", ""),
+        "action": action or prev.get("action", ""),
+        "detail": detail or prev.get("detail", ""),
+        "platform": plat,
         "updated_at": datetime.now().isoformat(),
     }
-    emit_browser_step(_browser_current_step)
+    emit_browser_step(_browser_current_step_por_plataforma[plat])
 
 
 sio = socketio.AsyncServer(cors_allowed_origins="*", async_mode="asgi")
@@ -236,6 +259,14 @@ VUE_DASHBOARD = """
             </div>
         </div>
 
+        <div class="automacao-plataformas" v-if="plataformasAtivas.length" style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:15px;">
+            <div v-for="p in plataformasAtivas" :key="p.nome" style="background:#16213e;padding:8px 14px;border-radius:8px;display:flex;align-items:center;gap:8px;">
+                <span class="status-dot" :class="p.running ? 'online' : (p.action !== 'idle' ? 'busy' : 'offline')"></span>
+                <strong :style="{color: p.nome === 'indeed' ? '#2557a7' : '#00d4ff'}">{{p.nome === 'indeed' ? '🟦 Indeed' : (p.nome === 'linkedin' ? '🔗 LinkedIn' : p.nome)}}</strong>
+                <span style="color:#aaa;font-size:0.82rem;">{{p.action}}<span v-if="p.ultima_mensagem"> — {{p.ultima_mensagem}}</span></span>
+            </div>
+        </div>
+
         <div class="linkedin-bar" style="background:#16213e;padding:12px 15px;border-radius:8px;margin-bottom:15px;display:flex;align-items:center;justify-content:space-between;gap:15px;">
             <div style="display:flex;align-items:center;gap:10px;">
                 <strong style="color:#00d4ff">🔗 LinkedIn</strong>
@@ -266,6 +297,14 @@ VUE_DASHBOARD = """
 
         <div class="browser-panel">
             <h4>🖥️ Browser em Tempo Real | {{browserStep.step || 'Monitoramento'}}</h4>
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+                <span style="color:#aaa;font-size:0.85rem;">Controlar/monitorar plataforma:</span>
+                <select v-model="controlPlatform" @change="carregarBrowser" style="padding:6px;border-radius:4px;background:#1a1a2e;color:#fff;border:1px solid #00d4ff;">
+                    <option value="linkedin">LinkedIn</option>
+                    <option value="indeed">Indeed</option>
+                </select>
+                <span style="color:#666;font-size:0.78rem;">Os dois rodam em paralelo; os controles abaixo agem na plataforma escolhida aqui.</span>
+            </div>
             <div v-if="browserControl.paused" style="background:#ff4444;color:#fff;padding:8px 12px;border-radius:4px;margin-bottom:8px;font-weight:bold;text-align:center;">
                 ⏸️ AUTOMAÇÃO PAUSADA — clique em ▶️ Continuar para retomar
             </div>
@@ -385,6 +424,7 @@ VUE_DASHBOARD = """
                 browserStep: {step: '', action: '', detail: '', updated_at: ''},
                 browserManualText: '',
                 browserManualSelector: '',
+                controlPlatform: 'linkedin',
                 vagaSelecionada: '',
                 plataformaSelecionada: '',
                 plataformaAplicacao: '',
@@ -394,6 +434,12 @@ VUE_DASHBOARD = """
             }
         },
         computed: {
+            plataformasAtivas() {
+                const pp = (this.automacao && this.automacao.por_plataforma) || {};
+                return Object.keys(pp)
+                    .filter(k => k === 'linkedin' || k === 'indeed')
+                    .map(k => ({nome: k, ...pp[k]}));
+            },
             automacaoLabel() {
                 const a = this.automacao;
                 if (!a.running && a.action === 'idle') return '⚪ Aguardando';
@@ -516,9 +562,15 @@ VUE_DASHBOARD = """
             },
             async pararAutomacao() {
                 this.automacao = {...this.automacao, running: false, action: 'idle'};
-                this.showNotif('⏹ Automação parada', 'info');
+                // Para a plataforma selecionada no topo; vazio = todas.
+                const plat = this.plataformaSelecionada || '';
+                this.showNotif('⏹ Automação parada' + (plat ? ' (' + plat + ')' : ' (todas)'), 'info');
                 try {
-                    await fetch('/api/automacao/parar', {method: 'POST'});
+                    await fetch('/api/automacao/parar', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({platform: plat})
+                    });
                     await this.carregarAutomacao();
                 } catch(e) {}
             },
@@ -531,8 +583,9 @@ VUE_DASHBOARD = """
                 try { await fetch('/api/cache/limpar', {method: 'POST'}); } catch(e) {}
             },
             async carregarBrowser() {
+                const p = encodeURIComponent(this.controlPlatform || 'linkedin');
                 try {
-                    const r = await fetch('/api/browser/screenshot');
+                    const r = await fetch('/api/browser/screenshot?platform=' + p);
                     const d = await r.json();
                     if (d.success) {
                         this.browser.screenshot = d.screenshot;
@@ -540,12 +593,12 @@ VUE_DASHBOARD = """
                     }
                 } catch(e) {}
                 try {
-                    const r = await fetch('/api/browser/controle');
+                    const r = await fetch('/api/browser/controle?platform=' + p);
                     const d = await r.json();
                     this.browserControl = {...this.browserControl, ...d};
                 } catch(e) {}
                 try {
-                    const r = await fetch('/api/browser/step');
+                    const r = await fetch('/api/browser/step?platform=' + p);
                     const d = await r.json();
                     if (d.success) {
                         this.browserStep = {...this.browserStep, ...d};
@@ -557,7 +610,7 @@ VUE_DASHBOARD = """
                     const r = await fetch('/api/browser/controle', {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({cmd, ...extraBody})
+                        body: JSON.stringify({cmd, platform: this.controlPlatform || 'linkedin', ...extraBody})
                     });
                     return await r.json();
                 } catch(e) {
@@ -848,7 +901,7 @@ async def get_status():
 
 @fastapi_app.get("/api/automacao/status")
 async def get_automacao_status():
-    return JSONResponse(_automacao_status)
+    return JSONResponse({**_automacao_status, "por_plataforma": _automacao_status_por_plataforma})
 
 
 @fastapi_app.post("/api/automacao/iniciar")
@@ -866,12 +919,15 @@ async def buscar_vagas_dashboard(request: Request):
     plataforma = body.get("platform", "")
     user_id = os.getenv("DASHBOARD_USER_ID", "admin")
 
-    # Limpa sinal de parar para não bloquear a nova execução
+    # Plataforma efetiva da execução (auto/vazio → linkedin, que é o branch padrão).
+    _plat_run = plataforma or "linkedin"
+
+    # Limpa sinal de parar para não bloquear a nova execução (na plataforma certa)
     try:
         from automation.browser import set_intervention_state, get_intervention_state
-        ctrl = await get_intervention_state()
+        ctrl = await get_intervention_state(platform=_plat_run)
         if ctrl.get("current_action") == "parar":
-            await set_intervention_state("current_action", "rodando")
+            await set_intervention_state("current_action", "rodando", platform=_plat_run)
     except Exception:
         pass
 
@@ -988,30 +1044,44 @@ async def buscar_vagas_dashboard(request: Request):
             set_browser_current_step("erro", "falha", str(e))
             emit_status_update()
 
-    _track_task(_run_busca())
+    _track_task(_run_busca(), platform=_plat_run)
     return JSONResponse({"success": True, "message": "Busca iniciada com browser visível"})
 
 
 @fastapi_app.post("/api/automacao/parar")
-async def parar_automacao():
-    # Sinaliza stop para loops que aguardam em wait_if_paused
+async def parar_automacao(request: Request):
+    # Plataforma opcional: para só ela. Sem plataforma → para todas.
+    platform = ""
+    try:
+        body = await request.json()
+        platform = (body.get("platform") or "").strip()
+    except Exception:
+        platform = ""
+
+    alvos = [platform] if platform else ["linkedin", "indeed", "default", "geral"]
+
+    # Sinaliza stop para loops que aguardam em wait_if_paused (por plataforma).
     try:
         from automation.browser import set_intervention_state
-        await set_intervention_state("current_action", "parar")
+        for plat in alvos:
+            await set_intervention_state("current_action", "parar", platform=plat)
     except Exception:
         pass
 
-    # Cancela tasks de automação rodando
+    # Cancela tasks de automação rodando (só as da plataforma, se especificada).
     canceladas = 0
     for task in list(_current_tasks):
+        if platform and _task_platform.get(task) != platform:
+            continue
         if not task.done():
             task.cancel()
             canceladas += 1
-    _current_tasks.clear()
+        _current_tasks.discard(task)
+        _task_platform.pop(task, None)
 
-    _set_automacao_status(False, "idle", "", f"Automação parada ({canceladas} tasks canceladas)")
+    _set_automacao_status(False, "idle", platform, f"Automação parada ({canceladas} tasks canceladas)")
     emit_status_update()
-    return JSONResponse({"success": True, "message": "Automação parada"})
+    return JSONResponse({"success": True, "message": f"Automação parada ({platform or 'todas'})"})
 
 
 @fastapi_app.post("/api/automacao/aplicar-em-lote")
@@ -1139,12 +1209,12 @@ async def extrair_vagas_linkedin(request: Request):
     max_vagas = int(body.get("max_vagas", 20))
     user_id = os.getenv("DASHBOARD_USER_ID", "admin")
 
-    # Limpa sinal de parar para não bloquear a nova execução
+    # Limpa sinal de parar para não bloquear a nova execução (plataforma linkedin)
     try:
         from automation.browser import set_intervention_state, get_intervention_state
-        ctrl = await get_intervention_state()
+        ctrl = await get_intervention_state(platform="linkedin")
         if ctrl.get("current_action") == "parar":
-            await set_intervention_state("current_action", "rodando")
+            await set_intervention_state("current_action", "rodando", platform="linkedin")
     except Exception:
         pass
 
@@ -1192,7 +1262,7 @@ async def extrair_vagas_linkedin(request: Request):
             set_browser_current_step("extracao_fim", "falha", str(e))
             emit_status_update()
 
-    _track_task(_run_extracao())
+    _track_task(_run_extracao(), platform="linkedin")
     return JSONResponse({"success": True, "message": f"Extraindo até {max_vagas} vagas da página do LinkedIn"})
 
 
@@ -1203,12 +1273,12 @@ async def aplicar_vagas_visiveis_linkedin_endpoint(request: Request):
     max_vagas = int(body.get("max_vagas", 5))
     user_id = os.getenv("DASHBOARD_USER_ID", "admin")
 
-    # Limpa sinal de parar para não bloquear a nova execução
+    # Limpa sinal de parar para não bloquear a nova execução (plataforma linkedin)
     try:
         from automation.browser import set_intervention_state, get_intervention_state
-        ctrl = await get_intervention_state()
+        ctrl = await get_intervention_state(platform="linkedin")
         if ctrl.get("current_action") == "parar":
-            await set_intervention_state("current_action", "rodando")
+            await set_intervention_state("current_action", "rodando", platform="linkedin")
     except Exception:
         pass
 
@@ -1240,7 +1310,7 @@ async def aplicar_vagas_visiveis_linkedin_endpoint(request: Request):
             _set_automacao_status(False, "erro", "linkedin", str(e))
             emit_status_update()
 
-    _track_task(_run_apply_visiveis())
+    _track_task(_run_apply_visiveis(), platform="linkedin")
     return JSONResponse({"success": True, "message": f"Iniciando aplicação em até {max_vagas} vagas visíveis no LinkedIn"})
 
 
@@ -1254,9 +1324,9 @@ async def extrair_vagas_indeed_endpoint(request: Request):
 
     try:
         from automation.browser import set_intervention_state, get_intervention_state
-        ctrl = await get_intervention_state()
+        ctrl = await get_intervention_state(platform="indeed")
         if ctrl.get("current_action") == "parar":
-            await set_intervention_state("current_action", "rodando")
+            await set_intervention_state("current_action", "rodando", platform="indeed")
     except Exception:
         pass
 
@@ -1304,7 +1374,7 @@ async def extrair_vagas_indeed_endpoint(request: Request):
             set_browser_current_step("extracao_indeed_fim", "falha", str(e))
             emit_status_update()
 
-    _track_task(_run_extracao())
+    _track_task(_run_extracao(), platform="indeed")
     return JSONResponse({"success": True, "message": f"Extraindo até {max_vagas} vagas do Indeed"})
 
 
@@ -1318,9 +1388,9 @@ async def aplicar_vagas_visiveis_indeed_endpoint(request: Request):
 
     try:
         from automation.browser import set_intervention_state, get_intervention_state
-        ctrl = await get_intervention_state()
+        ctrl = await get_intervention_state(platform="indeed")
         if ctrl.get("current_action") == "parar":
-            await set_intervention_state("current_action", "rodando")
+            await set_intervention_state("current_action", "rodando", platform="indeed")
     except Exception:
         pass
 
@@ -1353,7 +1423,7 @@ async def aplicar_vagas_visiveis_indeed_endpoint(request: Request):
             _set_automacao_status(False, "erro", "indeed", str(e))
             emit_status_update()
 
-    _track_task(_run_apply_visiveis())
+    _track_task(_run_apply_visiveis(), platform="indeed")
     return JSONResponse({"success": True, "message": f"Iniciando aplicação em até {max_vagas} vagas do Indeed"})
 
 
@@ -1410,8 +1480,16 @@ async def limpar_cache():
 
 
 @fastapi_app.get("/api/browser/screenshot")
-async def get_browser_screenshot():
-    """Retorna screenshot base64 da pagina ativa (Playwright ou Selenium)."""
+async def get_browser_screenshot(platform: str = ""):
+    """Retorna screenshot base64 do browser da plataforma selecionada (Selenium) ou
+    da pagina Playwright ativa."""
+    # Seleciona o driver da plataforma pedida (contextvar) — cada plataforma tem
+    # seu próprio Firefox no registro de drivers.
+    try:
+        from automation.run_context import set_platform
+        set_platform(platform or "linkedin")
+    except Exception:
+        pass
     try:
         from automation.browser import get_active_page, screenshot_base64
         page = None
@@ -1461,50 +1539,52 @@ async def get_browser_state():
 
 @fastapi_app.post("/api/browser/controle")
 async def browser_controle(request: Request):
-    """Recebe comandos de controle do browser (pausar, continuar, pular, digitar, clicar)."""
+    """Recebe comandos de controle do browser (pausar, continuar, pular, digitar, clicar).
+    Aplica na plataforma selecionada no dashboard (body.platform)."""
     body = await request.json()
     cmd = body.get("cmd", "")
+    plat = (body.get("platform") or "linkedin").strip()
 
     try:
         from automation.browser import set_intervention_state
         if cmd == "pausar":
-            await set_intervention_state("paused", True)
-            await set_intervention_state("current_action", "pausado")
-            return JSONResponse({"success": True, "message": "Automação pausada"})
+            await set_intervention_state("paused", True, platform=plat)
+            await set_intervention_state("current_action", "pausado", platform=plat)
+            return JSONResponse({"success": True, "message": f"Automação pausada ({plat})"})
 
         if cmd == "continuar":
-            await set_intervention_state("paused", False)
-            await set_intervention_state("current_action", "rodando")
-            return JSONResponse({"success": True, "message": "Automação continuada"})
+            await set_intervention_state("paused", False, platform=plat)
+            await set_intervention_state("current_action", "rodando", platform=plat)
+            return JSONResponse({"success": True, "message": f"Automação continuada ({plat})"})
 
         if cmd == "pular":
-            await set_intervention_state("current_action", "pular")
+            await set_intervention_state("current_action", "pular", platform=plat)
             return JSONResponse({"success": True, "message": "Ação atual será pulada"})
 
         if cmd == "digitar":
             texto = body.get("texto", "")
             selector = body.get("selector", "")
-            await set_intervention_state("manual_input", texto)
-            await set_intervention_state("intervention_type", "digitar")
-            await set_intervention_state("intervention_selector", selector)
+            await set_intervention_state("manual_input", texto, platform=plat)
+            await set_intervention_state("intervention_type", "digitar", platform=plat)
+            await set_intervention_state("intervention_selector", selector, platform=plat)
             return JSONResponse({"success": True, "message": f"Digitar '{texto}' em '{selector}'"})
 
         if cmd == "clicar":
             selector = body.get("selector", "")
-            await set_intervention_state("intervention_type", "clicar")
-            await set_intervention_state("intervention_selector", selector)
+            await set_intervention_state("intervention_type", "clicar", platform=plat)
+            await set_intervention_state("intervention_selector", selector, platform=plat)
             return JSONResponse({"success": True, "message": f"Clicar em '{selector}'"})
 
         if cmd == "intervir_manual":
-            await set_intervention_state("intervention_type", "manual")
-            await set_intervention_state("paused", True)
+            await set_intervention_state("intervention_type", "manual", platform=plat)
+            await set_intervention_state("paused", True, platform=plat)
             return JSONResponse({"success": True, "message": "Modo manual ativado"})
 
         if cmd == "retomar_auto":
-            await set_intervention_state("intervention_type", None)
-            await set_intervention_state("paused", False)
-            await set_intervention_state("current_action", "rodando")
-            await set_intervention_state("intervention_selector", None)
+            await set_intervention_state("intervention_type", None, platform=plat)
+            await set_intervention_state("paused", False, platform=plat)
+            await set_intervention_state("current_action", "rodando", platform=plat)
+            await set_intervention_state("intervention_selector", None, platform=plat)
             return JSONResponse({"success": True, "message": "Retomado modo automático"})
 
         return JSONResponse({"success": False, "message": "Comando inválido"}, status_code=400)
@@ -1513,19 +1593,26 @@ async def browser_controle(request: Request):
 
 
 @fastapi_app.get("/api/browser/controle")
-async def get_browser_controle():
-    """Retorna estado atual do controle do browser."""
+async def get_browser_controle(platform: str = ""):
+    """Retorna estado atual do controle do browser da plataforma selecionada."""
     try:
         from automation.browser import get_intervention_state
-        state = await get_intervention_state()
+        state = await get_intervention_state(platform=(platform or "linkedin"))
         return JSONResponse(state)
     except Exception as e:
         return JSONResponse({"paused": False, "current_action": "idle", "intervention_type": None})
 
 
 @fastapi_app.get("/api/browser/step")
-async def get_browser_step():
-    return JSONResponse({"success": True, **_browser_current_step})
+async def get_browser_step(platform: str = ""):
+    plat = platform or "geral"
+    step = _browser_current_step_por_plataforma.get(plat)
+    if not step:
+        # fallback: qualquer step mais recente (compat com visão única)
+        todos = list(_browser_current_step_por_plataforma.values())
+        step = max(todos, key=lambda s: s.get("updated_at", ""), default=None)
+    step = step or {"step": "", "action": "", "detail": "", "updated_at": ""}
+    return JSONResponse({"success": True, **step})
 
 
 @fastapi_app.get("/api/perfil/resumo-curriculo")
@@ -1561,6 +1648,7 @@ async def post_browser_step(request: Request):
             step=body.get("step", ""),
             action=body.get("action", ""),
             detail=body.get("detail", ""),
+            platform=body.get("platform", "") or "geral",
         )
         return JSONResponse({"success": True})
     except Exception as e:

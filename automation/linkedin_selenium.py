@@ -22,6 +22,7 @@ from automation.selenium_browser import (
 )
 from automation.browser import notify_browser_step, get_intervention_state, wait_if_paused
 from automation.form_filler import responder_pergunta
+from automation.run_context import set_platform
 from selenium.webdriver.common.by import By
 from selenium.common.exceptions import (
     InvalidSessionIdException, WebDriverException, StaleElementReferenceException,
@@ -437,6 +438,7 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "", user_id
     Usa IA para responder perguntas customizadas baseadas no resumo do curriculo.
     Sempre responde em ingles.
     """
+    set_platform("linkedin")
     if not _get_linkedin_email() or not _get_linkedin_password():
         return {
             "sucesso": False,
@@ -892,7 +894,7 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
             # espera o DOM assentar e re-tenta o preenchimento do step.
             for _tent in range(3):
                 try:
-                    await _preencher_step_selenium(driver, perfil, curriculo_path)
+                    await _preencher_step_selenium(driver, perfil, curriculo_path, idioma=idioma)
                     perguntas_step = await _detectar_perguntas_nao_respondidas_selenium(driver)
                     break
                 except StaleElementReferenceException:
@@ -930,7 +932,9 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
                             )
                         except Exception as _rpe:
                             _registrar_run_log(f"FORM step {step}: responder_pergunta ERRO: {_rpe}")
-                            respostas_geradas[pergunta] = ""
+                            # Nunca deixa vazio: campo obrigatório em branco descarta a candidatura.
+                            from automation.form_filler import resposta_segura
+                            respostas_geradas[pergunta] = resposta_segura(pergunta, idioma)
                     resposta = respostas_geradas[pergunta]
                     await notify_browser_step("step_"+str(step), "respondendo", f"Pergunta: {pergunta[:40]}...")
                     _registrar_run_log(f"FORM step {step}: resp '{pergunta[:35]}' = '{str(resposta)[:25]}'")
@@ -969,6 +973,16 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
                 if dispensado:
                     await asyncio.sleep(1)
                     btn_text, btn_clicked = await _clicar_botao_primario_modal(driver)
+
+                if not btn_clicked:
+                    # DOM ainda re-renderizando (ex.: acabou de trocar de CV) — dá
+                    # um tempo e re-tenta uma vez antes de desistir/descartar.
+                    await asyncio.sleep(1.5)
+                    try:
+                        btn_text, btn_clicked = await _clicar_botao_primario_modal(driver)
+                    except StaleElementReferenceException:
+                        await asyncio.sleep(1.0)
+                        btn_text, btn_clicked = await _clicar_botao_primario_modal(driver)
 
                 if not btn_clicked:
                     print(f"[LINKEDIN] Step {step}: nenhum botão encontrado no modal")
@@ -1206,9 +1220,10 @@ async def _preencher_cidade_autocomplete(driver, cidade: str) -> None:
     return True
 
 
-async def _preencher_step_selenium(driver, perfil: dict, curriculo_path: str) -> None:
+async def _preencher_step_selenium(driver, perfil: dict, curriculo_path: str, idioma: str = "pt") -> None:
     """Preenche campos conhecidos no step atual via Selenium.
-    Usa find_elements (sem timeout) para não bloquear em campos ausentes."""
+    Usa find_elements (sem timeout) para não bloquear em campos ausentes.
+    `idioma` ('pt'|'en') decide qual CV já enviado ao LinkedIn selecionar."""
     nome_completo = perfil.get("nome", "")
     partes = nome_completo.split()
     primeiro_nome = partes[0] if partes else nome_completo
@@ -1343,10 +1358,32 @@ async def _preencher_step_selenium(driver, perfil: dict, curriculo_path: str) ->
         print("[LINKEDIN] AVISO: cidade não encontrada (perfil/currículo) — campo de localização vai travar o form")
         _registrar_run_log("CIDADE: não encontrada (perfil/currículo/env)")
 
-    # Seleciona CV em inglês se houver múltiplos CVs já enviados ao LinkedIn
-    def _selecionar_cv_ingles():
-        """LinkedIn mostra CVs anteriores como radio/checkbox. Prefere o inglês (segundo item)."""
-        _en_kw = {"english", "inglês", "ingles", "en_", "_en.", "-en.", "en-", "(en)"}
+    # Seleciona o CV certo pelo idioma da vaga, entre os CVs já enviados ao LinkedIn.
+    # O usuário mantém dois no LinkedIn: um chamado "resume" (vagas em inglês) e
+    # outro "curriculo" (vagas em português). A escolha é pelo NOME/label do arquivo.
+    def _selecionar_cv_por_idioma():
+        """LinkedIn mostra CVs anteriores como radio/checkbox. Escolhe pelo idioma:
+        vaga em inglês → CV 'resume'; vaga em português → CV 'curriculo'."""
+        alvo_en = (idioma or "pt").strip().lower().startswith("en")
+        # Palavras que marcam cada idioma no nome/label do arquivo.
+        KW_EN = ("resume", "english", "inglês", "ingles", "en_", "_en", "-en", "en-", "(en)")
+        KW_PT = ("curriculo", "currículo", "portugues", "português", "pt_", "_pt", "-pt", "pt-", "(pt)")
+        kw_pref = KW_EN if alvo_en else KW_PT
+        kw_evitar = KW_PT if alvo_en else KW_EN
+        rotulo = "inglês (resume)" if alvo_en else "português (curriculo)"
+
+        def _aplicar_cv(opt, lbl_text, motivo):
+            """Só clica se o CV alvo ainda NÃO está selecionado — evita re-render
+            desnecessário. Retorna 'changed' (trocou de verdade) ou 'kept'."""
+            try:
+                if opt.is_selected():
+                    print(f"[LINKEDIN] CV {rotulo} já era o selecionado: {lbl_text[:50]}")
+                    return "kept"
+            except Exception:
+                pass
+            _clicar_radio_via_label(driver, opt)
+            print(f"[LINKEDIN] Selecionou CV {rotulo} ({motivo}): {lbl_text[:50]}")
+            return "changed"
         # Seletores comuns para escolha de resume no Easy Apply
         for sel in [
             "input[type='radio']",
@@ -1382,22 +1419,32 @@ async def _preencher_step_selenium(driver, perfil: dict, curriculo_path: str) ->
                 except Exception:
                     continue
 
+            if not resume_opts:
+                continue
+
+            # 1) Casa pelo idioma da vaga (nome do arquivo).
+            for opt, opt_id, lbl_text in resume_opts:
+                if any(kw in lbl_text for kw in kw_pref):
+                    return _aplicar_cv(opt, lbl_text, "por nome")
+
+            # 2) Nenhum casou explicitamente, mas há mais de um CV: escolhe o que
+            #    NÃO pertence ao outro idioma (evita mandar 'resume' pra vaga PT).
             if len(resume_opts) >= 2:
-                # Tenta achar o que tem indicação de inglês
                 for opt, opt_id, lbl_text in resume_opts:
-                    if any(kw in lbl_text for kw in _en_kw):
-                        _clicar_radio_via_label(driver, opt)
-                        print(f"[LINKEDIN] Selecionou CV inglês: {lbl_text[:50]}")
-                        return True
-                # Não achou por label — usa o SEGUNDO (índice 1, presumivelmente EN)
-                opt, opt_id, lbl_text = resume_opts[1]
-                _clicar_radio_via_label(driver, opt)
-                print(f"[LINKEDIN] Selecionou segundo CV (EN presumido): {lbl_text[:50]}")
-                return True
+                    if not any(kw in lbl_text for kw in kw_evitar):
+                        return _aplicar_cv(opt, lbl_text, "por exclusão")
+
+            # 3) Um único CV (ou ambíguo): deixa o default do LinkedIn.
+            return False
         return False
 
     try:
-        await _run_in_thread(_selecionar_cv_ingles)
+        cv_resultado = await _run_in_thread(_selecionar_cv_por_idioma)
+        if cv_resultado == "changed":
+            # Trocar de CV re-renderiza o card de currículo (React). Espera assentar
+            # antes de detectar perguntas e clicar 'Avançar', senão o clique se
+            # perde no meio do re-render e a candidatura acaba descartada.
+            await asyncio.sleep(1.5)
     except Exception:
         pass
 
@@ -1676,7 +1723,7 @@ async def _detectar_perguntas_nao_respondidas_selenium(driver) -> list:
                         pass
                 if not label or any(p in label.lower() for p in _CAMPOS_PADRAO):
                     continue
-                # Não detectar checkboxes de upload de CV (tratados por _selecionar_cv_ingles)
+                # Não detectar checkboxes de upload de CV (tratados por _selecionar_cv_por_idioma)
                 if any(kw in label.lower() for kw in ("resume", "currículo", ".pdf", ".doc", "upload")):
                     continue
                 _add(f"CHECKBOX:{label}")
@@ -2696,6 +2743,7 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
     Verifica se já se candidatou antes de aplicar.
     Navega de volta para a página de jobs após cada aplicação.
     """
+    set_platform("linkedin")
     if not _get_linkedin_email() or not _get_linkedin_password():
         return {
             "sucesso": False,
@@ -3615,6 +3663,7 @@ async def extrair_vagas_da_busca(perfil: dict, max_vagas: int = 20) -> dict:
     Tenta Playwright primeiro, senão Selenium.
     Não força navegação se já houver uma página de jobs aberta.
     """
+    set_platform("linkedin")
     if not _get_linkedin_email() or not _get_linkedin_password():
         return {
             "sucesso": False,

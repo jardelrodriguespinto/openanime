@@ -12,7 +12,18 @@
       "Bash(xargs grep -l -i \"curriculo\\\\|pdf\\\\|weasyprint\\\\|resume\\\\|curriculum\")",
       "Bash(xargs grep -l \"curriculo\\\\|ATS\\\\|job\\\\|aplicacao\")",
       "Bash(docker compose build bot --no-cache)",
-      "WebFetch(domain:github.com)"
+      "WebFetch(domain:github.com)",
+      "WebSearch",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('automation/selenium_browser.py'\\).read\\(\\)\\); print\\('OK syntax selenium_browser'\\)\")",
+      "Bash(python3 -c \"import automation.selenium_browser as s; print\\('persist:', s.FIREFOX_PERSIST_PROFILE\\); print\\('dir:', s.FIREFOX_PROFILE_DIR\\)\")",
+      "Bash(git check-ignore *)",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('automation/selenium_browser.py'\\).read\\(\\)\\); print\\('OK syntax'\\)\")",
+      "Bash(python3 -c \"import automation.selenium_browser; print\\('import OK'\\)\")",
+      "Bash(python3 -c \"import automation.browser; print\\('browser.py import OK'\\)\")",
+      "Bash(grep -nA6 \"async carregarAutomacao\" bot/dashboard.py)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('automation/linkedin_selenium.py'\\).read\\(\\)\\); print\\('sintaxe OK'\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(OPENROUTER_API_KEY=dummy python -c ' *)"
     ]
   }
 }

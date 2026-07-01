@@ -45,6 +45,7 @@ from automation.browser import (
 )
 from automation.form_filler import responder_pergunta
 from automation.contador_aplicacoes import INDEED as _cont
+from automation.run_context import set_platform
 
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -383,6 +384,7 @@ async def extrair_vagas_da_busca(perfil: dict, max_vagas: int = 20, query: str =
     no Indeed; senão navega para a busca montada a partir da palavra-chave.
     Marca eligibilidade de Indeed Apply (candidatura simplificada) em cada card.
     """
+    set_platform("indeed")
     driver = await get_driver()
     if not driver or not await _driver_session_valida():
         await nova_pagina(_build_search_url(query), reutilizar=False)
@@ -1187,7 +1189,9 @@ async def _processar_formulario_smartapply(driver, perfil: dict, curriculo_path:
                         )
                     except Exception as e:
                         logger.warning("responder_pergunta erro: %s", e)
-                        respostas[p] = ""
+                        # Nunca deixa vazio: campo obrigatório em branco trava/descarta.
+                        from automation.form_filler import resposta_segura
+                        respostas[p] = resposta_segura(p, idioma)
                 for _tp in range(3):
                     try:
                         await _preencher_resposta_smartapply(driver, p, respostas[p])
@@ -1279,6 +1283,7 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "", user_id
     currículo, clica em Aplicar, entra no contexto do SmartApply (iframe/janela/
     página) e preenche o formulário multi-step. Login/bloqueio → manual.
     """
+    set_platform("indeed")
     resumo_curriculo = perfil.get("resumo_curriculo", "") or ""
     if not resumo_curriculo:
         resumo_curriculo = await _get_resumo_curriculo(user_id)
@@ -1413,6 +1418,7 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
     Extrai as vagas elegíveis (Indeed Apply) da busca atual e aplica em cada uma,
     registrando no Neo4j. Loop mínimo — sem a máquina de paginação/anti-parking do
     LinkedIn (que resolvia bugs específicos daquela plataforma)."""
+    set_platform("indeed")
     try:
         from graph.neo4j_client import get_neo4j
         neo4j = get_neo4j()

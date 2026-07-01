@@ -49,7 +49,9 @@ def responder_pergunta(
     Responde no idioma da pergunta (detectado externamente via idioma param).
     Suporta perguntas SELECT:label:opcoes, RADIO:label:opcoes e NUMERO:label.
     """
-    # NUMERO: campo inteiro — retorna apenas dígitos (ex: anos de experiência)
+    # NUMERO: campo inteiro — retorna apenas dígitos (ex: anos de experiência).
+    # Sem info (ex: "anos de experiência com .NET" e o candidato não tem) → "0",
+    # nunca vazio: campo obrigatório em branco faz o LinkedIn descartar a candidatura.
     if pergunta.startswith("NUMERO:"):
         pergunta_real = pergunta[7:].strip()
         resposta_bruta = _responder_pergunta_raw(
@@ -60,9 +62,10 @@ def responder_pergunta(
         if m:
             return m.group()
         digitos = re.sub(r'[^\d]', '', resposta_bruta)
-        return digitos or "1"
+        return digitos or "0"
 
-    # DECIMAL: campo decimal — retorna número com ponto (ex: 2.5, 10000.0)
+    # DECIMAL: campo decimal — retorna número com ponto (ex: 2.5, 10000.0).
+    # Sem info → "0" (nunca vazio), mesma razão do NUMERO.
     if pergunta.startswith("DECIMAL:"):
         pergunta_real = pergunta[8:].strip()
         resposta_bruta = _responder_pergunta_raw(
@@ -72,9 +75,23 @@ def responder_pergunta(
         m = re.search(r'\d+[.,]\d+|\d+', resposta_bruta)
         if m:
             return m.group().replace(',', '.')
-        return re.sub(r'[^\d.]', '', resposta_bruta) or "1.0"
+        return re.sub(r'[^\d.]', '', resposta_bruta) or "0"
 
-    return _responder_pergunta_raw(pergunta, perfil, vaga_titulo, vaga_empresa, resumo_curriculo, idioma)
+    resposta = _responder_pergunta_raw(pergunta, perfil, vaga_titulo, vaga_empresa, resumo_curriculo, idioma)
+    # Garante não-vazio: campo obrigatório em branco descarta a candidatura.
+    return resposta.strip() or resposta_segura(pergunta, idioma)
+
+
+def resposta_segura(pergunta: str, idioma: str = "pt") -> str:
+    """Valor de preenchimento que NUNCA é vazio — usado como último recurso quando
+    não há informação e o LLM não respondeu, para o campo obrigatório não travar
+    nem descartar a candidatura. Numérico → '0'; alfanumérico → 'Nenhum'/'None'."""
+    if pergunta.startswith(("NUMERO:", "DECIMAL:")):
+        return "0"
+    if pergunta.startswith(("SELECT:", "RADIO:", "CHECKBOX:")):
+        # Opção/consentimento: 'não' é o default seguro e não-vazio.
+        return "não" if idioma == "pt" else "no"
+    return "Nenhum" if idioma == "pt" else "None"
 
 
 def _responder_pergunta_raw(
@@ -142,7 +159,8 @@ For numeric questions (years of experience, etc.), reply with ONLY the number.""
             "form_filler: pergunta respondida | pergunta=%s... | resposta=%s...",
             pergunta_real[:50], resposta[:50]
         )
-        return resposta.strip()
+        # LLM pode devolver vazio — cai no fallback por palavra-chave (nunca vazio).
+        return resposta.strip() or _resposta_fallback(pergunta, perfil, idioma)
     except Exception as e:
         logger.error("form_filler: erro LLM: %s", e)
         return _resposta_fallback(pergunta, perfil, idioma)
