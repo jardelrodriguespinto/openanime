@@ -91,9 +91,9 @@ def _get_query_padrao() -> str:
     return os.getenv("GEEK_HUNTER_QUERY", "desenvolvedor")
 
 
-def _build_search_url(query: str = "") -> str:
+def _build_search_url(query: str = "", page: int = 1) -> str:
     q = (query or "").strip() or _get_query_padrao()
-    return f"{_VAGAS}?page=1&searchTerm={quote_plus(q)}"
+    return f"{_VAGAS}?page={page}&searchTerm={quote_plus(q)}"
 
 
 # Botões que enviam a candidatura no detalhe da vaga (ordem = prioridade).
@@ -269,11 +269,11 @@ async def _garantir_login() -> bool:
 
 # ── Busca / extração de cards ─────────────────────────────────────────────────
 
-async def _abrir_busca(driver, query: str = "") -> None:
-    """Navega para a busca de vagas com a palavra-chave (do dashboard)."""
-    url = _build_search_url(query)
-    print(f"[GEEK] Abrindo busca → {url}")
-    await notify_browser_step("geekhunter_busca", "navegando", f"Buscando: {query or _get_query_padrao()}")
+async def _abrir_busca(driver, query: str = "", page: int = 1) -> None:
+    """Navega para a busca de vagas com a palavra-chave (do dashboard) na página dada."""
+    url = _build_search_url(query, page)
+    print(f"[GEEK] Abrindo busca (página {page}) → {url}")
+    await notify_browser_step("geekhunter_busca", "navegando", f"Buscando: {query or _get_query_padrao()} (pág. {page})")
     await navegar(url)
     await asyncio.sleep(3)
     # Bloqueio pode aparecer.
@@ -890,20 +890,16 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
                 "mensagem": "Não foi possível logar no GeekHunter."}
 
     driver = await get_driver()
-    await _abrir_busca(driver, query)
-
-    try:
-        janela_busca = await _run_in_thread(lambda: driver.current_window_handle)
-    except Exception:
-        janela_busca = None
 
     resultados = {"sucesso": True, "aplicacoes": [], "falhas": 0}
     aplicadas = 0
     teto = _cont.get_teto()
+    pagina = 1
+    MAX_PAGINAS = int(os.getenv("GEEK_HUNTER_MAX_PAGINAS", "20"))
 
-    for i in range(max_vagas):
-        if aplicadas >= max_vagas:
-            break
+    # Loop de PÁGINAS: aplica em todos os cards da página; ao esgotar, vai pra
+    # page=2, page=3... até bater max_vagas/teto ou não haver mais vagas.
+    while aplicadas < max_vagas and pagina <= MAX_PAGINAS:
         if teto > 0 and _cont.teto_atingido(user_id):
             resultados["mensagem"] = f"Teto de candidaturas atingido ({teto})."
             break
@@ -912,110 +908,129 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
             resultados["mensagem"] = "Interrompido pelo usuário."
             break
 
-        # Re-busca os gatilhos a cada iteração (a lista da busca fica intacta pois o
-        # clique abre NOVA ABA, mas re-buscar evita stale após fechar a aba).
-        def _clicar_card(idx=i):
-            gatilhos = driver.find_elements(By.XPATH, "//p[contains(., 'Visualizar vaga')]")
-            if idx >= len(gatilhos):
-                return "", False
-            g = gatilhos[idx]
-            titulo = ""
-            try:
-                card = g.find_element(By.XPATH, "./ancestor::div[.//p[contains(., 'Visualizar vaga')]][last()]")
-                ps = card.find_elements(By.CSS_SELECTOR, "p.chakra-text")
-                if ps:
-                    titulo = (ps[0].text or "").strip()
-            except Exception:
-                pass
-            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", g)
-            handles_antes = len(driver.window_handles)
-            g.click()
-            return titulo, handles_antes
-
+        await _abrir_busca(driver, query, pagina)
         try:
-            titulo, handles_antes = await _run_in_thread(_clicar_card)
-        except Exception as e:
-            logger.warning("geekhunter clicar card %d erro: %s", i, e)
-            continue
-        if handles_antes is False:
-            break  # acabaram os cards
-
-        await notify_browser_step("selenium_geekhunter", "abrindo", f"Abrindo: {titulo[:40]}")
-        await asyncio.sleep(2.5)
-
-        # Troca pra aba nova (detalhe da vaga) — detecta pela contagem de abas.
-        try:
-            handles = await _run_in_thread(lambda: driver.window_handles)
+            janela_busca = await _run_in_thread(lambda: driver.current_window_handle)
         except Exception:
-            handles = []
-        aba_nova = None
-        if handles and isinstance(handles_antes, int) and len(handles) > handles_antes:
-            aba_nova = handles[-1]
-        if aba_nova and aba_nova != janela_busca:
-            await _run_in_thread(lambda h=aba_nova: driver.switch_to.window(h))
-            await asyncio.sleep(2)
-        else:
-            aba_nova = None  # não abriu nova aba (navegou na mesma) — segue no que tiver
-
-        vaga_url = ""
+            janela_busca = None
         try:
-            vaga_url = await _run_in_thread(lambda: driver.current_url)
-        except Exception:
-            pass
-
-        # Já aplicada? (dedup por URL do detalhe)
-        if neo4j and vaga_url:
-            try:
-                if neo4j.ja_se_candidatou(user_id, vaga_url):
-                    print(f"[GEEK] Já aplicada, pulando: {vaga_url}")
-                    await _fechar_aba_e_voltar(driver, aba_nova, janela_busca)
-                    continue
-            except Exception:
-                pass
-
-        # Match com currículo (fail-open, igual Indeed).
-        idioma_vaga = "pt"
-        if resumo_curriculo:
-            descricao = await _extrair_descricao_detalhe(driver)
-            if descricao:
-                aval = await _avaliar_match_vaga(descricao, resumo_curriculo)
-                idioma_vaga = aval.get("idioma", "pt")
-                if not aval.get("aplicar", True):
-                    print(f"[GEEK] Sem match, pulando: {aval.get('motivo','')}")
-                    await notify_browser_step("selenium_geekhunter", "pulada", f"Sem match: {aval.get('motivo','')}")
-                    await _fechar_aba_e_voltar(driver, aba_nova, janela_busca)
-                    continue
-
-        await notify_browser_step("selenium_geekhunter", "aplicando", f"Candidatando: {titulo[:40]}")
-        try:
-            res = await _preencher_e_enviar_formulario(
-                driver, perfil, resumo_curriculo, idioma_vaga, titulo, vaga_url,
-                curriculo_path=perfil.get("curriculo_path", ""),
+            n_cards = await _run_in_thread(
+                lambda: len(driver.find_elements(By.XPATH, "//p[contains(., 'Visualizar vaga')]"))
             )
-        except Exception as e:
-            logger.error("geekhunter aplicar erro: %s", e)
-            res = {"sucesso": False, "mensagem": str(e)}
+        except Exception:
+            n_cards = 0
+        if n_cards == 0:
+            print(f"[GEEK] Página {pagina} sem vagas — encerrando paginação")
+            break
+        print(f"[GEEK] Página {pagina}: {n_cards} vaga(s)")
 
-        if res.get("sucesso"):
-            await _fechar_modal_atencao(driver)
+        for i in range(n_cards):
+            if aplicadas >= max_vagas:
+                break
+            if teto > 0 and _cont.teto_atingido(user_id):
+                resultados["mensagem"] = f"Teto de candidaturas atingido ({teto})."
+                break
+            control = await get_intervention_state()
+            if control.get("current_action") == "parar":
+                resultados["mensagem"] = "Interrompido pelo usuário."
+                break
 
-        status = "candidatado" if res.get("sucesso") else "tentativa_falhou"
-        if res.get("sucesso"):
-            aplicadas += 1
-            _cont.incr_count(user_id)
-        else:
-            resultados["falhas"] += 1
-        resultados["aplicacoes"].append({"vaga": titulo, "status": status})
+            # Re-busca os gatilhos a cada iteração (evita stale após fechar a aba).
+            def _clicar_card(idx=i):
+                gatilhos = driver.find_elements(By.XPATH, "//p[contains(., 'Visualizar vaga')]")
+                if idx >= len(gatilhos):
+                    return "", False
+                g = gatilhos[idx]
+                titulo = ""
+                try:
+                    card = g.find_element(By.XPATH, "./ancestor::div[.//p[contains(., 'Visualizar vaga')]][last()]")
+                    ps = card.find_elements(By.CSS_SELECTOR, "p.chakra-text")
+                    if ps:
+                        titulo = (ps[0].text or "").strip()
+                except Exception:
+                    pass
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", g)
+                handles_antes = len(driver.window_handles)
+                g.click()
+                return titulo, handles_antes
 
-        if neo4j:
             try:
-                neo4j.registrar_candidatura(user_id=user_id, vaga_id=vaga_url or f"geekhunter-{i}",
-                                            plataforma="geekhunter", status=status)
+                titulo, handles_antes = await _run_in_thread(_clicar_card)
+            except Exception as e:
+                logger.warning("geekhunter clicar card %d erro: %s", i, e)
+                continue
+            if handles_antes is False:
+                break  # acabaram os cards desta página → próxima página
+
+            await notify_browser_step("selenium_geekhunter", "abrindo", f"Abrindo: {titulo[:40]}")
+            await asyncio.sleep(2.5)
+
+            # Troca pra aba nova (detalhe) — detecta pela contagem de abas.
+            try:
+                handles = await _run_in_thread(lambda: driver.window_handles)
+            except Exception:
+                handles = []
+            aba_nova = None
+            if handles and isinstance(handles_antes, int) and len(handles) > handles_antes:
+                aba_nova = handles[-1]
+            if aba_nova and aba_nova != janela_busca:
+                await _run_in_thread(lambda h=aba_nova: driver.switch_to.window(h))
+                await asyncio.sleep(2)
+            else:
+                aba_nova = None
+
+            vaga_url = ""
+            try:
+                vaga_url = await _run_in_thread(lambda: driver.current_url)
             except Exception:
                 pass
 
-        await _fechar_aba_e_voltar(driver, aba_nova, janela_busca)
-        await asyncio.sleep(random.uniform(1.5, 3.0))
+            # Já aplicada? (dedup por URL do detalhe)
+            if neo4j and vaga_url:
+                try:
+                    if neo4j.ja_se_candidatou(user_id, vaga_url):
+                        print(f"[GEEK] Já aplicada, pulando: {vaga_url}")
+                        await _fechar_aba_e_voltar(driver, aba_nova, janela_busca)
+                        continue
+                except Exception:
+                    pass
+
+            # SEM gate de match: o GeekHunter já é curado pela palavra-chave da busca —
+            # toda vaga listada tem correlação e DEVE ser aplicada (pedido do usuário).
+            idioma_vaga = "pt"
+
+            await notify_browser_step("selenium_geekhunter", "aplicando", f"Candidatando: {titulo[:40]}")
+            try:
+                res = await _preencher_e_enviar_formulario(
+                    driver, perfil, resumo_curriculo, idioma_vaga, titulo, vaga_url,
+                    curriculo_path=perfil.get("curriculo_path", ""),
+                )
+            except Exception as e:
+                logger.error("geekhunter aplicar erro: %s", e)
+                res = {"sucesso": False, "mensagem": str(e)}
+
+            if res.get("sucesso"):
+                await _fechar_modal_atencao(driver)
+
+            status = "candidatado" if res.get("sucesso") else "tentativa_falhou"
+            if res.get("sucesso"):
+                aplicadas += 1
+                _cont.incr_count(user_id)
+            else:
+                resultados["falhas"] += 1
+            resultados["aplicacoes"].append({"vaga": titulo, "status": status})
+
+            if neo4j:
+                try:
+                    neo4j.registrar_candidatura(user_id=user_id, vaga_id=vaga_url or f"geekhunter-p{pagina}-{i}",
+                                                plataforma="geekhunter", status=status)
+                except Exception:
+                    pass
+
+            await _fechar_aba_e_voltar(driver, aba_nova, janela_busca)
+            await asyncio.sleep(random.uniform(1.5, 3.0))
+
+        pagina += 1  # esgotou a página atual → vai para a subsequente
 
     resultados.setdefault("mensagem", f"{aplicadas} candidatura(s) enviada(s) no GeekHunter.")
     return resultados
