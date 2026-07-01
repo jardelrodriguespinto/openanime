@@ -5,8 +5,13 @@ API async para compatibilidade com o codigo existente.
 
 import asyncio
 import base64
+import glob
 import logging
 import os
+import random
+import shutil
+import string
+import threading
 import time
 from pathlib import Path
 
@@ -42,6 +47,91 @@ FIREFOX_PROFILE_DIR = os.getenv(
     str(Path(__file__).parent.parent / "data" / "firefox_profile"),
 )
 
+# Firefox "undetected": o geckodriver faz o Firefox expor navigator.webdriver=true,
+# que o Cloudflare Turnstile usa pra travar o login do Indeed em loop (o desafio
+# nunca "gruda" mesmo resolvido à mão). A solução é usar uma CÓPIA do Firefox com o
+# libxul patcheado — o marcador binário 'webdriver' é substituído por bytes
+# aleatórios, então navigator.webdriver vira undefined e o Marionette (canal do
+# geckodriver) continua funcionando. Validado no snap Firefox local: headful passa
+# o Cloudflare e lista vagas. Desligue com FIREFOX_UNDETECTED=false.
+FIREFOX_UNDETECTED = os.getenv("FIREFOX_UNDETECTED", "true").lower() == "true"
+# Dir gravável onde fica a cópia patcheada (compartilhada por LinkedIn/Indeed; cada
+# um usa seu -profile). Fica em data/ como o perfil persistente.
+FIREFOX_UNDETECTED_DIR = os.getenv(
+    "FIREFOX_UNDETECTED_DIR",
+    str(Path(__file__).parent.parent / "data" / "firefox_undetected"),
+)
+
+_patch_lock = threading.Lock()
+_patched_binary_cache: str | None = None
+
+
+def _rand_bytes(n: int) -> bytes:
+    return "".join(random.choice(string.ascii_letters + string.digits) for _ in range(n)).encode()
+
+
+def _firefox_source_dir() -> Path | None:
+    """Dir do Firefox (contém o binário e o libxul.so). Usa o FIREFOX_BINARY
+    configurado; se ele sumiu (ex.: snap atualizou de versão e o 8568 hardcoded
+    deixou de existir), cai no snap 'current' / maior versão disponível."""
+    cand = Path(FIREFOX_BINARY).parent
+    if (cand / "libxul.so").exists():
+        return cand
+    candidatos = ["/snap/firefox/current/usr/lib/firefox"]
+    candidatos += sorted(glob.glob("/snap/firefox/*/usr/lib/firefox"), reverse=True)
+    candidatos += ["/usr/lib/firefox", "/usr/lib/firefox-esr"]
+    for g in candidatos:
+        p = Path(g)
+        if (p / "libxul.so").exists():
+            return p
+    return None
+
+
+def _resolver_binario_undetected() -> str | None:
+    """Garante uma cópia do Firefox com o libxul patcheado e retorna o caminho do
+    binário. None se não for possível (o caller cai no Firefox normal). Idempotente:
+    só copia/patcheia se ainda não existe ou se a versão de origem mudou."""
+    global _patched_binary_cache
+    if _patched_binary_cache and os.path.exists(_patched_binary_cache):
+        return _patched_binary_cache
+    with _patch_lock:
+        if _patched_binary_cache and os.path.exists(_patched_binary_cache):
+            return _patched_binary_cache
+        src_dir = _firefox_source_dir()
+        if not src_dir:
+            logger.warning("selenium_browser: Firefox de origem não encontrado — sem patch undetected")
+            return None
+        libxul_src = src_dir / "libxul.so"
+        st = libxul_src.stat()
+        assinatura = f"{src_dir}:{st.st_size}:{int(st.st_mtime)}"
+        dest_dir = Path(FIREFOX_UNDETECTED_DIR)
+        marker = dest_dir / ".src"
+        dest_bin = dest_dir / Path(FIREFOX_BINARY).name  # normalmente 'firefox'
+        try:
+            atual = marker.read_text().strip() if marker.exists() else ""
+            if not dest_bin.exists() or atual != assinatura:
+                if dest_dir.exists():
+                    shutil.rmtree(dest_dir, ignore_errors=True)
+                shutil.copytree(src_dir, dest_dir, symlinks=True, ignore_dangling_symlinks=True)
+                libxul_dest = dest_dir / "libxul.so"
+                data = libxul_dest.read_bytes()
+                n = data.count(b"webdriver")
+                libxul_dest.write_bytes(data.replace(b"webdriver", _rand_bytes(len(b"webdriver"))))
+                marker.write_text(assinatura)
+                logger.info(
+                    "selenium_browser: Firefox undetected preparado (%d marcador(es) patcheado(s)) em %s",
+                    n, dest_dir,
+                )
+            if not dest_bin.exists():
+                return None
+            _patched_binary_cache = str(dest_bin)
+            return _patched_binary_cache
+        except Exception as e:
+            logger.warning(
+                "selenium_browser: falha ao preparar Firefox undetected (%s) — usando Firefox normal", e
+            )
+            return None
+
 
 def _preparar_profile_dir() -> str | None:
     """Garante o diretório do perfil (SEPARADO por plataforma — dois Firefox não
@@ -68,7 +158,13 @@ def _preparar_profile_dir() -> str | None:
 def _get_driver():
     """Cria instancia do Firefox com Selenium (perfil persistente por padrão)."""
     options = Options()
-    options.binary_location = FIREFOX_BINARY
+    binario = FIREFOX_BINARY
+    if FIREFOX_UNDETECTED:
+        patched = _resolver_binario_undetected()
+        if patched:
+            binario = patched
+            logger.info("selenium_browser: usando Firefox undetected %s", binario)
+    options.binary_location = binario
     options.headless = PLAYWRIGHT_HEADLESS
 
     profile_dir = _preparar_profile_dir()

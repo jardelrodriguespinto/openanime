@@ -23,7 +23,21 @@
       "Bash(grep -nA6 \"async carregarAutomacao\" bot/dashboard.py)",
       "Bash(python -c \"import ast; ast.parse\\(open\\('automation/linkedin_selenium.py'\\).read\\(\\)\\); print\\('sintaxe OK'\\)\")",
       "Bash(python -c ' *)",
-      "Bash(OPENROUTER_API_KEY=dummy python -c ' *)"
+      "Bash(OPENROUTER_API_KEY=dummy python -c ' *)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(python -c \"import selenium; print\\('selenium', selenium.__version__\\)\")",
+      "Bash(python -c \"import undetected_geckodriver; print\\('ug installed'\\)\")",
+      "Bash(pip show *)",
+      "Read(//snap/firefox/8568/usr/lib/firefox/**)",
+      "Bash(python -c \"import sys,json; [print\\(x['name']\\) for x in json.load\\(sys.stdin\\)]\")",
+      "Bash(gh api *)",
+      "Bash(pip download *)",
+      "Bash(tar xzf *)",
+      "Bash(timeout 180 python probe.py)",
+      "Bash(rm -rf \"/tmp/claude-1000/-home-jard-Documents-projetos-openanime/1a53c565-4c8f-4f74-a284-3b4533a83336/scratchpad/uf\" \"/tmp/claude-1000/-home-jard-Documents-projetos-openanime/1a53c565-4c8f-4f74-a284-3b4533a83336/scratchpad/uftest\" \"/tmp/claude-1000/-home-jard-Documents-projetos-openanime/1a53c565-4c8f-4f74-a284-3b4533a83336/scratchpad/probe_profile\"* 2>/dev/null; echo cleaned)"
+    ],
+    "additionalDirectories": [
+      "/tmp/claude-1000/-home-jard-Documents-projetos-openanime/1a53c565-4c8f-4f74-a284-3b4533a83336/scratchpad"
     ]
   }
 }
