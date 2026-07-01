@@ -600,6 +600,8 @@ def detectar_plataforma(url: str) -> str:
         return "linkedin"
     if "indeed.com" in url_lower or "br.indeed.com" in url_lower:
         return "indeed"
+    if "geekhunter.com" in url_lower:
+        return "geekhunter"
     if "gupy.io" in url_lower:
         return "gupy"
     if "greenhouse.io" in url_lower or "jobs.greenhouse" in url_lower:

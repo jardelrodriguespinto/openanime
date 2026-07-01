@@ -1745,6 +1745,25 @@ class Neo4jClient:
             record = result.single()
             return record["resumo"] if record else ""
 
+    def salvar_curriculo_path(self, user_id: str, path: str) -> None:
+        """Caminho do PDF de currículo (o dashboard define; a automação faz upload dele)."""
+        cypher = """
+        MERGE (u:Usuario {user_id: $tid})
+        SET u.curriculo_path = $path
+        """
+        with self.driver.session() as session:
+            session.run(cypher, tid=user_id, path=path)
+
+    def get_curriculo_path(self, user_id: str) -> str:
+        cypher = """
+        MATCH (u:Usuario {user_id: $tid})
+        RETURN coalesce(u.curriculo_path, '') AS path
+        """
+        with self.driver.session() as session:
+            result = session.run(cypher, tid=user_id)
+            record = result.single()
+            return record["path"] if record else ""
+
     def get_perfil_profissional(self, user_id: str) -> dict:
         cypher = """
         MATCH (u:Usuario {user_id: $tid})
@@ -1778,6 +1797,7 @@ class Neo4jClient:
                 "modalidade_preferida": u.get("modalidade_preferida", ""),
                 "objetivo": u.get("objetivo_profissional", ""),
                 "resumo_curriculo": u.get("resumo_curriculo", ""),
+                "curriculo_path": u.get("curriculo_path", ""),
                 "habilidades": [h for h in record["habilidades"] if h.get("nome")],
                 "experiencias": [e for e in record["experiencias"] if e.get("empresa")],
                 "formacao": [f for f in record["formacao"] if f.get("curso")],

@@ -139,3 +139,6 @@ class PlatformCounter:
 
 # Contador dedicado do Indeed — chave 'indeed:aplicacoes:*' e env INDEED_TETO_APLICACOES.
 INDEED = PlatformCounter("indeed", "INDEED_TETO_APLICACOES")
+
+# Contador dedicado do GeekHunter — chave 'geekhunter:aplicacoes:*' e env GEEK_HUNTER_TETO_APLICACOES.
+GEEK_HUNTER = PlatformCounter("geekhunter", "GEEK_HUNTER_TETO_APLICACOES")

@@ -133,15 +133,51 @@ def _resolver_binario_undetected() -> str | None:
             return None
 
 
+def _matar_orfaos_do_perfil(profile_dir: str) -> None:
+    """Mata Firefox órfãos (de runs anteriores) que ainda seguram ESTE perfil.
+    Sem isso, o novo Firefox sai na hora com 'Process unexpectedly closed with
+    status 0' (perfil em uso) — o clássico "abre e fecha". Reiniciar o
+    bot.dashboard deixa o Firefox lançado pelo Selenium órfão, segurando o perfil.
+
+    Casa pelo CAMINHO do perfil no cmdline (ex.: 'firefox_profile/indeed'), que é
+    único por plataforma → NUNCA mata o Firefox pessoal do usuário (que não usa
+    '-profile data/firefox_profile/*') nem o de outra plataforma."""
+    import signal
+    import subprocess
+    alvo = f"firefox_profile/{Path(profile_dir).name}"
+    try:
+        out = subprocess.run(["pgrep", "-f", alvo], capture_output=True, text=True, timeout=5)
+    except Exception as e:
+        logger.debug("selenium_browser: pgrep indisponível (%s) — pulo limpeza de órfãos", e)
+        return
+    meu = os.getpid()
+    for tok in out.stdout.split():
+        if not tok.strip().isdigit():
+            continue
+        pid = int(tok)
+        if pid == meu:
+            continue
+        try:
+            os.kill(pid, signal.SIGKILL)
+            logger.info("selenium_browser: matou Firefox órfão pid=%s do perfil '%s'", pid, alvo)
+        except ProcessLookupError:
+            pass
+        except Exception as e:
+            logger.debug("selenium_browser: falha ao matar pid=%s: %s", pid, e)
+
+
 def _preparar_profile_dir() -> str | None:
     """Garante o diretório do perfil (SEPARADO por plataforma — dois Firefox não
-    podem compartilhar o mesmo perfil) e remove locks órfãos de um crash anterior.
-    Só mexe no diretório da PRÓPRIA plataforma."""
+    podem compartilhar o mesmo perfil), mata Firefox órfãos que ainda segurem esse
+    perfil e remove locks órfãos de um crash anterior. Só mexe na PRÓPRIA plataforma."""
     if not FIREFOX_PERSIST_PROFILE:
         return None
     try:
         p = Path(FIREFOX_PROFILE_DIR) / get_platform()
         p.mkdir(parents=True, exist_ok=True)
+        # 1) Mata órfãos que seguram este perfil (senão o launch sai status 0).
+        _matar_orfaos_do_perfil(str(p))
+        # 2) Remove locks remanescentes.
         for lock in ("lock", ".parentlock", "parent.lock"):
             f = p / lock
             try:
@@ -242,7 +278,19 @@ async def nova_pagina(url: str = "about:blank", reutilizar: bool = False) -> web
             pass
 
     def _open():
-        driver = _get_driver()
+        try:
+            driver = _get_driver()
+        except WebDriverException as e:
+            msg = str(e).lower()
+            # Perfil ainda preso por um órfão recém-morto (SIGKILL leva um instante
+            # pra liberar o lock) → re-limpa e tenta de novo uma vez.
+            if "unexpectedly closed" in msg or "status 0" in msg or "profile" in msg:
+                logger.warning("selenium_browser: launch falhou (%s) — limpando perfil e re-tentando", e)
+                _preparar_profile_dir()
+                time.sleep(2)
+                driver = _get_driver()
+            else:
+                raise
         driver.get(url)
         return driver
     driver = await _run_in_thread(_open)

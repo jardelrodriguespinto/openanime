@@ -103,8 +103,12 @@ _BTN_CONTINUAR = [
     'button:has-text("Save and continue")',
 ]
 _BTN_ENVIAR = [
+    'button[name="submit-application"]',
+    '[data-testid="submit-application-button"]',
+    'button[data-testid="submit-application-button"]',
     '[data-testid="submit-application"]',
     'button[data-testid="submit-application"]',
+    'button:has-text("Enviar sua candidatura")',
     'button:has-text("Enviar candidatura")',
     'button:has-text("Submit your application")',
     'button:has-text("Submit application")',
@@ -113,16 +117,32 @@ _BTN_ENVIAR = [
 ]
 _BTN_REVISAR = [
     'button:has-text("Revisar")',
+    'button:has-text("Verificar sua candidatura")',
+    'button:has-text("Verificar")',
     'button:has-text("Review")',
 ]
 
-# Botão que abre o Indeed Apply na página da vaga.
+# Post-apply: volta para a lista de resultados após enviar a candidatura.
+_BTN_VOLTAR_BUSCA = [
+    '#returnToSearchButton',
+    'button#returnToSearchButton',
+    'button:has-text("Voltar à busca de vagas")',
+    'button:has-text("Voltar à busca")',
+    'button:has-text("Return to job search")',
+    'button:has-text("Return to search")',
+]
+
+# Botão que abre o Indeed Apply na página da vaga (abre em nova aba/janela).
 _BTN_APPLY = [
     "#indeedApplyButton",
     'button#indeedApplyButton',
+    'button[data-testid="indeedApplyButton-test"]',
+    'span[data-testid="indeed-apply-widget"] button',
     '.jobsearch-IndeedApplyButton-newDesign',
+    'button[aria-label*="Candidatar-se com o Indeed"]',
     'button[aria-label*="Candidatura simplificada"]',
     'button[aria-label*="Easily apply"]',
+    'button:has-text("Candidatar-se com o Indeed")',
     'button:has-text("Candidatar-se")',
     'button:has-text("Candidatura simplificada")',
     'button:has-text("Apply now")',
@@ -143,10 +163,37 @@ def _pagina_bloqueada(url: str, title: str, html: str = "") -> bool:
         "just a moment", "verificando se você é humano", "checking if the site connection is secure",
         "verify you are human", "attention required", "cloudflare",
         "unusual activity", "atividade incomum",
+        # CAPTCHA do envio do SmartApply (resolução manual)
+        "hcaptcha", "recaptcha", "confirme que você é humano", "verifique que você é humano",
+        "i'm not a robot", "não sou um robô", "prove you are human",
     ):
         if marca in t or marca in h[:4000]:
             return True
     return False
+
+
+async def _smartapply_bloqueado(driver) -> bool:
+    """Detecta CAPTCHA/verificação DENTRO do contexto atual do SmartApply."""
+    try:
+        cur = await _run_in_thread(lambda: driver.current_url)
+        ttl = await get_title()
+        html = await _run_in_thread(lambda: driver.page_source)
+    except Exception:
+        return False
+    return _pagina_bloqueada(cur, ttl, html)
+
+
+async def _clicar_voltar_busca(driver) -> bool:
+    """Clica 'Voltar à busca de vagas' (#returnToSearchButton) na tela pós-envio,
+    para retornar à lista e seguir para o próximo card. Best-effort."""
+    try:
+        _txt, clicou = await _clicar_botao_smartapply(driver, _BTN_VOLTAR_BUSCA)
+        if clicou:
+            print("[INDEED] Voltando à busca de vagas (post-apply)")
+            await asyncio.sleep(2)
+        return clicou
+    except Exception:
+        return False
 
 
 async def _aguardar_resolucao_manual(driver, origem: str = "login") -> bool:
@@ -211,8 +258,13 @@ def _esta_logado(url: str, title: str, html: str = "") -> bool:
     """Heurística de login no Indeed. Conservadora: na dúvida, NÃO está logado
     (para cair na intervenção manual, que é segura)."""
     u = (url or "").lower()
-    if "login" in u or "auth" in u or "account/login" in u:
+    if "login" in u or "/auth" in u or "account/login" in u:
         return False
+    # Landings pós-login do Indeed (redireciona pra home/mensagens/settings/passport
+    # após o código): ex. ?from=gnav-passport--passport-webapp, /settings/account
+    if ("from=gnav" in u or "from=passport" in u or "from=messaging" in u
+            or "mypage" in u or "/myjobs" in u or "/settings/" in u):
+        return True
     h = (html or "").lower()
     # Indicadores de sessão ativa (menu da conta, sair, etc.)
     for marca in ("gnav-", "logout", "sair da conta", "account-menu", "minhas vagas", "myjobs"):
@@ -378,6 +430,74 @@ def _build_search_url(query: str = "") -> str:
     return url
 
 
+async def _buscar_via_home(driver, query: str = "") -> bool:
+    """Vai pra HOME do Indeed e digita a palavra-chave no campo de busca
+    (#text-input-what) como um humano — mais robusto que o deep-link /jobs?q= (que
+    o Cloudflare tende a re-desafiar) e cobre o redirect pós-login (passport /
+    settings/account / mensagens). Retorna True se caiu numa lista /jobs."""
+    from selenium.webdriver.common.keys import Keys
+    q = (query or "").strip() or _get_query_padrao()
+    try:
+        await navegar("https://br.indeed.com/?from=gnav-passport--passport-webapp")
+        await asyncio.sleep(3)
+    except Exception:
+        return False
+
+    # Cloudflare pode aparecer na home → intervenção manual.
+    try:
+        cur = await _run_in_thread(lambda: driver.current_url)
+        ttl = await get_title()
+        html = await _run_in_thread(lambda: driver.page_source)
+    except Exception:
+        cur, ttl, html = "", "", ""
+    if _pagina_bloqueada(cur, ttl, html):
+        if not await _aguardar_resolucao_manual(driver, "busca na home do Indeed"):
+            return False
+
+    await notify_browser_step("indeed_busca", "digitando", f"Digitando '{q}' na busca")
+    sel_what = ("#text-input-what, input[name='q'], "
+                "input[aria-label*='keywords' i], input[placeholder*='Cargo' i]")
+    if not await digitar_robusto(sel_what, q):
+        print("[INDEED] Campo de busca (#text-input-what) não encontrado na home")
+        return False
+
+    # Localização (opcional): preenche se INDEED_CIDADE estiver definido.
+    cidade = _get_cidade().strip()
+    if cidade:
+        try:
+            await digitar_robusto(
+                "#text-input-where, input[name='l'], input[aria-label*='where' i]", cidade
+            )
+        except Exception:
+            pass
+
+    await asyncio.sleep(0.6)
+    # Submete: Enter no campo; fallback clica o botão de busca.
+    def _enter():
+        el = driver.find_element(By.CSS_SELECTOR, "#text-input-what")
+        el.send_keys(Keys.RETURN)
+        return True
+    enviado = False
+    try:
+        enviado = await _run_in_thread(_enter)
+    except Exception:
+        enviado = False
+    if not enviado:
+        _, enviado = await _clicar_botao_smartapply(driver, [
+            'button[type="submit"]',
+            'button:has-text("Buscar")', 'button:has-text("Pesquisar")',
+            'button:has-text("Find jobs")', 'button:has-text("Search")',
+        ])
+    await asyncio.sleep(3)
+    try:
+        cur = await _run_in_thread(lambda: driver.current_url)
+    except Exception:
+        cur = ""
+    ok = "/jobs" in (cur or "").lower()
+    print(f"[INDEED] Busca via home → {'OK' if ok else 'não caiu em /jobs'} ({(cur or '')[:80]})")
+    return ok
+
+
 async def extrair_vagas_da_busca(perfil: dict, max_vagas: int = 20, query: str = "") -> dict:
     """
     Extrai vagas da página de busca do Indeed. Usa a página ativa se já estiver
@@ -408,14 +528,25 @@ async def extrair_vagas_da_busca(perfil: dict, max_vagas: int = 20, query: str =
             "mensagem": "Não foi possível acessar o Indeed (login/verificação). Resolva no browser e tente de novo.",
         }
 
-    # Garante que estamos numa página de resultados.
+    # Pós-login o Indeed redireciona pra home/mensagens (ex. ?from=gnav-messaging).
+    # Garante que caímos na LISTA de resultados da busca antes de extrair/aplicar.
+    # Só evita re-navegar se já estamos numa busca da própria palavra-chave.
     try:
         cur = await _run_in_thread(lambda: driver.current_url)
     except Exception:
         cur = ""
-    if "/jobs" not in (cur or "").lower():
-        await navegar(_build_search_url(query))
-        await asyncio.sleep(3)
+    from urllib.parse import quote_plus
+    q_atual = (query or "").strip() or _get_query_padrao()
+    ja_na_busca = "/jobs" in (cur or "").lower() and f"q={quote_plus(q_atual)}".lower() in (cur or "").lower()
+    if not ja_na_busca:
+        # Vai pra home e digita a palavra-chave no campo de busca (humano, robusto
+        # contra Cloudflare). Fallback: navegação direta pra URL de busca.
+        if not await _buscar_via_home(driver, query):
+            url_busca = _build_search_url(query)
+            print(f"[INDEED] Fallback: navegação direta → {url_busca}")
+            await notify_browser_step("indeed_pos_login", "navegando", "Abrindo busca de vagas (direto)")
+            await navegar(url_busca)
+            await asyncio.sleep(3)
 
     await notify_browser_step("indeed_extracao", "iniciando", "Extraindo vagas do Indeed")
     cards = await _extrair_cards_vaga(max_vagas)
@@ -698,6 +829,9 @@ async def _candidatura_enviada(driver) -> bool:
         "application submitted", "your application has been submitted", "application sent",
         "we sent your application", "enviamos sua candidatura", "candidatura recebida",
         "você se candidatou", "you've applied", "you applied",
+        # Tela pós-envio (post-apply) — o botão de voltar à busca só existe após enviar.
+        "voltar à busca de vagas", "returntosearchbutton", "return to job search",
+        "post-apply", "sua candidatura foi entregue",
     )
     def _check():
         try:
@@ -1165,6 +1299,21 @@ async def _processar_formulario_smartapply(driver, perfil: dict, curriculo_path:
                     "mensagem": "Candidatura enviada com sucesso via Indeed!",
                     "screenshot": b64[:100] if b64 else ""}
 
+        # CAPTCHA/verificação pode surgir no meio do SmartApply (comum antes do
+        # envio). A resolução é MANUAL: pausa, avisa o usuário no dashboard e só
+        # retoma quando resolvido (aí re-avalia o step e segue no botão de envio).
+        if await _smartapply_bloqueado(driver):
+            await notify_browser_step(
+                f"indeed_step_{step}", "manual",
+                "🔒 CAPTCHA/verificação — resolva no browser e clique ▶️ Continuar no dashboard"
+            )
+            if not await _aguardar_resolucao_manual(driver, f"CAPTCHA no SmartApply step {step}"):
+                b64 = await screenshot_base64()
+                return {"sucesso": False, "motivo_falha": "captcha",
+                        "mensagem": f"CAPTCHA não resolvido. Aplique manualmente: {vaga_url}",
+                        "screenshot": b64[:100] if b64 else ""}
+            continue  # re-avalia o step após o CAPTCHA ser resolvido
+
         # Preenche contato + currículo + perguntas (resiliente a re-render).
         for _tent in range(3):
             try:
@@ -1391,7 +1540,13 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "", user_id
             idioma=idioma_vaga, vaga_titulo=vaga_titulo,
         )
 
-        # Sai do contexto e volta para a listagem.
+        # Após enviar, clica "Voltar à busca de vagas" (post-apply) para retornar à
+        # lista e seguir ao próximo card. Depois sai do contexto (fecha janela/iframe).
+        if resultado.get("sucesso"):
+            try:
+                await _clicar_voltar_busca(driver)
+            except Exception:
+                pass
         try:
             await _sair_contexto_smartapply(driver, modo, janela_original)
         except Exception:
@@ -1413,11 +1568,13 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "", user_id
 
 # ── Loop: aplicar nas vagas visíveis (mínimo, sem a máquina anti-parking) ──────
 
-async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, user_id: str = "admin") -> dict:
+async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, user_id: str = "admin",
+                                           query: str = "") -> dict:
     """
     Extrai as vagas elegíveis (Indeed Apply) da busca atual e aplica em cada uma,
     registrando no Neo4j. Loop mínimo — sem a máquina de paginação/anti-parking do
-    LinkedIn (que resolvia bugs específicos daquela plataforma)."""
+    LinkedIn (que resolvia bugs específicos daquela plataforma).
+    `query` = palavra-chave do DASHBOARD (tem prioridade sobre INDEED_QUERY do .env)."""
     set_platform("indeed")
     try:
         from graph.neo4j_client import get_neo4j
@@ -1429,7 +1586,7 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
     if resumo_curriculo and not perfil.get("resumo_curriculo"):
         perfil = {**perfil, "resumo_curriculo": resumo_curriculo}
 
-    extra = await extrair_vagas_da_busca(perfil, max_vagas=max(max_vagas * 3, 15))
+    extra = await extrair_vagas_da_busca(perfil, max_vagas=max(max_vagas * 3, 15), query=query)
     if not extra.get("sucesso"):
         return {"sucesso": False, "aplicacoes": [], "mensagem": extra.get("mensagem", "Falha ao extrair vagas")}
 

@@ -262,7 +262,7 @@ VUE_DASHBOARD = """
         <div class="automacao-plataformas" v-if="plataformasAtivas.length" style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:15px;">
             <div v-for="p in plataformasAtivas" :key="p.nome" style="background:#16213e;padding:8px 14px;border-radius:8px;display:flex;align-items:center;gap:8px;">
                 <span class="status-dot" :class="p.running ? 'online' : (p.action !== 'idle' ? 'busy' : 'offline')"></span>
-                <strong :style="{color: p.nome === 'indeed' ? '#2557a7' : '#00d4ff'}">{{p.nome === 'indeed' ? '🟦 Indeed' : (p.nome === 'linkedin' ? '🔗 LinkedIn' : p.nome)}}</strong>
+                <strong :style="{color: p.nome === 'indeed' ? '#2557a7' : (p.nome === 'geekhunter' ? '#7c3aed' : '#00d4ff')}">{{p.nome === 'indeed' ? '🟦 Indeed' : (p.nome === 'linkedin' ? '🔗 LinkedIn' : (p.nome === 'geekhunter' ? '🟣 GeekHunter' : p.nome))}}</strong>
                 <span style="color:#aaa;font-size:0.82rem;">{{p.action}}<span v-if="p.ultima_mensagem"> — {{p.ultima_mensagem}}</span></span>
             </div>
         </div>
@@ -286,6 +286,16 @@ VUE_DASHBOARD = """
             <button @click="aplicarVagasVisiveisIndeed" style="padding:8px 16px;background:#00ff88;border:none;border-radius:4px;color:#0f0f23;font-weight:bold;cursor:pointer;">🤖 Aplicar Vagas Indeed</button>
         </div>
 
+        <div class="geekhunter-bar" style="background:#16213e;padding:12px 15px;border-radius:8px;margin-bottom:15px;display:flex;align-items:center;justify-content:space-between;gap:15px;flex-wrap:wrap;">
+            <div style="display:flex;align-items:center;gap:10px;">
+                <strong style="color:#7c3aed">🟣 GeekHunter</strong>
+                <span style="color:#aaa;font-size:0.85rem;">Login por e-mail/senha do .env; busca por palavra-chave e aplica card a card</span>
+            </div>
+            <input v-model="queryBuscaGeek" placeholder="Palavra-chave (ex: desenvolvedor golang)" style="flex:1;min-width:200px;padding:8px;border-radius:4px;background:#1a1a2e;color:#fff;border:1px solid #7c3aed;">
+            <button @click="extrairVagasGeekhunter" style="padding:8px 16px;background:#7c3aed;border:none;border-radius:4px;color:#fff;font-weight:bold;cursor:pointer;">🔎 Buscar Vagas GeekHunter</button>
+            <button @click="aplicarVagasVisiveisGeekhunter" style="padding:8px 16px;background:#00ff88;border:none;border-radius:4px;color:#0f0f23;font-weight:bold;cursor:pointer;">🤖 Aplicar Vagas GeekHunter</button>
+        </div>
+
         <div style="background:#16213e;padding:12px 15px;border-radius:8px;margin-bottom:15px;">
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
                 <strong style="color:#00d4ff">📝 Currículo / Informações Pessoais</strong>
@@ -293,6 +303,13 @@ VUE_DASHBOARD = """
             </div>
             <textarea v-model="resumoCurriculo" rows="6" placeholder="Cole aqui o texto do seu currículo ou informações pessoais (qualificações, experiências, habilidades, etc.). A IA usará estas informações para preencher os formulários de candidatura em inglês." style="width:100%;padding:10px;border-radius:6px;background:#1a1a2e;color:#fff;border:1px solid #333;font-size:0.9rem;resize:vertical;"></textarea>
             <div style="font-size:0.75rem;color:#888;margin-top:6px;">Este texto será usado pela IA para responder perguntas dos formulários. Sempre respondido em inglês.</div>
+            <div style="display:flex;align-items:center;gap:10px;margin-top:12px;flex-wrap:wrap;">
+                <strong style="color:#00d4ff;white-space:nowrap;">📎 Currículo PDF</strong>
+                <input type="file" accept="application/pdf,.pdf" @change="uploadCurriculo" :disabled="uploadingCurriculo" style="flex:1;min-width:200px;padding:8px;border-radius:4px;background:#1a1a2e;color:#fff;border:1px solid #333;">
+                <span v-if="uploadingCurriculo" style="color:#ffaa00;font-size:0.85rem;">⏳ Enviando...</span>
+                <span v-else-if="curriculoNome" style="color:#00ff88;font-size:0.85rem;">✅ {{curriculoNome}}</span>
+            </div>
+            <div style="font-size:0.75rem;color:#888;margin-top:6px;">Escolha um PDF do seu computador — ele é enviado e salvo no servidor. A automação (Indeed/GeekHunter) faz upload dele quando o formulário tiver campo de currículo.</div>
         </div>
 
         <div class="browser-panel">
@@ -302,6 +319,7 @@ VUE_DASHBOARD = """
                 <select v-model="controlPlatform" @change="carregarBrowser" style="padding:6px;border-radius:4px;background:#1a1a2e;color:#fff;border:1px solid #00d4ff;">
                     <option value="linkedin">LinkedIn</option>
                     <option value="indeed">Indeed</option>
+                    <option value="geekhunter">GeekHunter</option>
                 </select>
                 <span style="color:#666;font-size:0.78rem;">Os dois rodam em paralelo; os controles abaixo agem na plataforma escolhida aqui.</span>
             </div>
@@ -418,6 +436,7 @@ VUE_DASHBOARD = """
                 history: [],
                 busca: '',
                 queryBusca: '',
+                queryBuscaGeek: '',
                 filtroStatus: '',
                 browser: {screenshot: '', url: '', title: ''},
                 browserControl: {paused: false, current_action: 'idle', manual_input: '', intervention_type: null},
@@ -429,6 +448,8 @@ VUE_DASHBOARD = """
                 plataformaSelecionada: '',
                 plataformaAplicacao: '',
                 resumoCurriculo: '',
+                curriculoNome: '',
+                uploadingCurriculo: false,
                 notif: {msg: '', type: 'info'},
                 _notifTimer: null,
             }
@@ -437,7 +458,7 @@ VUE_DASHBOARD = """
             plataformasAtivas() {
                 const pp = (this.automacao && this.automacao.por_plataforma) || {};
                 return Object.keys(pp)
-                    .filter(k => k === 'linkedin' || k === 'indeed')
+                    .filter(k => k === 'linkedin' || k === 'indeed' || k === 'geekhunter')
                     .map(k => ({nome: k, ...pp[k]}));
             },
             automacaoLabel() {
@@ -466,6 +487,7 @@ VUE_DASHBOARD = """
             this.carregarAutomacao();
             this.carregarBrowser();
             this.carregarResumoCurriculo();
+            this.carregarCurriculoPath();
             this.historicoInterval = setInterval(this.carregarAutomacao, 3000);
             this.browserInterval = setInterval(this.carregarBrowser, 1000);
         },
@@ -793,6 +815,44 @@ VUE_DASHBOARD = """
                     this.showNotif('Erro de conexão', 'error');
                 }
             },
+            async extrairVagasGeekhunter() {
+                this.showNotif('🔎 Buscando vagas no GeekHunter... (login por e-mail/senha)', 'info');
+                try {
+                    const r = await fetch('/api/automacao/extrair-vagas-geekhunter', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({max_vagas: 20, query: this.queryBuscaGeek || this.busca || ''})
+                    });
+                    const d = await r.json();
+                    if (d.success) {
+                        await this.carregarAutomacao();
+                        this.showNotif('Busca iniciada — acompanhe o browser abaixo', 'info');
+                    } else {
+                        this.showNotif('❌ Falha na busca: ' + (d.message || ''), 'error');
+                    }
+                } catch(e) {
+                    this.showNotif('Erro de conexão ao buscar vagas no GeekHunter', 'error');
+                }
+            },
+            async aplicarVagasVisiveisGeekhunter() {
+                this.showNotif('🤖 Iniciando aplicação nas vagas do GeekHunter...', 'info');
+                try {
+                    const r = await fetch('/api/automacao/aplicar-vagas-visiveis-geekhunter', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({max_vagas: 5, query: this.queryBuscaGeek || this.busca || ''})
+                    });
+                    const d = await r.json();
+                    if (d.success) {
+                        this.showNotif('✅ Aplicação iniciada! Acompanhe o browser abaixo.', 'success');
+                        this.automacao = {...this.automacao, running: true, action: 'aplicando', platform: 'geekhunter'};
+                    } else {
+                        this.showNotif('❌ Falha: ' + (d.message || 'Erro ao iniciar'), 'error');
+                    }
+                } catch(e) {
+                    this.showNotif('Erro de conexão', 'error');
+                }
+            },
             async carregarResumoCurriculo() {
                 try {
                     const r = await fetch('/api/perfil/resumo-curriculo');
@@ -815,6 +875,46 @@ VUE_DASHBOARD = """
                     }
                 } catch(e) {
                     this.showNotif('Erro de conexão ao salvar currículo', 'error');
+                }
+            },
+            async carregarCurriculoPath() {
+                try {
+                    const r = await fetch('/api/perfil/curriculo-path');
+                    const d = await r.json();
+                    if (d.path) this.curriculoNome = d.path.split('/').pop();
+                } catch(e) {}
+            },
+            async uploadCurriculo(ev) {
+                const file = ev.target.files && ev.target.files[0];
+                if (!file) return;
+                if (!file.name.toLowerCase().endsWith('.pdf')) {
+                    this.showNotif('❌ Selecione um arquivo .pdf', 'error');
+                    return;
+                }
+                this.uploadingCurriculo = true;
+                try {
+                    const dataUrl = await new Promise((resolve, reject) => {
+                        const fr = new FileReader();
+                        fr.onload = () => resolve(fr.result);
+                        fr.onerror = reject;
+                        fr.readAsDataURL(file);
+                    });
+                    const r = await fetch('/api/perfil/curriculo-upload', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({filename: file.name, data: dataUrl})
+                    });
+                    const d = await r.json();
+                    if (d.success) {
+                        this.curriculoNome = d.filename || (d.path || '').split('/').pop();
+                        this.showNotif('✅ Currículo PDF enviado e salvo no servidor!', 'success');
+                    } else {
+                        this.showNotif('❌ ' + (d.error || 'Erro ao enviar'), 'error');
+                    }
+                } catch(e) {
+                    this.showNotif('Erro de conexão ao enviar o PDF', 'error');
+                } finally {
+                    this.uploadingCurriculo = false;
                 }
             }
         }
@@ -1396,7 +1496,7 @@ async def aplicar_vagas_visiveis_indeed_endpoint(request: Request):
 
     async def _run_apply_visiveis():
         try:
-            from automation.indeed_selenium import aplicar_vagas_visiveis_na_pagina, extrair_vagas_da_busca
+            from automation.indeed_selenium import aplicar_vagas_visiveis_na_pagina
             from graph.neo4j_client import get_neo4j
 
             neo4j = get_neo4j()
@@ -1406,11 +1506,9 @@ async def aplicar_vagas_visiveis_indeed_endpoint(request: Request):
             set_browser_current_step("visiveis_indeed", "aplicando", "Buscando vagas na página")
             emit_status_update()
 
-            # Se veio palavra-chave nova, refaz a busca antes de aplicar.
-            if query:
-                await extrair_vagas_da_busca(perfil, max_vagas=max(max_vagas * 3, 15), query=query)
-
-            resultado = await aplicar_vagas_visiveis_na_pagina(perfil, max_vagas, user_id)
+            # A palavra-chave vem do DASHBOARD (query); é passada adiante para a
+            # extração usar ela em vez do INDEED_QUERY do .env.
+            resultado = await aplicar_vagas_visiveis_na_pagina(perfil, max_vagas, user_id, query=query)
 
             _set_automacao_status(
                 False, "finalizando", "indeed",
@@ -1427,12 +1525,121 @@ async def aplicar_vagas_visiveis_indeed_endpoint(request: Request):
     return JSONResponse({"success": True, "message": f"Iniciando aplicação em até {max_vagas} vagas do Indeed"})
 
 
+@fastapi_app.post("/api/automacao/extrair-vagas-geekhunter")
+async def extrair_vagas_geekhunter_endpoint(request: Request):
+    """Extrai vagas da busca do GeekHunter (palavra-chave do dashboard)."""
+    body = await request.json()
+    max_vagas = int(body.get("max_vagas", 20))
+    query = (body.get("query") or "").strip()
+    user_id = os.getenv("DASHBOARD_USER_ID", "admin")
+
+    try:
+        from automation.browser import set_intervention_state, get_intervention_state
+        ctrl = await get_intervention_state(platform="geekhunter")
+        if ctrl.get("current_action") == "parar":
+            await set_intervention_state("current_action", "rodando", platform="geekhunter")
+    except Exception:
+        pass
+
+    async def _run_extracao():
+        try:
+            from graph.neo4j_client import get_neo4j
+            from automation.geekhunter_selenium import extrair_vagas_da_busca
+
+            neo4j = get_neo4j()
+            perfil = neo4j.get_perfil_profissional(user_id) or {}
+
+            _set_automacao_status(True, "extraindo", "geekhunter", f"Buscando no GeekHunter: {query or 'padrão'}")
+            set_browser_current_step("extracao_geekhunter", "extraindo", f"Buscando até {max_vagas} vagas")
+            emit_status_update()
+
+            resultado = await extrair_vagas_da_busca(perfil, max_vagas=max_vagas, query=query)
+
+            if resultado.get("sucesso"):
+                vagas = resultado.get("vagas", [])
+                for vaga in vagas:
+                    try:
+                        neo4j.upsert_vaga({
+                            "id": vaga.get("id", ""),
+                            "titulo": vaga.get("titulo", ""),
+                            "empresa": vaga.get("empresa", ""),
+                            "url": vaga.get("url", ""),
+                            "fonte": vaga.get("fonte", "GeekHunter"),
+                            "salario": vaga.get("salario", ""),
+                            "modalidade": vaga.get("modalidade", ""),
+                            "descricao": vaga.get("descricao", "")[:500],
+                        })
+                    except Exception:
+                        pass
+                _set_automacao_status(False, "idle", "geekhunter", f"Extraídas {len(vagas)} vagas do GeekHunter")
+                set_browser_current_step("extracao_geekhunter_fim", "concluido", f"{len(vagas)} vagas")
+            else:
+                _set_automacao_status(False, "idle", "geekhunter", resultado.get("mensagem", "Falha na extração"))
+                set_browser_current_step("extracao_geekhunter_fim", "falha", resultado.get("mensagem", ""))
+            emit_status_update()
+        except Exception as e:
+            logger.error(f"Erro em extrair_vagas_geekhunter: {e}")
+            _set_automacao_status(False, "erro", "geekhunter", str(e))
+            set_browser_current_step("extracao_geekhunter_fim", "falha", str(e))
+            emit_status_update()
+
+    _track_task(_run_extracao(), platform="geekhunter")
+    return JSONResponse({"success": True, "message": f"Extraindo até {max_vagas} vagas do GeekHunter"})
+
+
+@fastapi_app.post("/api/automacao/aplicar-vagas-visiveis-geekhunter")
+async def aplicar_vagas_visiveis_geekhunter_endpoint(request: Request):
+    """Aplica card a card nas vagas do GeekHunter (clique abre nova aba)."""
+    body = await request.json()
+    max_vagas = int(body.get("max_vagas", 5))
+    query = (body.get("query") or "").strip()
+    user_id = os.getenv("DASHBOARD_USER_ID", "admin")
+
+    try:
+        from automation.browser import set_intervention_state, get_intervention_state
+        ctrl = await get_intervention_state(platform="geekhunter")
+        if ctrl.get("current_action") == "parar":
+            await set_intervention_state("current_action", "rodando", platform="geekhunter")
+    except Exception:
+        pass
+
+    async def _run_apply_visiveis():
+        try:
+            from automation.geekhunter_selenium import aplicar_vagas_visiveis_na_pagina
+            from graph.neo4j_client import get_neo4j
+
+            neo4j = get_neo4j()
+            perfil = neo4j.get_perfil_profissional(user_id) or {}
+
+            _set_automacao_status(True, "aplicando", "geekhunter", f"Aplicando em até {max_vagas} vagas do GeekHunter")
+            set_browser_current_step("visiveis_geekhunter", "aplicando", "Buscando vagas na página")
+            emit_status_update()
+
+            resultado = await aplicar_vagas_visiveis_na_pagina(perfil, max_vagas, user_id, query=query)
+
+            _set_automacao_status(
+                False, "finalizando", "geekhunter",
+                f"Concluído: {len(resultado.get('aplicacoes', []))} vagas processadas"
+            )
+            set_browser_current_step("visiveis_geekhunter_fim", "concluido", resultado.get("mensagem", ""))
+            emit_status_update()
+        except Exception as e:
+            logger.error(f"Erro em aplicar_vagas_visiveis_geekhunter: {e}")
+            _set_automacao_status(False, "erro", "geekhunter", str(e))
+            emit_status_update()
+
+    _track_task(_run_apply_visiveis(), platform="geekhunter")
+    return JSONResponse({"success": True, "message": f"Iniciando aplicação em até {max_vagas} vagas do GeekHunter"})
+
+
 def _detectar_plataforma(url: str) -> str:
     url_lower = (url or "").lower()
     if "linkedin.com" in url_lower:
         return "linkedin"
     if "indeed.com" in url_lower or "br.indeed.com" in url_lower:
         return "indeed"
+    if "geekhunter.com" in url_lower:
+        return "geekhunter"
     if "gupy.io" in url_lower:
         return "gupy"
     if "greenhouse.io" in url_lower or "jobs.greenhouse" in url_lower:
@@ -1635,6 +1842,54 @@ async def set_resumo_curriculo(request: Request):
         neo4j = get_neo4j()
         neo4j.salvar_resumo_curriculo(user_id, resumo)
         return JSONResponse({"success": True})
+    except Exception as e:
+        return JSONResponse({"success": False, "error": str(e)})
+
+
+@fastapi_app.get("/api/perfil/curriculo-path")
+async def get_curriculo_path():
+    user_id = os.getenv("DASHBOARD_USER_ID", "admin")
+    try:
+        neo4j = get_neo4j()
+        return JSONResponse({"path": neo4j.get_curriculo_path(user_id)})
+    except Exception as e:
+        return JSONResponse({"path": "", "error": str(e)})
+
+
+@fastapi_app.post("/api/perfil/curriculo-upload")
+async def upload_curriculo(request: Request):
+    """Recebe o PDF do currículo (base64, do computador do usuário via file picker),
+    SALVA no servidor em data/curriculos/<user>.pdf e registra o caminho em Neo4j — a
+    automação (Indeed/GeekHunter) faz upload desse arquivo quando o form tem campo de
+    currículo. Base64/JSON evita a dependência python-multipart."""
+    import base64 as _b64
+    body = await request.json()
+    filename = (body.get("filename") or "curriculo.pdf")
+    data_b64 = body.get("data") or ""
+    user_id = os.getenv("DASHBOARD_USER_ID", "admin")
+    if not str(filename).lower().endswith(".pdf"):
+        return JSONResponse({"success": False, "error": "Envie um arquivo .pdf"})
+    # Aceita data URL ("data:application/pdf;base64,....") ou base64 puro.
+    if "," in data_b64 and data_b64.strip().lower().startswith("data:"):
+        data_b64 = data_b64.split(",", 1)[1]
+    try:
+        conteudo = _b64.b64decode(data_b64, validate=False)
+    except Exception:
+        return JSONResponse({"success": False, "error": "Conteúdo base64 inválido"})
+    if not conteudo or not conteudo[:5].startswith(b"%PDF"):
+        return JSONResponse({"success": False, "error": "Arquivo não parece um PDF válido"})
+    try:
+        from pathlib import Path as _Path
+        destino_dir = _Path(__file__).parent.parent / "data" / "curriculos"
+        destino_dir.mkdir(parents=True, exist_ok=True)
+        safe = "".join(c for c in user_id if c.isalnum() or c in "-_") or "admin"
+        destino = destino_dir / f"{safe}.pdf"  # sobrescreve o anterior
+        destino.write_bytes(conteudo)
+        caminho = str(destino.resolve())
+        neo4j = get_neo4j()
+        neo4j.salvar_curriculo_path(user_id, caminho)
+        return JSONResponse({"success": True, "path": caminho,
+                             "filename": filename, "tamanho": len(conteudo)})
     except Exception as e:
         return JSONResponse({"success": False, "error": str(e)})
 
