@@ -661,6 +661,65 @@ def _detectar_sucesso(html: str, url: str) -> bool:
     return any(s in html_lower or s in url_lower for s in _FRASES_SUCESSO)
 
 
+# Quantas vezes re-ler+re-preencher um step que o LinkedIn recusou por validação
+# antes de desistir. Alto de propósito: um campo numérico teimoso (React reverte o
+# fill) não pode custar a candidatura inteira. Ajustável via env.
+_MAX_RETRY_VALIDACAO = int(os.getenv("LINKEDIN_MAX_RETRY_VALIDACAO", "5"))
+
+
+async def _limpar_campos_invalidos(driver) -> int:
+    """Zera os inputs/textarea que o LinkedIn marcou como INVÁLIDOS (aria-invalid ou
+    vizinhos a um texto de erro), para que _detectar_perguntas_nao_respondidas os
+    re-encontre como 'não respondidos' (ela PULA campo que já tem value) e o próximo
+    ciclo re-preencha. Sem isto, um campo com valor rejeitado fica invisível pra
+    re-detecção e a candidatura seria descartada por causa dele. Retorna nº limpos."""
+    def _limpar():
+        scope = _modal_scope(driver) or driver
+        alvos = []
+        try:
+            for el in scope.find_elements(By.CSS_SELECTOR,
+                    "input[aria-invalid='true'], textarea[aria-invalid='true']"):
+                if el.is_displayed():
+                    alvos.append(el)
+        except Exception:
+            pass
+        # Inputs no mesmo container de uma mensagem de erro inline.
+        try:
+            for err in scope.find_elements(By.CSS_SELECTOR,
+                    ".fb-dash-form-element__error-text, .artdeco-inline-feedback--error"):
+                if not err.is_displayed():
+                    continue
+                try:
+                    cont = err.find_element(By.XPATH, "./ancestor::*[self::div or self::fieldset][1]")
+                    for el in cont.find_elements(By.CSS_SELECTOR, "input[type='text'], input[type='number'], textarea"):
+                        if el.is_displayed() and el not in alvos:
+                            alvos.append(el)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        n = 0
+        for el in alvos:
+            try:
+                driver.execute_script(
+                    "var el=arguments[0];"
+                    "var proto=el.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype"
+                    ":window.HTMLInputElement.prototype;"
+                    "var s=Object.getOwnPropertyDescriptor(proto,'value').set;"
+                    "s.call(el,'');"
+                    "el.dispatchEvent(new Event('input',{bubbles:true}));"
+                    "el.dispatchEvent(new Event('change',{bubbles:true}));",
+                    el)
+                n += 1
+            except Exception:
+                continue
+        return n
+    try:
+        return await _run_in_thread(_limpar)
+    except Exception:
+        return 0
+
+
 async def _detectar_erros_validacao(driver) -> list:
     """Detecta mensagens de erro de validação visíveis no step atual.
 
@@ -835,7 +894,9 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
 
     perguntas_customizadas = []
     respostas_geradas = {}
-    max_steps = 12
+    # Folga p/ os retries de validação (cada re-tentativa de um campo teimoso consome
+    # uma iteração). Um form real tem 2-5 steps; 15 cobre steps + re-preenchimentos.
+    max_steps = 15
     nao_avancou = 0   # nº de 'Avançar' consecutivos sem o step mudar (anti-loop)
 
     try:
@@ -1033,10 +1094,25 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
             if avancou:
                 nao_avancou = 0
                 continue
-            # Não avançou: confirma travamento real. Erro de validação visível OU
-            # repetiu demais sem sair do lugar → bail. Senão, segue e re-tenta.
+            # Não avançou: confirma travamento real.
             nao_avancou += 1
             erros = await _detectar_erros_validacao(driver)
+            if erros and nao_avancou < _MAX_RETRY_VALIDACAO:
+                # NÃO descarta na 1ª recusa de validação. O LinkedIn tipicamente recusa
+                # um campo numérico ("Enter a whole number between 0 and 99") que não
+                # colou (React reverte / fill rápido demais) ou ficou fora do range.
+                # Limpa os campos inválidos (pra a detecção re-encontrá-los, já que ela
+                # PULA campo com value) e re-tenta LER + PREENCHER — pedido do usuário:
+                # "se falhou, tente ler de novo", nunca descartar por um campo teimoso.
+                limpos = await _limpar_campos_invalidos(driver)
+                _registrar_run_log(
+                    f"FORM step {step}: validação recusou ({'; '.join(erros[:2])[:50]}) — "
+                    f"limpei {limpos} campo(s), re-preenchendo (tent {nao_avancou}/{_MAX_RETRY_VALIDACAO})"
+                )
+                await notify_browser_step("step_"+str(step), "revalidando",
+                                          f"Campo recusado — lendo de novo ({nao_avancou}/{_MAX_RETRY_VALIDACAO})")
+                await asyncio.sleep(1.0)
+                continue
             if erros or nao_avancou >= 3:
                 motivo = (" | ".join(erros[:3])) if erros else f"sem avanço {nao_avancou}x ({sig_depois})"
                 print(f"[LINKEDIN] Step {step}: avanço bloqueado — {motivo}")
@@ -1531,9 +1607,14 @@ async def _detectar_perguntas_nao_respondidas_selenium(driver) -> list:
     seen_labels: set = set()
 
     def _add(pergunta: str):
-        # Evita duplicatas pela label base
-        base = re.sub(r'^(NUMERO|DECIMAL|SELECT|RADIO|COMBO):', '', pergunta).split(":")[0][:40]
-        if base not in seen_labels:
+        # Dedup pela label INTEIRA normalizada. Antes usava só [:40], e duas perguntas
+        # distintas com o mesmo começo — "How many years of work experience do you have
+        # with Linux?" e "...with Google BigQuery?" — colidiam: a 2ª era descartada, o
+        # campo dela ficava vazio e o LinkedIn recusava/descartava. A label inteira
+        # distingue Linux de BigQuery e mantém as DUAS perguntas.
+        base = re.sub(r'^(NUMERO|DECIMAL|SELECT|RADIO|COMBO):', '', pergunta).split(":")[0]
+        base = _norm_label(base)
+        if base and base not in seen_labels:
             seen_labels.add(base)
             perguntas.append(pergunta)
 
@@ -1814,6 +1895,39 @@ async def _preencher_checkbox_selenium(driver, label_text: str, resposta: str) -
         _registrar_run_log(f"CHECKBOX ERRO '{label_text[:30]}': {e}")
 
 
+def _clamp_num(el, valor: str, is_decimal: bool) -> str:
+    """Garante que o número respeita os atributos min/max do input (o LinkedIn expõe
+    'between 0 and 99' como max=99). Valor fora do range é recusado e descartaria a
+    candidatura. Em qualquer erro, devolve o valor original (best-effort)."""
+    try:
+        mn = el.get_attribute("min")
+        mx = el.get_attribute("max")
+        limpo = re.sub(r'[^\d.\-]', '', valor or "")
+        if limpo in ("", ".", "-"):
+            return valor
+        num = float(limpo)
+        if mn not in (None, ""):
+            try:
+                num = max(num, float(mn))
+            except (TypeError, ValueError):
+                pass
+        if mx not in (None, ""):
+            try:
+                num = min(num, float(mx))
+            except (TypeError, ValueError):
+                pass
+        return str(num) if is_decimal else str(int(num))
+    except Exception:
+        return valor
+
+
+def _norm_label(s: str) -> str:
+    """Normaliza uma label pra comparação robusta: minúsculas + colapsa espaços/
+    quebras. O containment na hora de casar já cobre o hint ('Enter a whole number...')
+    vir junto ou não, então não removemos nada — só uniformizamos o whitespace."""
+    return re.sub(r"\s+", " ", (s or "").lower()).strip()
+
+
 async def _preencher_resposta_customizada_selenium(driver, pergunta: str, resposta: str) -> None:
     """Preenche campo de pergunta customizada pela label via Selenium.
     Suporta text, number, textarea, select, radio, checkbox, NUMERO, DECIMAL e COMBO."""
@@ -1879,40 +1993,88 @@ async def _preencher_resposta_customizada_selenium(driver, pergunta: str, respos
                 el, val,
             )
 
-        labels = _scope.find_elements(By.CSS_SELECTOR, "label")
-        for label in labels:
+        # Localiza o campo ITERANDO OS INPUTS (igual à detecção) e casando pela label
+        # COMPUTADA de cada um — label[for] OU aria-label OU placeholder OU texto do
+        # container. O código antigo iterava <label> e exigia `for`, então campos sem
+        # <label for> (rotulados por aria-label) "achavam mas não preenchiam". E casava
+        # por prefixo [:30], idêntico p/ "...experience with Linux/BigQuery" → preenchia
+        # o campo errado (ou nenhum). Agora casa pela label INTEIRA (containment), que
+        # distingue Linux de BigQuery, e pega o input direto.
+        def _label_do_input(el):
             try:
-                label_text = (label.text or "").lower()
+                iid = el.get_attribute("id")
+                if iid:
+                    labs = driver.find_elements(By.CSS_SELECTOR, f"label[for='{iid}']")
+                    if labs and (labs[0].text or "").strip():
+                        return labs[0].text.strip()
+                for attr in ("aria-label", "placeholder"):
+                    v = el.get_attribute(attr)
+                    if v and v.strip():
+                        return v.strip()
+                anc = el.find_element(By.XPATH, "./ancestor::*[self::div or self::fieldset][1]")
+                t = (anc.text or "").strip()
+                return t.split("\n")[0] if t else ""
+            except Exception:
+                return ""
+
+        alvo_norm = _norm_label(pergunta_busca)
+        candidatos = _scope.find_elements(
+            By.CSS_SELECTOR,
+            "input[type='text'], input[type='number'], input:not([type]), textarea",
+        )
+        alvo = None
+        for el in candidatos:
+            try:
+                if not el.is_displayed():
+                    continue
+                lab = _norm_label(_label_do_input(el))
+                if not lab:
+                    continue
+                # Containment BIDIRECIONAL: cobre o caso da label trazer o hint junto
+                # ("...BigQuery? Enter a whole number between 0 and 99") ou não.
+                if lab == alvo_norm or (len(alvo_norm) >= 8 and (alvo_norm in lab or lab in alvo_norm)):
+                    alvo = el
+                    break
             except Exception:
                 continue
-            if pergunta_busca.lower()[:30] in label_text:
-                label_for = label.get_attribute("for")
-                if label_for:
-                    el = driver.find_elements(By.ID, label_for)
-                    if el and el[0].is_displayed():
-                        tag = el[0].tag_name.lower()
-                        input_type = (el[0].get_attribute("type") or "").lower()
-                        if tag == "textarea":
-                            valor = resposta[:500]
-                        elif input_type == "number" or is_numero or is_decimal:
-                            valor = resposta  # já formatado (inteiro/decimal)
-                        else:
-                            valor = resposta[:200]
-                        try:
-                            el[0].clear()
-                            el[0].send_keys(valor)
-                        except Exception:
-                            pass
-                        # Confirma/garante via React; se send_keys não fixou, isto fixa.
-                        try:
-                            _set_react_input(el[0], valor)
-                        except Exception:
-                            pass
-                        ficou = (el[0].get_attribute("value") or "")
-                        print(f"[LINKEDIN] Preencheu {tag}/{input_type}: {pergunta_busca[:35]} = {valor} (ficou: {ficou[:15]})")
-                        _registrar_run_log(f"PREENCHER {pergunta_busca[:30]} = '{valor}' (ficou: '{ficou[:15]}')")
-                        return
-        _registrar_run_log(f"PREENCHER: label não casou p/ '{pergunta[:40]}'")
+        # Fallback: se o step tem exatamente UM campo vazio, é esse (evita descartar
+        # por não ter casado a label exata).
+        if alvo is None:
+            vazios = [el for el in candidatos
+                      if el.is_displayed() and not (el.get_attribute("value") or "").strip()]
+            if len(vazios) == 1:
+                alvo = vazios[0]
+
+        if alvo is None:
+            _registrar_run_log(f"PREENCHER: campo não localizado p/ '{pergunta[:40]}'")
+            return
+
+        tag = alvo.tag_name.lower()
+        input_type = (alvo.get_attribute("type") or "").lower()
+        if tag == "textarea":
+            valor = resposta[:500]
+        elif input_type == "number" or is_numero or is_decimal:
+            # Respeita min/max do input (ex.: "between 0 and 99" → max=99).
+            valor = _clamp_num(alvo, resposta, is_decimal)
+        else:
+            valor = resposta[:200]
+        try:
+            alvo.click()
+        except Exception:
+            pass
+        try:
+            alvo.clear()
+            alvo.send_keys(valor)
+        except Exception:
+            pass
+        # Confirma/garante via React; se send_keys não fixou, isto fixa.
+        try:
+            _set_react_input(alvo, valor)
+        except Exception:
+            pass
+        ficou = (alvo.get_attribute("value") or "")
+        print(f"[LINKEDIN] Preencheu {tag}/{input_type}: {pergunta_busca[:35]} = {valor} (ficou: {ficou[:15]})")
+        _registrar_run_log(f"PREENCHER {pergunta_busca[:30]} = '{valor}' (ficou: '{ficou[:15]}')")
     except Exception as e:
         logger.debug("linkedin_selenium: erro ao preencher resposta: %s", e)
         _registrar_run_log(f"PREENCHER ERRO '{pergunta[:35]}': {e}")
@@ -3446,9 +3608,10 @@ async def _extrair_descricao_vaga(driver) -> str:
 
 
 # Nota mínima (0-100) de relevância vaga×currículo para aplicar.
-# 40 = "na dúvida, aplica": só pula o que é claramente de outra área (0-39).
+# 30 = "na dúvida, aplica" (pedido do usuário): só pula o que NÃO tem NADA a ver com
+# o perfil (0-29, outra profissão). Qualquer similaridade plausível → aplica.
 # Ajustável via env LINKEDIN_LIMIAR_MATCH sem mexer no código.
-_LIMIAR_MATCH = int(os.getenv("LINKEDIN_LIMIAR_MATCH", "40"))
+_LIMIAR_MATCH = int(os.getenv("LINKEDIN_LIMIAR_MATCH", "30"))
 
 
 async def _avaliar_match_vaga(descricao: str, curriculo: str) -> dict:

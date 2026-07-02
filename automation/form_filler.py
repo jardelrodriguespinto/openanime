@@ -72,7 +72,10 @@ def responder_pergunta(
     if pergunta.startswith("NUMERO:"):
         pergunta_real = pergunta[7:].strip()
         resposta_bruta = _responder_pergunta_raw(
-            f"[RESPONDA APENAS COM UM NÚMERO INTEIRO, SEM TEXTO] {pergunta_real}",
+            "[Answer with ONLY a whole number, no text. If the question asks about years "
+            "of experience with a specific skill/technology/tool/language that is NOT "
+            "mentioned in the resume, answer exactly 0. Never invent experience.] "
+            f"{pergunta_real}",
             perfil, vaga_titulo, vaga_empresa, resumo_curriculo, idioma
         )
         m = re.search(r'\b\d+\b', resposta_bruta)

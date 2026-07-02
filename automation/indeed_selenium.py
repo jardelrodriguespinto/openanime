@@ -77,8 +77,9 @@ def _get_cidade() -> str:
 
 
 # Nota mínima (0-100) de relevância vaga×currículo para aplicar. Fail-open igual
-# ao LinkedIn: na dúvida (sem dados/timeout/erro), aplica. Ajustável no .env.
-_LIMIAR_MATCH = int(os.getenv("INDEED_LIMIAR_MATCH", "40"))
+# ao LinkedIn: na dúvida (sem dados/timeout/erro), aplica. 30 = "na dúvida aplica",
+# só pula quem NÃO tem nada a ver com o perfil. Ajustável no .env.
+_LIMIAR_MATCH = int(os.getenv("INDEED_LIMIAR_MATCH", "30"))
 
 _BASE = "https://br.indeed.com"
 

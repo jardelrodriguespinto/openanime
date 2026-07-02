@@ -108,7 +108,10 @@ _BTN_CANDIDATAR = [
     'button:has-text("Aplicar para a vaga")',
     'button:has-text("Aplicar")',
     'button:has-text("Enviar")',
-    'button[type="submit"]',
+    # NÃO usar 'button[type="submit"]' aqui: numa página de detalhe (com barra de
+    # busca/filtros) o _clicar_botao_smartapply clicaria o 1º submit qualquer ANTES
+    # de casar o texto do botão de candidatar. O match por texto acima já pega o
+    # botão certo (inclusive se ele for type=submit, casa pelo texto visível).
 ]
 
 # Fecha o modal de "atenção"/confirmação que aparece após enviar a candidatura.
@@ -137,6 +140,10 @@ _FRASES_SUCESSO_GEEK = (
     "recebemos sua candidatura",
     "sua candidatura foi realizada",
 )
+# NÃO adicionar frases genéricas tipo "candidatura realizada/registrada": elas podem
+# aparecer como ESTATÍSTICA/marketing da página ("500 candidaturas realizadas") e o
+# _geek_confirmacao_sucesso varre o page_source inteiro no TOPO do loop (antes de
+# clicar) → dariam falso sucesso pré-envio. Só frases que descrevem ESTE envio.
 
 # Botões de avançar dentro de um fluxo multi-step do formulário.
 _BTN_CONTINUAR = [
@@ -717,6 +724,62 @@ async def _geek_confirmacao_sucesso(driver) -> bool:
         return False
 
 
+# Textos que identificam um GATILHO de candidatura ainda na tela (form não enviado).
+_TEXTO_TRIGGER_CANDIDATAR = ("finalizar candidatura", "candidatar", "enviar candidatura",
+                             "quero me candidatar", "aplicar para a vaga")
+
+
+async def _sucesso_estrutural_geek(driver, n_campos_antes: int) -> bool:
+    """Sucesso por ESTRUTURA (não por string de confirmação, que varia): a candidatura
+    foi enviada quando, após clicar candidatar, o FORMULÁRIO some (campos despencam) e
+    não resta botão de candidatar/finalizar — a tela virou confirmação.
+
+    CRÍTICO: exige ESTABILIDADE (2 checagens ~2s). Clicar o botão de ABRIR o form
+    ('Candidatar-se') também é is_submit e re-renderiza o SPA: por um instante o form
+    antigo some e o próximo controle ainda não pintou — isso daria FALSO 'enviado'
+    (contaria vaga sem aplicar, o pior caso). Só conta enviado se o form SEGUE ausente
+    e sem botão de candidatar DEPOIS da página assentar (um passo intermediário teria
+    pintado o próximo controle nesse meio-tempo). Guarda extra: antes havia ≥2 campos."""
+    if n_campos_antes < 2:
+        return False
+
+    def _snapshot():
+        try:
+            n = len([e for e in driver.find_elements(By.CSS_SELECTOR, "input,textarea,select")
+                     if e.is_displayed()])
+        except Exception:
+            return (99, True)  # erro ao inspecionar → trata como "form presente"
+        trigger = False
+        try:
+            for b in driver.find_elements(By.CSS_SELECTOR, "button, [role='button'], a"):
+                try:
+                    if not (b.is_displayed() and b.is_enabled()):
+                        continue
+                    t = (b.text or b.get_attribute("aria-label") or "").strip().lower()
+                    if any(k in t for k in _TEXTO_TRIGGER_CANDIDATAR):
+                        trigger = True
+                        break
+                except Exception:
+                    continue
+        except Exception:
+            return (n, True)
+        return (n, trigger)
+
+    try:
+        n1, trig1 = await _run_in_thread(_snapshot)
+    except Exception:
+        return False
+    if n1 > 1 or trig1:
+        return False  # form ainda na tela / botão de candidatar presente → não enviou
+    # 1ª checagem passou — pode ser só o gap do re-render. Espera assentar e re-checa.
+    await asyncio.sleep(2.2)
+    try:
+        n2, trig2 = await _run_in_thread(_snapshot)
+    except Exception:
+        return False
+    return n2 <= 1 and not trig2
+
+
 async def _fechar_modal_atencao(driver) -> None:
     """Fecha o modal de atenção/confirmação exibido após enviar a candidatura."""
     try:
@@ -866,6 +929,14 @@ async def _preencher_e_enviar_formulario(driver, perfil: dict, resumo_curriculo:
             )
         except Exception:
             sig_antes = ""
+        # Nº de campos de formulário ANTES do clique — base do sucesso estrutural
+        # (form some depois de enviar de verdade).
+        try:
+            n_campos_antes = await _run_in_thread(
+                lambda: len([e for e in driver.find_elements(By.CSS_SELECTOR, "input,textarea,select") if e.is_displayed()])
+            )
+        except Exception:
+            n_campos_antes = 0
 
         # Instrumentação: captura o DOM REAL logo antes de decidir o clique — é aqui
         # que se vê o rótulo do botão final e se o form abriu inline/modal.
@@ -913,6 +984,23 @@ async def _preencher_e_enviar_formulario(driver, perfil: dict, resumo_curriculo:
             await _fechar_modal_atencao(driver)
             b64 = await screenshot_base64()
             await notify_browser_step(f"geek_step_{step}", "sucesso", "Candidatura enviada!")
+            return {"sucesso": True, "perguntas_respondidas": perguntas_feitas,
+                    "mensagem": "Candidatura enviada com sucesso no GeekHunter!",
+                    "screenshot": b64[:100] if b64 else ""}
+
+        # Sucesso ESTRUTURAL (sem depender do rótulo/frase exatos, que não conhecemos):
+        # se clicamos um botão de CANDIDATAR (não 'Continuar') e, depois do clique, o
+        # FORMULÁRIO SUMIU (nº de campos despencou pra ~0), a tela virou confirmação →
+        # candidatura enviada. É o caso do botão final NÃO se chamar 'Finalizar'
+        # (ex.: 'Enviar candidatura'/'Candidatar-se'). Guardas (form tinha ≥2 campos e
+        # agora tem ≤1, e nenhum botão de candidatar/finalizar restou) evitam falso
+        # positivo em passos intermediários, onde o form APARECE (contagem sobe).
+        if is_submit and await _sucesso_estrutural_geek(driver, n_campos_antes):
+            await _fechar_modal_atencao(driver)
+            b64 = await screenshot_base64()
+            await notify_browser_step(f"geek_step_{step}", "sucesso",
+                                      "Candidatura enviada! (form encerrou)")
+            print(f"[GEEK] Sucesso estrutural: form sumiu após '{btn_text[:30]}' (campos {n_campos_antes}→~0)")
             return {"sucesso": True, "perguntas_respondidas": perguntas_feitas,
                     "mensagem": "Candidatura enviada com sucesso no GeekHunter!",
                     "screenshot": b64[:100] if b64 else ""}
@@ -969,12 +1057,17 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
     resultados = {"sucesso": True, "aplicacoes": [], "falhas": 0}
     aplicadas = 0
     teto = _cont.get_teto()
+    # Condição de PARADA pelo .env (pedido do usuário): se há teto configurado
+    # (GEEK_HUNTER_TETO_APLICACOES), o lote vai até BATER o teto persistente e IGNORA
+    # o max_vagas do dashboard (que parava cedo, em 5). `limite` = quantas ainda faltam
+    # pra chegar no teto. Sem teto (0), respeita o max_vagas passado.
+    limite = max(teto - _cont.get_count(user_id), 0) if teto > 0 else max_vagas
     pagina = 1
     MAX_PAGINAS = int(os.getenv("GEEK_HUNTER_MAX_PAGINAS", "20"))
 
     # Loop de PÁGINAS: aplica em todos os cards da página; ao esgotar, vai pra
-    # page=2, page=3... até bater max_vagas/teto ou não haver mais vagas.
-    while aplicadas < max_vagas and pagina <= MAX_PAGINAS:
+    # page=2, page=3... até bater o limite/teto ou não haver mais vagas.
+    while aplicadas < limite and pagina <= MAX_PAGINAS:
         if teto > 0 and _cont.teto_atingido(user_id):
             resultados["mensagem"] = f"Teto de candidaturas atingido ({teto})."
             break
@@ -1000,7 +1093,7 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
         print(f"[GEEK] Página {pagina}: {n_cards} vaga(s)")
 
         for i in range(n_cards):
-            if aplicadas >= max_vagas:
+            if aplicadas >= limite:
                 break
             if teto > 0 and _cont.teto_atingido(user_id):
                 resultados["mensagem"] = f"Teto de candidaturas atingido ({teto})."
