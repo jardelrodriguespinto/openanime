@@ -7,6 +7,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import re
 import time
 from datetime import datetime, timedelta
 
@@ -315,8 +316,26 @@ VUE_DASHBOARD = """
                 <input v-model="dadosPessoais.remuneracao_clt" placeholder="Remuneração CLT (R$ mensal, ex: 8000)" style="padding:8px;border-radius:4px;background:#1a1a2e;color:#fff;border:1px solid #333;">
                 <input v-model="dadosPessoais.remuneracao_pj" placeholder="Remuneração PJ (R$ mensal, ex: 12000)" style="padding:8px;border-radius:4px;background:#1a1a2e;color:#fff;border:1px solid #333;">
                 <input v-model="dadosPessoais.remuneracao_dolar" placeholder="Remuneração em dólar (US$ mensal, ex: 4000)" style="padding:8px;border-radius:4px;background:#1a1a2e;color:#fff;border:1px solid #333;">
+                <input v-model="dadosPessoais.cpf" placeholder="CPF (só números, ex: 11259624617)" style="padding:8px;border-radius:4px;background:#1a1a2e;color:#fff;border:1px solid #333;">
+                <input v-model="dadosPessoais.rg" placeholder="RG" style="padding:8px;border-radius:4px;background:#1a1a2e;color:#fff;border:1px solid #333;">
+                <input v-model="dadosPessoais.data_nascimento" placeholder="Data de nascimento (ex: 01/01/1990)" style="padding:8px;border-radius:4px;background:#1a1a2e;color:#fff;border:1px solid #333;">
             </div>
-            <div style="font-size:0.75rem;color:#888;margin-top:6px;">Preenchem os campos obrigatórios das candidaturas (Nome, Celular, LinkedIn, Remuneração CLT/PJ/dólar) no GeekHunter/Indeed/LinkedIn. Valor numérico simples (ex: 8000) — a automação escolhe CLT, PJ ou dólar conforme a pergunta.</div>
+            <div style="font-size:0.75rem;color:#888;margin-top:6px;">Preenchem os campos obrigatórios das candidaturas (Nome, Celular, LinkedIn, Remuneração CLT/PJ/dólar, CPF/RG/nascimento) no GeekHunter/Indeed/LinkedIn. Dados sensíveis (salário, CPF/RG) vêm daqui — a IA nunca inventa.</div>
+
+            <div style="border-top:1px solid #2a2a4a;margin-top:12px;padding-top:10px;">
+                <strong style="color:#00d4ff;font-size:0.9rem;">🎯 Onde você aceita trabalhar</strong>
+                <div style="display:flex;gap:16px;margin-top:8px;flex-wrap:wrap;">
+                    <label style="color:#ddd;cursor:pointer;"><input type="checkbox" value="remoto" v-model="dadosPessoais.modalidades"> Remoto</label>
+                    <label style="color:#ddd;cursor:pointer;"><input type="checkbox" value="hibrido" v-model="dadosPessoais.modalidades"> Híbrido</label>
+                    <label style="color:#ddd;cursor:pointer;"><input type="checkbox" value="presencial" v-model="dadosPessoais.modalidades"> Presencial</label>
+                </div>
+                <div v-if="dadosPessoais.modalidades.includes('presencial') || dadosPessoais.modalidades.includes('hibrido')" style="margin-top:10px;">
+                    <div style="color:#aaa;font-size:0.8rem;margin-bottom:5px;">Regiões do Brasil onde você pode trabalhar/mudar (presencial/híbrido só candidata se a cidade da vaga estiver numa dessas regiões):</div>
+                    <div style="display:flex;gap:14px;flex-wrap:wrap;">
+                        <label v-for="r in ['Norte','Nordeste','Centro-Oeste','Sudeste','Sul']" :key="r" style="color:#ddd;cursor:pointer;"><input type="checkbox" :value="r" v-model="dadosPessoais.regioes"> {{r}}</label>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <div style="background:#16213e;padding:12px 15px;border-radius:8px;margin-bottom:15px;">
@@ -471,7 +490,7 @@ VUE_DASHBOARD = """
                 plataformaSelecionada: '',
                 plataformaAplicacao: '',
                 resumoCurriculo: '',
-                dadosPessoais: {nome: '', telefone: '', linkedin: '', email: '', remuneracao_clt: '', remuneracao_pj: '', remuneracao_dolar: ''},
+                dadosPessoais: {nome: '', telefone: '', linkedin: '', email: '', remuneracao_clt: '', remuneracao_pj: '', remuneracao_dolar: '', cpf: '', rg: '', data_nascimento: '', modalidades: [], regioes: []},
                 curriculoNome: '',
                 uploadingCurriculo: false,
                 notif: {msg: '', type: 'info'},
@@ -923,7 +942,11 @@ VUE_DASHBOARD = """
                         linkedin: d.linkedin || '', email: d.email || '',
                         remuneracao_clt: d.remuneracao_clt || '',
                         remuneracao_pj: d.remuneracao_pj || '',
-                        remuneracao_dolar: d.remuneracao_dolar || ''
+                        remuneracao_dolar: d.remuneracao_dolar || '',
+                        cpf: d.cpf || '', rg: d.rg || '',
+                        data_nascimento: d.data_nascimento || '',
+                        modalidades: Array.isArray(d.modalidades) ? d.modalidades : [],
+                        regioes: Array.isArray(d.regioes) ? d.regioes : []
                     };
                 } catch(e) {}
             },
@@ -1924,6 +1947,10 @@ async def get_dados_pessoais():
             "remuneracao_clt": p.get("remuneracao_clt", ""),
             "remuneracao_pj": p.get("remuneracao_pj", ""),
             "remuneracao_dolar": p.get("remuneracao_dolar", ""),
+            "cpf": p.get("cpf", ""), "rg": p.get("rg", ""),
+            "data_nascimento": p.get("data_nascimento", ""),
+            "modalidades": list(p.get("modalidades_aceitas", []) or []),
+            "regioes": list(p.get("regioes_relocacao", []) or []),
         })
     except Exception as e:
         return JSONResponse({"nome": "", "telefone": "", "linkedin": "", "email": "", "error": str(e)})
@@ -1936,6 +1963,18 @@ async def set_dados_pessoais(request: Request):
     body = await request.json()
     user_id = os.getenv("DASHBOARD_USER_ID", "admin")
     try:
+        # modalidades/regioes chegam como lista; normaliza (minúsculas p/ modalidade,
+        # nome da região como veio). Só passa se a chave veio no body (senão None = não mexe).
+        mods = body.get("modalidades")
+        if isinstance(mods, list):
+            mods = [str(m).strip().lower() for m in mods if str(m).strip()]
+        else:
+            mods = None
+        regs = body.get("regioes")
+        if isinstance(regs, list):
+            regs = [str(r).strip() for r in regs if str(r).strip()]
+        else:
+            regs = None
         get_neo4j().salvar_dados_pessoais(
             user_id,
             nome=(body.get("nome") or "").strip(),
@@ -1945,6 +1984,11 @@ async def set_dados_pessoais(request: Request):
             remuneracao_clt=(body.get("remuneracao_clt") or "").strip(),
             remuneracao_pj=(body.get("remuneracao_pj") or "").strip(),
             remuneracao_dolar=(body.get("remuneracao_dolar") or "").strip(),
+            cpf=re.sub(r"\D", "", body.get("cpf") or "") or None,
+            rg=(body.get("rg") or "").strip() or None,
+            data_nascimento=(body.get("data_nascimento") or "").strip() or None,
+            modalidades=mods,
+            regioes=regs,
         )
         return JSONResponse({"success": True})
     except Exception as e:

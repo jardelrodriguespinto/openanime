@@ -43,7 +43,7 @@ from automation.selenium_browser import (
 from automation.browser import (
     notify_browser_step, get_intervention_state, set_intervention_state, wait_if_paused,
 )
-from automation.form_filler import responder_pergunta
+from automation.form_filler import responder_pergunta, detectar_idioma_texto
 from automation.contador_aplicacoes import INDEED as _cont
 from automation.run_context import set_platform
 
@@ -79,7 +79,7 @@ def _get_cidade() -> str:
 # Nota mínima (0-100) de relevância vaga×currículo para aplicar. Fail-open igual
 # ao LinkedIn: na dúvida (sem dados/timeout/erro), aplica. 30 = "na dúvida aplica",
 # só pula quem NÃO tem nada a ver com o perfil. Ajustável no .env.
-_LIMIAR_MATCH = int(os.getenv("INDEED_LIMIAR_MATCH", "30"))
+_LIMIAR_MATCH = int(os.getenv("INDEED_LIMIAR_MATCH", "20"))
 
 _BASE = "https://br.indeed.com"
 
@@ -724,7 +724,8 @@ Respond with ONLY valid JSON, no markdown:
         m = re.search(r'\{[^{}]+\}', resp, re.DOTALL)
         if m:
             data = _json.loads(m.group())
-            idioma = str(data.get("idioma", "pt"))
+            # Idioma determinístico do texto prevalece sobre o do LLM (que caía em 'pt').
+            idioma = detectar_idioma_texto(descricao) or str(data.get("idioma", "pt"))
             motivo = str(data.get("motivo", ""))
             try:
                 nota = int(float(data.get("nota")))
@@ -1471,14 +1472,28 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "", user_id
                 return {"sucesso": False, "mensagem": "Verificação não resolvida."}
             html = await _run_in_thread(lambda: driver.page_source)
 
-        # Match com currículo (fail-open).
+        # Idioma determinístico + filtro modalidade/região + match com currículo (fail-open).
         idioma_vaga = "pt"
-        if resumo_curriculo:
-            descricao = await _extrair_descricao_vaga(driver)
-            if descricao:
+        descricao = await _extrair_descricao_vaga(driver)
+        if descricao:
+            idioma_vaga = detectar_idioma_texto(descricao)
+            # Filtro modalidade + região (presencial/híbrido só candidata se a cidade da
+            # vaga cai numa região aceita). Fail-open: sem config, aplica.
+            try:
+                from automation.localizacao import vaga_aceita
+                aceita_loc, motivo_loc = vaga_aceita(
+                    descricao, perfil.get("modalidades_aceitas", []),
+                    perfil.get("regioes_relocacao", []),
+                )
+            except Exception:
+                aceita_loc, motivo_loc = True, ""
+            if not aceita_loc:
+                await notify_browser_step("selenium_indeed", "pulada", f"Fora do filtro: {motivo_loc[:50]}")
+                return {"sucesso": False, "pulada": True, "motivo_falha": "fora_modalidade_regiao",
+                        "mensagem": f"Vaga ignorada (modalidade/região): {motivo_loc}"}
+            if resumo_curriculo:
                 await notify_browser_step("selenium_indeed", "avaliando", "Verificando match com currículo...")
                 aval = await _avaliar_match_vaga(descricao, resumo_curriculo)
-                idioma_vaga = aval.get("idioma", "pt")
                 logger.info("indeed_selenium: match=%s idioma=%s motivo=%s",
                             aval.get("aplicar"), idioma_vaga, aval.get("motivo"))
                 if not aval.get("aplicar", True):

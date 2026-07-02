@@ -21,7 +21,7 @@ from automation.selenium_browser import (
     _scroll_and_focus_element, _try_convert_selector
 )
 from automation.browser import notify_browser_step, get_intervention_state, wait_if_paused
-from automation.form_filler import responder_pergunta
+from automation.form_filler import responder_pergunta, detectar_idioma_texto
 from automation.run_context import set_platform
 from selenium.webdriver.common.by import By
 from selenium.common.exceptions import (
@@ -39,6 +39,32 @@ _CAMPOS_PADRAO = {
     "país", "primeiro_nome", "ultimo_nome", "last_name", "first_name",
     "numero", "number", "nacionalidade", "nacionalidade",
 }
+
+# Palavras que indicam que o campo é sobre a EMPRESA/EMPREGO, não o contato pessoal
+# do candidato — mesmo contendo "name"/"nome". Sem isto, "Confirm the NAME of the
+# COMPANY where you work" casava "name" em _CAMPOS_PADRAO e era pulado como contato.
+_NAO_CONTATO = (
+    "company", "empresa", "employer", "organiz", "where you work",
+    "onde você trabalha", "onde voce trabalha", "current job", "cargo",
+)
+
+
+def _eh_campo_padrao(label: str) -> bool:
+    """True se o label é um campo de CONTATO padrão (nome/email/telefone/cidade/país)
+    que o LinkedIn auto-preenche — NÃO uma pergunta custom. A checagem antiga
+    (`any(p in label for p in _CAMPOS_PADRAO)`) pulava QUALQUER pergunta que contivesse
+    'name'/'nome'/'number' etc. como substring — ex.: "Confirm the name of the company
+    where you work" ficava sem preencher → "Please enter a valid answer" → descarte.
+    Agora exige: (1) não ser sobre empresa/emprego e (2) label CURTO (campo de contato
+    real é 'First name'/'City'; pergunta custom é uma frase longa)."""
+    l = (label or "").strip().lower()
+    if not l:
+        return False
+    if any(x in l for x in _NAO_CONTATO):
+        return False
+    if len(l) > 50:
+        return False
+    return any(p in l for p in _CAMPOS_PADRAO)
 
 
 def _get_linkedin_email() -> str:
@@ -543,16 +569,37 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "", user_id
                 "mensagem": "Vaga já candidatada (detectado na página).",
             }
 
-        # Avalia match com currículo e detecta idioma da vaga
+        # Detecta idioma da vaga (DETERMINÍSTICO → escolhe o CV certo: PT→curriculo,
+        # EN→resume; independe do currículo estar carregado), aplica o filtro de
+        # modalidade/região e, com currículo, avalia o match.
         idioma_vaga = "pt"
-        if resumo_curriculo:
-            driver = await get_driver()
-            if driver:
-                descricao_vaga = await _extrair_descricao_vaga(driver)
-                if descricao_vaga:
+        driver = await get_driver()
+        if driver:
+            descricao_vaga = await _extrair_descricao_vaga(driver)
+            if descricao_vaga:
+                idioma_vaga = detectar_idioma_texto(descricao_vaga)
+
+                # Filtro modalidade + região (presencial/híbrido só candidata se a cidade
+                # da vaga cai numa região aceita). Fail-open: sem config, aplica.
+                try:
+                    from automation.localizacao import vaga_aceita
+                    aceita_loc, motivo_loc = vaga_aceita(
+                        descricao_vaga, perfil.get("modalidades_aceitas", []),
+                        perfil.get("regioes_relocacao", []),
+                    )
+                except Exception:
+                    aceita_loc, motivo_loc = True, ""
+                if not aceita_loc:
+                    print(f"[LINKEDIN] Pulando por modalidade/região: {motivo_loc}")
+                    await notify_browser_step("selenium_linkedin", "pulada", f"Fora do filtro: {motivo_loc[:50]}")
+                    await navegar("https://www.linkedin.com/jobs/collections/easy-apply/")
+                    await asyncio.sleep(2)
+                    return {"sucesso": False, "pulada": True, "motivo_falha": "fora_modalidade_regiao",
+                            "mensagem": f"Vaga ignorada (modalidade/região): {motivo_loc}"}
+
+                if resumo_curriculo:
                     await notify_browser_step("selenium_linkedin", "avaliando", "Verificando compatibilidade com currículo...")
                     avaliacao = await _avaliar_match_vaga(descricao_vaga, resumo_curriculo)
-                    idioma_vaga = avaliacao.get("idioma", "pt")
                     logger.info(
                         "linkedin_selenium: match=%s idioma=%s motivo=%s",
                         avaliacao.get("aplicar"), idioma_vaga, avaliacao.get("motivo")
@@ -1105,9 +1152,15 @@ async def _processar_formulario_multistep_selenium(driver, perfil: dict, curricu
                 # PULA campo com value) e re-tenta LER + PREENCHER — pedido do usuário:
                 # "se falhou, tente ler de novo", nunca descartar por um campo teimoso.
                 limpos = await _limpar_campos_invalidos(driver)
+                # Re-pergunta à IA: descarta as respostas geradas deste ciclo pra que
+                # o próximo re-preenchimento gere respostas NOVAS (não reusa uma que a
+                # IA falhou/veio ruim). Pedido do usuário: "pega a pergunta e manda de
+                # novo pra IA e pega a saída".
+                respostas_geradas.clear()
                 _registrar_run_log(
                     f"FORM step {step}: validação recusou ({'; '.join(erros[:2])[:50]}) — "
-                    f"limpei {limpos} campo(s), re-preenchendo (tent {nao_avancou}/{_MAX_RETRY_VALIDACAO})"
+                    f"limpei {limpos} campo(s) + cache de respostas, re-preenchendo "
+                    f"(tent {nao_avancou}/{_MAX_RETRY_VALIDACAO})"
                 )
                 await notify_browser_step("step_"+str(step), "revalidando",
                                           f"Campo recusado — lendo de novo ({nao_avancou}/{_MAX_RETRY_VALIDACAO})")
@@ -1638,14 +1691,14 @@ async def _detectar_perguntas_nao_respondidas_selenium(driver) -> list:
             if not label:
                 continue
             label_lower = label.lower()
-            if any(p in label_lower for p in _CAMPOS_PADRAO):
+            if _eh_campo_padrao(label):
                 continue
             current_val = ""
             try:
                 current_val = inp.get_attribute("value") or ""
             except Exception:
                 pass
-            if current_val:
+            if current_val and current_val.strip():
                 continue
 
             input_type = ""
@@ -1696,7 +1749,7 @@ async def _detectar_perguntas_nao_respondidas_selenium(driver) -> list:
                 first_val = (first_opt.get_attribute("value") or "").strip()
                 if _eh_placeholder_opcao(selected_text) or first_val == "":
                     label = await _get_label_selenium(driver, sel_elem)
-                    if label and not any(p in label.lower() for p in _CAMPOS_PADRAO):
+                    if label and not _eh_campo_padrao(label):
                         options_text = [
                             o.text.strip() for o in sel_obj.options
                             if o.text.strip() and not _eh_placeholder_opcao(o.text)
@@ -1731,7 +1784,7 @@ async def _detectar_perguntas_nao_respondidas_selenium(driver) -> list:
                             break
                 if not label:
                     continue
-                if any(p in label.lower() for p in _CAMPOS_PADRAO):
+                if _eh_campo_padrao(label):
                     continue
                 # Coleta opções disponíveis
                 options_text = []
@@ -1755,7 +1808,7 @@ async def _detectar_perguntas_nao_respondidas_selenium(driver) -> list:
                 if not legend:
                     continue
                 legend_text = (legend[0].text or "").strip()
-                if not legend_text or any(p in legend_text.lower() for p in _CAMPOS_PADRAO):
+                if not legend_text or _eh_campo_padrao(legend_text):
                     continue
                 # LinkedIn esconde os inputs com CSS; não filtra por is_displayed()
                 radios = fs.find_elements(By.CSS_SELECTOR, "input[type='radio']")
@@ -1802,7 +1855,7 @@ async def _detectar_perguntas_nao_respondidas_selenium(driver) -> list:
                         label = (parent.text or "").strip().split("\n")[0]
                     except Exception:
                         pass
-                if not label or any(p in label.lower() for p in _CAMPOS_PADRAO):
+                if not label or _eh_campo_padrao(label):
                     continue
                 # Não detectar checkboxes de upload de CV (tratados por _selecionar_cv_por_idioma)
                 if any(kw in label.lower() for kw in ("resume", "currículo", ".pdf", ".doc", "upload")):
@@ -3105,22 +3158,15 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
                         pass
                 continue
 
-            # 4. Match com currículo — verifica cache Neo4j antes de chamar LLM
+            # 4. Match com currículo — SEMPRE re-avalia ao vivo (não pula por cache).
+            # Antes, uma rejeição cacheada em `MATCH_VAGA {aplicar:false}` fazia pular a
+            # vaga SEM re-avaliar — e essas rejeições vinham de um limiar ANTIGO mais
+            # rígido (65/40), então vagas com match parcial ficavam travadas pra sempre
+            # ("às vezes o match não é 100% e não aplica"). Como o score cacheado é 0.0
+            # nas rejeições (não dá pra saber se foi limiar velho), a correção é NÃO
+            # pular por cache: re-avalia com o limiar atual (permissivo, fail-open).
             idioma_vaga = "pt"
             descricao_vaga = ""
-            if vaga_id and resumo_curriculo:
-                # 4a. Cache: se já avaliado negativamente, pula sem LLM
-                try:
-                    from graph.neo4j_client import get_neo4j
-                    match_cache = get_neo4j().get_match_vaga(user_id, vaga_id)
-                    if match_cache and not match_cache.get("aplicar", True):
-                        motivo_cache = match_cache.get("motivo", "match ruim (Neo4j cache)")
-                        print(f"[LINKEDIN] Sem match (Neo4j cache) — pulando {vaga_id}: {motivo_cache}")
-                        _registrar_run_log(f"SKIP {vaga_id} sem-match-cache: {motivo_cache[:40]}")
-                        await notify_browser_step("selenium_linkedin", "pulando", f"Cache: {motivo_cache}")
-                        continue
-                except Exception:
-                    pass
 
             if resumo_curriculo:
                 try:
@@ -3611,7 +3657,7 @@ async def _extrair_descricao_vaga(driver) -> str:
 # 30 = "na dúvida, aplica" (pedido do usuário): só pula o que NÃO tem NADA a ver com
 # o perfil (0-29, outra profissão). Qualquer similaridade plausível → aplica.
 # Ajustável via env LINKEDIN_LIMIAR_MATCH sem mexer no código.
-_LIMIAR_MATCH = int(os.getenv("LINKEDIN_LIMIAR_MATCH", "30"))
+_LIMIAR_MATCH = int(os.getenv("LINKEDIN_LIMIAR_MATCH", "20"))
 
 
 async def _avaliar_match_vaga(descricao: str, curriculo: str) -> dict:
@@ -3654,7 +3700,9 @@ Respond with ONLY valid JSON, no markdown, no explanation:
         json_match = re.search(r'\{[^{}]+\}', resp, re.DOTALL)
         if json_match:
             data = _json.loads(json_match.group())
-            idioma = str(data.get("idioma", "pt"))
+            # Idioma determinístico do texto prevalece sobre o do LLM (que caía em 'pt'
+            # e mandava sempre o CV português mesmo em vaga inglesa).
+            idioma = detectar_idioma_texto(descricao) or str(data.get("idioma", "pt"))
             motivo = str(data.get("motivo", ""))
             # Decisão determinística pelo score (mais confiável que o booleano do LLM).
             # Se a nota vier ausente/ilegível, mantém fail-open (aplica) por escolha do usuário.

@@ -1748,9 +1748,13 @@ class Neo4jClient:
     def salvar_dados_pessoais(self, user_id: str, nome: str = None, telefone: str = None,
                               linkedin: str = None, email: str = None,
                               remuneracao_clt: str = None, remuneracao_pj: str = None,
-                              remuneracao_dolar: str = None) -> None:
+                              remuneracao_dolar: str = None, cpf: str = None, rg: str = None,
+                              data_nascimento: str = None, modalidades: list = None,
+                              regioes: list = None) -> None:
         """Grava os dados pessoais usados nos formulários (nome/telefone/LinkedIn/email/
-        remuneração CLT/PJ/dólar). Só sobrescreve os campos passados (não-None)."""
+        remuneração CLT/PJ/dólar/CPF/RG/nascimento) e as preferências de candidatura
+        (modalidades aceitas + regiões do Brasil p/ realocação). Só sobrescreve os
+        campos passados (não-None)."""
         sets, params = [], {"tid": user_id}
         if nome is not None:
             sets.append("u.nome_real = $nome"); params["nome"] = nome
@@ -1766,6 +1770,16 @@ class Neo4jClient:
             sets.append("u.remuneracao_pj = $rem_pj"); params["rem_pj"] = remuneracao_pj
         if remuneracao_dolar is not None:
             sets.append("u.remuneracao_dolar = $rem_dolar"); params["rem_dolar"] = remuneracao_dolar
+        if cpf is not None:
+            sets.append("u.cpf = $cpf"); params["cpf"] = cpf
+        if rg is not None:
+            sets.append("u.rg = $rg"); params["rg"] = rg
+        if data_nascimento is not None:
+            sets.append("u.data_nascimento = $nasc"); params["nasc"] = data_nascimento
+        if modalidades is not None:
+            sets.append("u.modalidades_aceitas = $mods"); params["mods"] = modalidades
+        if regioes is not None:
+            sets.append("u.regioes_relocacao = $regs"); params["regs"] = regioes
         if not sets:
             return
         cypher = "MERGE (u:Usuario {user_id: $tid})\nSET " + ", ".join(sets)
@@ -1828,6 +1842,11 @@ class Neo4jClient:
                 "remuneracao_clt": u.get("remuneracao_clt", ""),
                 "remuneracao_pj": u.get("remuneracao_pj", ""),
                 "remuneracao_dolar": u.get("remuneracao_dolar", ""),
+                "cpf": u.get("cpf", ""),
+                "rg": u.get("rg", ""),
+                "data_nascimento": u.get("data_nascimento", ""),
+                "modalidades_aceitas": list(u.get("modalidades_aceitas", []) or []),
+                "regioes_relocacao": list(u.get("regioes_relocacao", []) or []),
                 "habilidades": [h for h in record["habilidades"] if h.get("nome")],
                 "experiencias": [e for e in record["experiencias"] if e.get("empresa")],
                 "formacao": [f for f in record["formacao"] if f.get("curso")],

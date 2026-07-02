@@ -4,7 +4,9 @@ Nunca inventa qualificacoes que o candidato nao tem.
 """
 
 import logging
+import os
 import re
+import time
 
 from ai.openrouter import openrouter
 
@@ -65,6 +67,19 @@ def responder_pergunta(
                     return m.group().replace(",", ".") if m else re.sub(r'[^\d]', '', val)
                 return re.sub(r'[^\d]', '', val) or val  # NUMERO: só dígitos
             return val
+
+    # DADO PESSOAL (CPF/RG/nascimento): sensível → SEMPRE da config, nunca da IA. Vem
+    # antes da classificação numérica e NÃO passa por formatação de número — um
+    # identificador não é quantidade; tratá-lo como decimal ('1.12596e+10') quebraria
+    # o CPF. Preenche literalmente os dígitos configurados.
+    if _eh_pergunta_dado_pessoal(_plain):
+        val = _valor_dado_pessoal(perfil, _plain)
+        if val:
+            return val
+        # Sem valor configurado: não inventa identidade. Vazio → o campo fica em branco
+        # e o form cai em intervenção manual (bem melhor que enviar um CPF errado).
+        logger.warning("form_filler: dado pessoal pedido mas não configurado no perfil: %s", _plain[:50])
+        return ""
 
     # NUMERO: campo inteiro — retorna apenas dígitos (ex: anos de experiência).
     # Sem info (ex: "anos de experiência com .NET" e o candidato não tem) → "0",
@@ -173,17 +188,30 @@ For numeric questions (years of experience, etc.), reply with ONLY the number.""
         {"role": "user", "content": contexto},
     ]
 
-    try:
-        resposta = openrouter.converse(messages)
-        logger.info(
-            "form_filler: pergunta respondida | pergunta=%s... | resposta=%s...",
-            pergunta_real[:50], resposta[:50]
-        )
-        # LLM pode devolver vazio — cai no fallback por palavra-chave (nunca vazio).
-        return resposta.strip() or _resposta_fallback(pergunta, perfil, idioma)
-    except Exception as e:
-        logger.error("form_filler: erro LLM: %s", e)
-        return _resposta_fallback(pergunta, perfil, idioma)
+    # Re-envia a pergunta pra IA se ela falhar OU devolver VAZIO (pedido do usuário:
+    # "se a IA falha, pega a pergunta e manda de novo pra IA e pega a saída"). Só cai
+    # no fallback por palavra-chave depois de esgotar as tentativas — nunca trava, e
+    # dá à IA mais de uma chance de produzir uma resposta real. O openrouter.converse
+    # já tem fallback de modelo + timeout; aqui somamos o retry por VAZIO.
+    _max_ia = max(1, int(os.getenv("FORM_IA_MAX_RETRY", "3")))
+    for _tent in range(_max_ia):
+        try:
+            resposta = (openrouter.converse(messages) or "").strip()
+            if resposta:
+                logger.info(
+                    "form_filler: pergunta respondida (tent %d) | pergunta=%s... | resposta=%s...",
+                    _tent + 1, pergunta_real[:50], resposta[:50]
+                )
+                return resposta
+            logger.warning(
+                "form_filler: IA devolveu VAZIO (tent %d/%d) — re-enviando pergunta",
+                _tent + 1, _max_ia
+            )
+        except Exception as e:
+            logger.error("form_filler: erro LLM (tent %d/%d): %s", _tent + 1, _max_ia, e)
+        time.sleep(min(0.8 * (_tent + 1), 3.0))
+    logger.error("form_filler: IA não respondeu após %d tentativas — usando fallback", _max_ia)
+    return _resposta_fallback(pergunta, perfil, idioma)
 
 
 def _eh_pergunta_remuneracao(pergunta: str) -> bool:
@@ -207,6 +235,89 @@ def _valor_remuneracao(perfil: dict, pergunta: str) -> str:
     else:
         v = perfil.get("remuneracao_clt") or perfil.get("pretensao_salarial")
     return str(v).strip() if v not in (None, "") else ""
+
+
+def _eh_pergunta_dado_pessoal(pergunta: str) -> bool:
+    """True para perguntas que pedem DADO PESSOAL/identificador (CPF, RG, data de
+    nascimento). São sensíveis — vêm SEMPRE da config do perfil, NUNCA da IA (que
+    inventaria um número; GeekHunter/LinkedIn às vezes rotulam o campo como 'número
+    decimal com mais de 0.0', mas o valor é um identificador, não uma quantidade).
+    Conservador: exige termos específicos ('rg' só com fronteira de palavra) p/ não
+    casar 'urgente'/'large'/'documento' genérico."""
+    p = (pergunta or "").lower()
+    if "cpf" in p:
+        return True
+    if re.search(r"\brg\b", p):
+        return True
+    return any(k in p for k in (
+        "registro geral", "documento de identidade", "carteira de identidade",
+        "data de nascimento", "data de nasc", "date of birth", "birth date",
+        "birthday", "nascimento",
+    ))
+
+
+def _tipo_dado_pessoal(pergunta: str) -> str:
+    """Classifica o dado pessoal pedido: 'cpf' | 'rg' | 'nascimento' | ''."""
+    p = (pergunta or "").lower()
+    if "cpf" in p:
+        return "cpf"
+    if any(k in p for k in ("nascimento", "nasc", "birth")):
+        return "nascimento"
+    if re.search(r"\brg\b", p) or "registro geral" in p or "identidade" in p:
+        return "rg"
+    return ""
+
+
+def _valor_dado_pessoal(perfil: dict, pergunta: str) -> str:
+    """Valor CONFIGURADO para o dado pessoal pedido. CPF/RG saem só com dígitos (o
+    campo costuma validar 'número > 0'); nascimento sai como configurado (data).
+    Retorna '' se não configurado — NUNCA inventa uma identidade."""
+    tipo = _tipo_dado_pessoal(pergunta)
+    if tipo == "cpf":
+        return re.sub(r"\D", "", str(perfil.get("cpf") or ""))
+    if tipo == "rg":
+        return re.sub(r"\D", "", str(perfil.get("rg") or ""))
+    if tipo == "nascimento":
+        return str(perfil.get("data_nascimento") or "").strip()
+    return ""
+
+
+# Idioma da vaga por HEURÍSTICA determinística (stopwords + diacríticos), independente
+# do LLM. Usado p/ escolher o CV certo no LinkedIn (PT→curriculo, EN→resume) e p/
+# responder no idioma da vaga — o idioma do LLM caía no default 'pt' e mandava sempre
+# o CV português mesmo em vaga inglesa.
+_PT_STOP = {
+    "você", "voce", "não", "nao", "para", "com", "uma", "que", "dos", "das", "sua",
+    "seu", "são", "sao", "também", "tambem", "requisitos", "experiência", "experiencia",
+    "conhecimento", "conhecimentos", "vaga", "empresa", "trabalho", "desenvolvedor",
+    "atuar", "equipe", "nossa", "nosso", "habilidades", "desejável", "desejavel",
+    "diferencial", "benefícios", "beneficios", "responsabilidades", "área", "area",
+    "vagas", "candidato", "atividades", "conhecer", "ferramentas",
+}
+_EN_STOP = {
+    "the", "and", "you", "with", "for", "our", "we", "are", "requirements",
+    "experience", "knowledge", "job", "company", "work", "developer", "skills",
+    "ability", "must", "will", "team", "role", "responsibilities", "preferred",
+    "benefits", "strong", "years", "looking", "join", "your", "have", "this",
+    "about", "who", "what", "as", "in", "of", "to",
+}
+
+
+def detectar_idioma_texto(texto: str, default: str = "pt") -> str:
+    """'pt' ou 'en' pelo texto da vaga (stopwords + diacríticos). Determinístico,
+    mais confiável que o LLM p/ idioma. Empate/sem sinal → `default` (contexto BR)."""
+    t = (texto or "").lower()
+    if not t.strip():
+        return default
+    palavras = re.findall(r"[a-zà-ÿ]+", t)
+    pt = sum(1 for w in palavras if w in _PT_STOP)
+    en = sum(1 for w in palavras if w in _EN_STOP)
+    pt += len(re.findall(r"[ãõçáéíóúâêôà]", t))  # diacrítico = sinal forte de PT
+    if en > pt:
+        return "en"
+    if pt > en:
+        return "pt"
+    return default
 
 
 def _resumir_perfil(perfil: dict) -> str:

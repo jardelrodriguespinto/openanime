@@ -34,10 +34,14 @@ class OpenRouterClient:
         if not api_key:
             raise ValueError("OPENROUTER_API_KEY nao configurada")
 
+        # Timeout explícito: o default do SDK OpenAI é 10 MINUTOS — se uma chamada
+        # pendura, o preenchimento do formulário fica "travado" por até 10min. Com
+        # timeout curto, a chamada estoura, vira exceção e o retry/fallback assume.
         self.client = OpenAI(
             base_url="https://openrouter.ai/api/v1",
             api_key=api_key,
             max_retries=0,
+            timeout=float(os.getenv("OPENROUTER_TIMEOUT_SECONDS", "45")),
             default_headers={
                 "HTTP-Referer": "https://github.com/anime-bot",
                 "X-Title": "Anime Multi-Assistant",

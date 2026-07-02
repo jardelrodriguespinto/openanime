@@ -57,7 +57,7 @@ from automation.indeed_selenium import (
     _avaliar_match_vaga,
     _get_resumo_curriculo,
 )
-from automation.form_filler import responder_pergunta
+from automation.form_filler import responder_pergunta, _eh_pergunta_dado_pessoal
 from automation.contador_aplicacoes import GEEK_HUNTER as _cont
 
 from selenium.webdriver.common.by import By
@@ -613,18 +613,112 @@ def _label_pergunta_gh(driver, el) -> str:
     return ""
 
 
+def _classificar_campo_numerico_gh(driver, el, label: str) -> dict:
+    """Diz se um input do GeekHunter é NUMÉRICO/decimal + min/max/piso.
+
+    De propósito NÃO usa keywords soltos (anos/experiência/valor): a pergunta de skill
+    'Conhecimento em Python...' não tem palavra numérica no rótulo — o único sinal é o
+    HINT do campo ('Insira um número decimal com mais de 0.0'). Casar 'experiência'
+    marcaria perguntas de TEXTO livre ('Descreva sua experiência') como número, que é
+    justamente o erro a evitar. Então detecta por atributos fortes do input (type=
+    number, inputmode, role=spinbutton, step/min) + frases de hint explícitas.
+
+    `floor` = piso do hint 'mais de X' (o campo exige valor ESTRITAMENTE maior — por
+    isso responder 0 seria recusado)."""
+    import re as _re
+    # Dado pessoal (CPF/RG/nascimento) NUNCA é número calculável: mesmo o campo sendo
+    # 'número decimal', o valor é um identificador que vem da config e é preenchido
+    # literalmente (formatá-lo como decimal quebraria o CPF). is_num=False aqui faz o
+    # caller PULAR o _ajustar_numero_gh; o form_filler devolve os dígitos configurados.
+    if _eh_pergunta_dado_pessoal(label):
+        return {"is_num": False, "is_dec": False, "min": "", "max": "", "floor": None}
+    tipo = (el.get_attribute("type") or "").lower()
+    inputmode = (el.get_attribute("inputmode") or "").lower()
+    role = (el.get_attribute("role") or "").lower()
+    step = (el.get_attribute("step") or "").strip()
+    minv = (el.get_attribute("min") or "").strip()
+    maxv = (el.get_attribute("max") or "").strip()
+    placeholder = el.get_attribute("placeholder") or ""
+    ctx = (f"{label} {placeholder} " + _contexto_input(driver, el)).lower()
+
+    is_numeric = (
+        tipo == "number" or inputmode in ("decimal", "numeric") or role == "spinbutton"
+        or bool(step) or minv != ""
+        or "número decimal" in ctx or "numero decimal" in ctx
+        or "número inteiro" in ctx or "numero inteiro" in ctx
+        or "casas decimais" in ctx
+        or "insira um número" in ctx or "insira um numero" in ctx
+        or bool(_re.search(r"(?:mais de|maior que|acima de|superior a)\s*\d", ctx))
+    )
+    if not is_numeric:
+        return {"is_num": False, "is_dec": False, "min": "", "max": "", "floor": None}
+
+    is_decimal = (
+        inputmode == "decimal" or "decimal" in ctx
+        or ("." in step and step not in ("", "any", "1"))
+        or ("." in minv)
+    )
+    floor = None
+    m = _re.search(r"(?:mais de|maior que|acima de|superior a)\s*(\d+(?:[.,]\d+)?)", ctx)
+    if m:
+        try:
+            floor = float(m.group(1).replace(",", "."))
+        except ValueError:
+            floor = None
+    return {"is_num": True, "is_dec": is_decimal, "min": minv, "max": maxv, "floor": floor}
+
+
+def _ajustar_numero_gh(valor: str, is_decimal: bool, minv: str, maxv: str, floor) -> str:
+    """Normaliza a resposta numérica: extrai o número, clampa a min/max e respeita o
+    piso 'mais de X' (valor <= piso vira piso+1 — ex.: '> 0.0' → 1). Decimal sempre sai
+    com ponto ('1' → '1.0'). Best-effort: em erro, devolve o valor original."""
+    import re as _re
+
+    def _fmt(n) -> str:
+        if is_decimal:
+            s = f"{n:g}"
+            return s if "." in s else f"{s}.0"
+        return str(int(n))
+
+    limpo = _re.sub(r"[^\d.\-]", "", valor or "")
+    if limpo in ("", ".", "-"):
+        # IA não devolveu número, mas o campo EXIGE um: usa o piso (ou 1) pra não travar.
+        return _fmt((floor if floor is not None else 0) + 1) if floor is not None else valor
+    try:
+        num = float(limpo)
+    except ValueError:
+        return valor
+    try:
+        if minv not in ("", None):
+            num = max(num, float(minv))
+        if maxv not in ("", None):
+            num = min(num, float(maxv))
+    except ValueError:
+        pass
+    if floor is not None and num <= floor:
+        num = floor + 1  # menor valor acima do piso (ex.: '> 0.0' → 1)
+    return _fmt(num)
+
+
 async def _responder_perguntas_geekhunter(driver, perfil: dict, resumo_curriculo: str,
                                           idioma: str, vaga_titulo: str) -> list:
-    """Responde as perguntas customizadas (textarea/input de texto) do GeekHunter.
-    O rótulo vem do <p> da pergunta (não do 'name', que é numérico). Uma de cada vez,
-    com pausa (pacing). Ignora contato/salário/consentimento (tratados à parte)."""
+    """Responde as perguntas customizadas (textarea/input) do GeekHunter. O rótulo vem
+    do <p> da pergunta (não do 'name', que é numérico). Campos NUMÉRICOS/decimais (ex.:
+    'Conhecimento em Python...', que pede 'número decimal com mais de 0.0') são
+    detectados e prefixados NUMERO:/DECIMAL: — assim a IA responde com NÚMERO, não
+    prosa, e a validação do form não recusa. Uma de cada vez, com pausa (pacing).
+    Ignora contato/salário/consentimento (tratados à parte)."""
     _IGNORAR = ("nome", "email", "e-mail", "linkedin", "celular", "telefone", "ddd",
                 "remunera", "salári", "salari", "pretens", "currículo", "curriculo",
                 "política de privacidade", "politica de privacidade", "ciente de que")
 
     def _coletar():
         achados = []
-        for el in driver.find_elements(By.CSS_SELECTOR, "textarea, input[type='text'], input:not([type])"):
+        for el in driver.find_elements(
+            By.CSS_SELECTOR,
+            "textarea, input[type='text'], input[type='number'], input[inputmode], "
+            "input[role='spinbutton'], input:not([type])",
+        ):
             try:
                 if not el.is_displayed():
                     continue
@@ -639,7 +733,12 @@ async def _responder_perguntas_geekhunter(driver, perfil: dict, resumo_curriculo
                     continue
                 if any(k in label.lower() for k in _IGNORAR):
                     continue
-                achados.append((el.get_attribute("id") or "", el.get_attribute("name") or "", label))
+                cls = _classificar_campo_numerico_gh(driver, el, label)
+                pergunta = (("DECIMAL:" if cls["is_dec"] else "NUMERO:") + label) if cls["is_num"] else label
+                achados.append({
+                    "id": el.get_attribute("id") or "", "name": el.get_attribute("name") or "",
+                    "label": label, "pergunta": pergunta, **cls,
+                })
             except Exception:
                 continue
         return achados
@@ -651,16 +750,21 @@ async def _responder_perguntas_geekhunter(driver, perfil: dict, resumo_curriculo
         logger.warning("geekhunter _coletar perguntas erro: %s", e)
         return feitas
 
-    for eid, ename, label in perguntas:
+    for q in perguntas:
+        label = q["label"]
         try:
-            resp = responder_pergunta(label, perfil, vaga_titulo=vaga_titulo, vaga_empresa="",
+            resp = responder_pergunta(q["pergunta"], perfil, vaga_titulo=vaga_titulo, vaga_empresa="",
                                       resumo_curriculo=resumo_curriculo, idioma=idioma)
         except Exception as e:
             logger.warning("responder_pergunta erro: %s", e)
             from automation.form_filler import resposta_segura
-            resp = resposta_segura(label, idioma)
+            resp = resposta_segura(q["pergunta"], idioma)
 
-        def _fill(eid=eid, ename=ename, resp=resp, label=label):
+        # Campo numérico: garante NÚMERO válido (clamp min/max + piso 'mais de X').
+        if q["is_num"]:
+            resp = _ajustar_numero_gh(str(resp), q["is_dec"], q["min"], q["max"], q["floor"])
+
+        def _fill(eid=q["id"], ename=q["name"], resp=resp, label=label):
             el = None
             if eid:
                 try:
@@ -708,16 +812,88 @@ async def _marcar_consentimentos_geekhunter(driver) -> None:
         logger.warning("geekhunter _marcar_consentimentos erro: %s", e)
 
 
+async def _detectar_erros_geekhunter(driver) -> list:
+    """Detecta mensagens de erro de validação visíveis no step atual (GeekHunter).
+    Quando o form rejeita um clique por campos obrigatórios vazios/inválidos."""
+    FRASES_ERRO = (
+        "insira uma resposta válida", "por favor informe", "campo obrigatório",
+        "required", "please enter a valid", "número inválido", "resposta inválida",
+    )
+    def _coletar():
+        erros = []
+        for sel in [".artdeco-inline-feedback--error", "[role='alert']", ".chakra-form__error"]:
+            try:
+                for el in driver.find_elements(By.CSS_SELECTOR, sel):
+                    if el.is_displayed():
+                        t = (el.text or "").lower()
+                        if t and t not in erros:
+                            erros.append(t)
+            except Exception:
+                continue
+        try:
+            modal = None
+            for s in ["div[role='dialog']", ".chakra-modal", ".artdeco-modal"]:
+                m = driver.find_elements(By.CSS_SELECTOR, s)
+                if m and m[-1].is_displayed():
+                    modal = m[-1]
+                    break
+            if modal:
+                low = (modal.text or "").lower()
+                for fr in FRASES_ERRO:
+                    if fr in low and fr not in [e.lower() for e in erros]:
+                        erros.append(fr)
+        except Exception:
+            pass
+        return erros
+    try:
+        return await _run_in_thread(_coletar)
+    except Exception:
+        return []
+
+
+async def _limpar_campos_invalidos_geekhunter(driver) -> int:
+    """Zera os inputs que o GeekHunter marcou como INVÁLIDOS (aria-invalid ou próximo a erro)."""
+    def _limpar():
+        alvos = []
+        for el in driver.find_elements(By.CSS_SELECTOR, "input[aria-invalid='true'], textarea[aria-invalid='true']"):
+            if el.is_displayed():
+                alvos.append(el)
+        try:
+            for err in driver.find_elements(By.CSS_SELECTOR, ".artdeco-inline-feedback--error, .chakra-form__error"):
+                if err.is_displayed():
+                    cont = err.find_element(By.XPATH, "./ancestor::div[1]")
+                    for el in cont.find_elements(By.CSS_SELECTOR, "input, textarea"):
+                        if el.is_displayed() and el not in alvos:
+                            alvos.append(el)
+        except Exception:
+            pass
+        n = 0
+        for el in alvos:
+            try:
+                el.clear()
+                n += 1
+            except Exception:
+                continue
+        return n
+    try:
+        return await _run_in_thread(_limpar)
+    except Exception:
+        return 0
+
+
 async def _geek_confirmacao_sucesso(driver) -> bool:
     """Detecta a confirmação de candidatura ENVIADA no GeekHunter por frases
     específicas (inclui 'confirme sua candidatura pelo e-mail'). Estrito de propósito
     — não usa 'voltar'/'post-apply', que davam falso sucesso antes de enviar."""
     def _check():
         try:
-            html = (driver.page_source or "").lower()
+            # SÓ texto VISÍVEL (body.text), NÃO page_source. O page_source do SPA
+            # inclui templates/HTML oculto com essas frases ANTES de qualquer envio →
+            # dava falso sucesso (marcava vagas como 'candidatado' sem aplicar).
+            txt = (driver.find_element(By.TAG_NAME, "body").text or "").lower()
         except Exception:
             return False
-        return any(f in html for f in _FRASES_SUCESSO_GEEK)
+        return any(f in txt for f in _FRASES_SUCESSO_GEEK)
     try:
         return await _run_in_thread(_check)
     except Exception:
@@ -876,17 +1052,6 @@ async def _preencher_e_enviar_formulario(driver, perfil: dict, resumo_curriculo:
         await asyncio.sleep(random.uniform(0.6, 1.2))
         await notify_browser_step(f"geek_step_{step}", "preenchendo", "Preenchendo candidatura GeekHunter")
 
-        # Confirmação de ENVIO (estrita): inclui o modal "confirme sua candidatura pelo
-        # e-mail". Pode surgir após um clique anterior mesmo sem 'Finalizar' explícito
-        # (ex.: vagas sem perguntas) → fecha o modal pelo X e conclui como enviada.
-        if await _geek_confirmacao_sucesso(driver):
-            await _fechar_modal_atencao(driver)
-            b64 = await screenshot_base64()
-            await notify_browser_step(f"geek_step_{step}", "sucesso", "Candidatura enviada!")
-            return {"sucesso": True, "perguntas_respondidas": perguntas_feitas,
-                    "mensagem": "Candidatura enviada com sucesso no GeekHunter!",
-                    "screenshot": b64[:100] if b64 else ""}
-
         # CAPTCHA/verificação → manual.
         if await _smartapply_bloqueado(driver):
             await notify_browser_step(f"geek_step_{step}", "manual",
@@ -1015,14 +1180,25 @@ async def _preencher_e_enviar_formulario(driver, perfil: dict, resumo_curriculo:
             nao_avancou = 0
             continue
         nao_avancou += 1
-        if nao_avancou >= 3:
-            await notify_browser_step(f"geek_step_{step}", "manual", "Formulário travado — controle manual")
+        erros = await _detectar_erros_geekhunter(driver)
+        if nao_avancou >= 3 or erros:
+            motivo = (" | ".join(erros[:2])) if erros else f"sem avanço {nao_avancou}x"
+            print(f"[GEEK] Step {step}: avanço bloqueado — {motivo}")
+            await notify_browser_step(f"geek_step_{step}", "bloqueado", f"Travou: {motivo[:80]}")
+            limpos = await _limpar_campos_invalidos_geekhunter(driver)
+            if limpos > 0:
+                print(f"[GEEK] Limpei {limpos} campo(s) inválido(s) — re-preenchendo")
+                await _preencher_contato_geekhunter(driver, perfil)
+                await asyncio.sleep(0.5)
+                continue
+            await notify_browser_step(f"geek_step_{step}", "manual", "Formulário travou — controle manual")
             if not await _aguardar_resolucao_manual(driver, f"formulário travado GeekHunter step {step}"):
                 b64 = await screenshot_base64()
                 return {"sucesso": False, "motivo_falha": "formulario_travado",
                         "mensagem": f"Formulário travou. Candidate-se à mão: {vaga_url}",
                         "screenshot": b64[:100] if b64 else ""}
             nao_avancou = 0
+            continue
 
     b64 = await screenshot_base64()
     return {"sucesso": False, "motivo_falha": "formulario_incompleto",
@@ -1163,9 +1339,25 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
                 except Exception:
                     pass
 
-            # SEM gate de match: o GeekHunter já é curado pela palavra-chave da busca —
-            # toda vaga listada tem correlação e DEVE ser aplicada (pedido do usuário).
+            # Match por CONTEÚDO: sem gate de nota (a busca já é curada por palavra-
+            # chave). Mas aplica o filtro de MODALIDADE + REGIÃO do candidato: presencial/
+            # híbrido só candidata se a cidade da vaga estiver numa região aceita (ex.:
+            # Joinville → Sul). Remoto passa livre. Fail-open: sem config, candidata.
             idioma_vaga = "pt"
+            try:
+                from automation.localizacao import vaga_aceita
+                texto_vaga = f"{titulo} {await _extrair_descricao_detalhe(driver)}"
+                aceita, motivo = vaga_aceita(
+                    texto_vaga, perfil.get("modalidades_aceitas", []),
+                    perfil.get("regioes_relocacao", []),
+                )
+                if not aceita:
+                    print(f"[GEEK] Pulando por modalidade/região: {motivo} — {titulo[:40]}")
+                    await notify_browser_step("selenium_geekhunter", "pulada", f"Fora do filtro: {motivo[:50]}")
+                    await _fechar_aba_e_voltar(driver, aba_nova, janela_busca)
+                    continue
+            except Exception as e:
+                logger.warning("geekhunter filtro modalidade/região erro: %s", e)
 
             await notify_browser_step("selenium_geekhunter", "aplicando", f"Candidatando: {titulo[:40]}")
             try:

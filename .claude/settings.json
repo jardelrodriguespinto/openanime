@@ -64,7 +64,10 @@
       "Bash(python -c \"import ast; ast.parse\\(open\\('automation/geekhunter_selenium.py'\\).read\\(\\)\\); print\\('OK sintaxe'\\)\")",
       "Bash(python3 -c \"import socket;s=socket.socket\\(\\);s.settimeout\\(2\\);s.connect\\(\\('127.0.0.1',7687\\)\\);print\\('7687 OK'\\)\")",
       "Bash(echo \"--- rc=$? ---\")",
-      "Bash(docker info *)"
+      "Bash(docker info *)",
+      "Bash(python3 -c 'import sys,json; *)",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('automation/linkedin_selenium.py'\\).read\\(\\)\\); print\\('linkedin_selenium sintaxe OK'\\)\")",
+      "Bash(grep -avE 'GqlStatusObject|Received notification|MATCH \\\\\\(u:Usuario|OPTIONAL MATCH|RETURN u,|collect\\\\\\(DISTINCT|cargos_desejados|CONNECTION|defunct' __TRACKED_VAR__/geek_test.log)"
     ],
     "additionalDirectories": [
       "/tmp/claude-1000/-home-jard-Documents-projetos-openanime/1a53c565-4c8f-4f74-a284-3b4533a83336/scratchpad"
