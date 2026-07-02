@@ -98,9 +98,18 @@ def _resolver_binario_undetected() -> str | None:
     with _patch_lock:
         if _patched_binary_cache and os.path.exists(_patched_binary_cache):
             return _patched_binary_cache
+        dest_dir0 = Path(FIREFOX_UNDETECTED_DIR)
+        dest_bin0 = dest_dir0 / Path(FIREFOX_BINARY).name
         src_dir = _firefox_source_dir()
         if not src_dir:
-            logger.warning("selenium_browser: Firefox de origem não encontrado — sem patch undetected")
+            # Origem sumiu (ex.: snap trocou de versão), mas se já temos um binário
+            # patcheado de um run anterior, USA ELE — melhor que cair no Firefox
+            # detectável (que o Cloudflare bloqueia). Só desiste se não houver nada.
+            if dest_bin0.exists():
+                logger.warning("selenium_browser: Firefox de origem não encontrado — reusando patch existente %s", dest_bin0)
+                _patched_binary_cache = str(dest_bin0)
+                return _patched_binary_cache
+            logger.warning("selenium_browser: Firefox de origem não encontrado E sem patch prévio — CAINDO no Firefox normal (Cloudflare vai bloquear)")
             return None
         libxul_src = src_dir / "libxul.so"
         st = libxul_src.stat()
@@ -201,6 +210,18 @@ def _get_driver():
         if patched:
             binario = patched
             logger.info("selenium_browser: usando Firefox undetected %s", binario)
+        else:
+            # Fallback SILENCIOSO era a raiz do "Indeed não funciona": Firefox normal
+            # expõe navigator.webdriver=true → Cloudflare bloqueia e o desafio não
+            # gruda nem resolvido à mão. Berra no log pra não virar mistério de novo.
+            logger.error(
+                "selenium_browser: FIREFOX_UNDETECTED ligado mas o patch FALHOU — usando "
+                "Firefox DETECTÁVEL. O Cloudflare (Indeed) vai bloquear. Verifique se o "
+                "Firefox de origem existe (/snap/firefox/... ou FIREFOX_BINARY) e as "
+                "permissões de %s.", FIREFOX_UNDETECTED_DIR,
+            )
+    else:
+        logger.warning("selenium_browser: FIREFOX_UNDETECTED desligado — Firefox detectável (Cloudflare pode bloquear)")
     options.binary_location = binario
     options.headless = PLAYWRIGHT_HEADLESS
 

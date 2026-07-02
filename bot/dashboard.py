@@ -365,11 +365,11 @@ VUE_DASHBOARD = """
                 </select>
                 <span style="color:#666;font-size:0.78rem;">Os dois rodam em paralelo; os controles abaixo agem na plataforma escolhida aqui.</span>
             </div>
-            <div v-if="browserControl.paused" style="background:#ff4444;color:#fff;padding:8px 12px;border-radius:4px;margin-bottom:8px;font-weight:bold;text-align:center;">
+            <div v-if="browserControl.paused && browserControl.intervention_type !== 'manual'" style="background:#ff4444;color:#fff;padding:8px 12px;border-radius:4px;margin-bottom:8px;font-weight:bold;text-align:center;">
                 ⏸️ AUTOMAÇÃO PAUSADA — clique em ▶️ Continuar para retomar
             </div>
             <div v-if="browserControl.intervention_type === 'manual'" style="background:#ffaa00;color:#0f0f23;padding:8px 12px;border-radius:4px;margin-bottom:8px;font-weight:bold;text-align:center;">
-                ✋ MODO MANUAL ATIVO — use os controles abaixo ou 🔄 Retomar Auto
+                ✋ AÇÃO MANUAL — resolva no browser (ex.: Cloudflare/reCAPTCHA) e clique 🔄 Retomar Auto (NÃO o ▶️ Continuar)
             </div>
             <div class="browser-viewport" v-if="browser.screenshot">
                 <img :src="'data:image/png;base64,' + browser.screenshot" alt="Browser screenshot">
@@ -877,7 +877,7 @@ VUE_DASHBOARD = """
                     const r = await fetch('/api/automacao/extrair-vagas-geekhunter', {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({max_vagas: 20, query: this.queryBuscaGeek || this.busca || ''})
+                        body: JSON.stringify({max_vagas: 3000, query: this.queryBuscaGeek || this.busca || ''})
                     });
                     const d = await r.json();
                     if (d.success) {
@@ -1619,7 +1619,8 @@ async def aplicar_vagas_visiveis_indeed_endpoint(request: Request):
 async def extrair_vagas_geekhunter_endpoint(request: Request):
     """Extrai vagas da busca do GeekHunter (palavra-chave do dashboard)."""
     body = await request.json()
-    max_vagas = int(body.get("max_vagas", 20))
+    # GeekHunter sem limite de vagas visualizadas — default alto (3000).
+    max_vagas = int(body.get("max_vagas", 3000))
     query = (body.get("query") or "").strip()
     user_id = os.getenv("DASHBOARD_USER_ID", "admin")
 
@@ -1701,7 +1702,7 @@ async def aplicar_vagas_visiveis_geekhunter_endpoint(request: Request):
             neo4j = get_neo4j()
             perfil = neo4j.get_perfil_profissional(user_id) or {}
 
-            _set_automacao_status(True, "aplicando", "geekhunter", f"Aplicando em até {max_vagas} vagas do GeekHunter")
+            _set_automacao_status(True, "aplicando", "geekhunter", "Aplicando em todas as vagas do GeekHunter (ilimitado)")
             set_browser_current_step("visiveis_geekhunter", "aplicando", "Buscando vagas na página")
             emit_status_update()
 
@@ -1719,7 +1720,7 @@ async def aplicar_vagas_visiveis_geekhunter_endpoint(request: Request):
             emit_status_update()
 
     _track_task(_run_apply_visiveis(), platform="geekhunter")
-    return JSONResponse({"success": True, "message": f"Iniciando aplicação em até {max_vagas} vagas do GeekHunter"})
+    return JSONResponse({"success": True, "message": "Iniciando aplicação em todas as vagas do GeekHunter (ilimitado)"})
 
 
 def _detectar_plataforma(url: str) -> str:

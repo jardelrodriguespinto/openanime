@@ -81,6 +81,12 @@ def _get_cidade() -> str:
 # só pula quem NÃO tem nada a ver com o perfil. Ajustável no .env.
 _LIMIAR_MATCH = int(os.getenv("INDEED_LIMIAR_MATCH", "20"))
 
+# Pausa para intervenção manual ANTES de clicar em "Enviar sua candidatura", para
+# o usuário resolver o reCAPTCHA da tela de revisão. "1" = pausa (padrão, pedido do
+# usuário); "0" = envia sozinho (autônomo). Vale para candidatura única e em lote.
+def _pausar_antes_envio() -> bool:
+    return os.getenv("INDEED_PAUSA_ENVIO", "1").strip().lower() not in ("0", "false", "no", "nao", "não", "")
+
 _BASE = "https://br.indeed.com"
 
 
@@ -123,10 +129,24 @@ _BTN_REVISAR = [
     'button:has-text("Review")',
 ]
 
+# Detecção (sem clicar) da tela de revisão/preview: seletores ESTREITOS do botão
+# de envio, para não confundir com um genérico "Enviar" de outro step.
+_SUBMIT_DETECTAR = [
+    'button[name="submit-application"]',
+    '[data-testid="submit-application-button"]',
+    'button[data-testid="submit-application-button"]',
+    '[data-testid="submit-application"]',
+    'button[data-testid="submit-application"]',
+]
+
 # Post-apply: volta para a lista de resultados após enviar a candidatura.
 _BTN_VOLTAR_BUSCA = [
     '#returnToSearchButton',
     'button#returnToSearchButton',
+    '#continueButton',
+    'button#continueButton',
+    'button.ia-PostApply-ContinueFooter-button',
+    'button[class*="post-apply"]',
     'button:has-text("Voltar à busca de vagas")',
     'button:has-text("Voltar à busca")',
     'button:has-text("Return to job search")',
@@ -1268,6 +1288,26 @@ async def _clicar_botao_smartapply(driver, seletores: list) -> tuple:
         return ("", False)
 
 
+async def _botao_presente(driver, seletores: list) -> bool:
+    """True se existe um botão visível casando algum seletor CSS (sem :has-text),
+    SEM clicar. Usado para saber se já estamos na tela de revisão/preview."""
+    def _check():
+        for s in seletores:
+            if ":has-text" in s:
+                continue
+            try:
+                for el in driver.find_elements(By.CSS_SELECTOR, s):
+                    if el.is_displayed():
+                        return True
+            except Exception:
+                continue
+        return False
+    try:
+        return await _run_in_thread(_check)
+    except Exception:
+        return False
+
+
 async def _processar_formulario_smartapply(driver, perfil: dict, curriculo_path: str,
                                            vaga_url: str, resumo_curriculo: str,
                                            idioma: str = "pt", vaga_titulo: str = "") -> dict:
@@ -1360,6 +1400,28 @@ async def _processar_formulario_smartapply(driver, perfil: dict, curriculo_path:
             sig_antes = ""
 
         # Enviar > Revisar > Continuar.
+        # Se estamos na tela de revisão/preview (botão de envio presente) e a pausa
+        # antes do envio está ligada, damos o controle ao usuário para resolver o
+        # reCAPTCHA — só depois clicamos "Enviar sua candidatura".
+        if _pausar_antes_envio() and await _botao_presente(driver, _SUBMIT_DETECTAR):
+            await notify_browser_step(
+                f"indeed_step_{step}", "manual",
+                "🔒 Revise a candidatura e resolva o reCAPTCHA no browser, depois clique "
+                "🔄 Retomar Auto no dashboard para eu enviar."
+            )
+            if not await _aguardar_resolucao_manual(driver, "reCAPTCHA antes do envio"):
+                b64 = await screenshot_base64()
+                return {"sucesso": False, "motivo_falha": "captcha",
+                        "mensagem": f"Envio não confirmado. Aplique manualmente: {vaga_url}",
+                        "screenshot": b64[:100] if b64 else ""}
+            # Usuário pode ter enviado manualmente durante a pausa.
+            if await _candidatura_enviada(driver):
+                b64 = await screenshot_base64()
+                await notify_browser_step(f"indeed_step_{step}", "sucesso", "Candidatura enviada!")
+                return {"sucesso": True, "perguntas_respondidas": perguntas_feitas,
+                        "mensagem": "Candidatura enviada com sucesso via Indeed!",
+                        "screenshot": b64[:100] if b64 else ""}
+
         btn_text, clicou = await _clicar_botao_smartapply(driver, _BTN_ENVIAR)
         is_submit = clicou
         if not clicou:

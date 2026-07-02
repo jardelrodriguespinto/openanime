@@ -19,7 +19,11 @@ Config via .env:
   GEEK_HUNTER_EMAIL, GEEK_HUNTER_PASSWORD  → credenciais
   GEEK_HUNTER_QUERY                        → palavra-chave padrão (fallback do dashboard)
   GEEK_HUNTER_LIMIAR_MATCH                 → nota mínima (0-100) p/ aplicar (fail-open)
-  GEEK_HUNTER_TETO_APLICACOES              → teto total (persistente no Redis)
+  GEEK_HUNTER_MAX_PAGINAS                  → trava de segurança de paginação (default 1000)
+
+Sem teto de candidaturas e sem limite de vagas: aplica em todas, página após
+página, até não haver mais vaga (ou o usuário parar). O contador persistente
+segue sendo incrementado só para histórico.
 """
 
 import asyncio
@@ -333,7 +337,7 @@ def _extrair_cards_info(driver, max_vagas: int) -> list:
     return infos
 
 
-async def extrair_vagas_da_busca(perfil: dict, max_vagas: int = 20, query: str = "") -> dict:
+async def extrair_vagas_da_busca(perfil: dict, max_vagas: int = 3000, query: str = "") -> dict:
     """Faz login, abre a busca e lista os cards (título). O apply é card a card em
     aplicar_vagas_visiveis_na_pagina (clique abre nova aba)."""
     set_platform("geekhunter")
@@ -430,10 +434,13 @@ def _contexto_input(driver, el) -> str:
     return " ".join(partes).lower()
 
 
-def _digitar_no_input(el, valor: str) -> None:
-    """Foca, limpa e digita — robusto pra inputs com máscara (React/Chakra). Pausa no
-    fim (pacing): o GeekHunter é React e se preenchermos rápido demais ele 'se perde'
-    (re-render não acompanha). O pequeno sleep deixa o estado assentar entre campos."""
+def _digitar_no_input(driver, el, valor: str) -> None:
+    """Foca, limpa e digita — robusto pra inputs com máscara (React/Chakra), incluindo o
+    NumberInput (type=text + inputmode=decimal + role=spinbutton) do GeekHunter. Se o
+    send_keys não 'pegar' (input controlado do React não dispara onChange e o valor não
+    assenta → validação 'obrigatório' recusa), força pelo setter NATIVO do value +
+    dispara input/change/blur, que é o que o React de fato escuta. Pausa no fim (pacing):
+    o GeekHunter é React e se preenchermos rápido demais ele 'se perde'."""
     import time as _t
     try:
         el.click()
@@ -443,7 +450,34 @@ def _digitar_no_input(el, valor: str) -> None:
         el.clear()
     except Exception:
         pass
-    el.send_keys(valor)
+    try:
+        el.send_keys(valor)
+    except Exception:
+        pass
+    # Só força o setter nativo quando o campo ficou VAZIO após o send_keys (caso do
+    # NumberInput Chakra, que ignora o send_keys). NÃO reescreve quando já há valor —
+    # senão sobrescreveria a máscara do telefone (que reformata os dígitos e faria
+    # 'atual != valor' sempre verdadeiro num campo que já funcionava).
+    try:
+        atual = (el.get_attribute("value") or "").strip()
+        if not atual and str(valor).strip():
+            driver.execute_script(
+                "const el=arguments[0], val=arguments[1];"
+                "const proto = el.tagName==='TEXTAREA'"
+                " ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;"
+                "const setter = Object.getOwnPropertyDescriptor(proto,'value').set;"
+                "setter.call(el, val);"
+                "el.dispatchEvent(new Event('input', {bubbles:true}));"
+                "el.dispatchEvent(new Event('change', {bubbles:true}));",
+                el, str(valor),
+            )
+    except Exception:
+        pass
+    # blur dispara a validação do campo (Chakra valida ao sair do input).
+    try:
+        driver.execute_script("arguments[0].dispatchEvent(new Event('blur',{bubbles:true}));", el)
+    except Exception:
+        pass
     _t.sleep(random.uniform(0.4, 0.9))
 
 
@@ -477,7 +511,7 @@ async def _preencher_contato_geekhunter(driver, perfil: dict) -> None:
                 elif "nome" in ctx or "name" in ctx:
                     val = nome
                 if val:
-                    _digitar_no_input(el, val)
+                    _digitar_no_input(driver, el, val)
                     print(f"[GEEK] Contato preenchido ({ctx[:25]}) = {val[:30]}")
             except Exception:
                 continue
@@ -580,7 +614,7 @@ async def _preencher_remuneracao_geekhunter(driver, perfil: dict) -> None:
                     continue
                 if (inp.get_attribute("value") or "").strip():
                     continue
-                _digitar_no_input(inp, digs)
+                _digitar_no_input(driver, inp, digs)
                 tipo = "PJ" if ("pj" in txt or "jur" in txt) else ("dólar" if any(k in txt for k in ("dólar", "dolar", "usd", "dollar")) else "CLT")
                 print(f"[GEEK] Remuneração {tipo} = {digs}")
             except Exception:
@@ -778,7 +812,7 @@ async def _responder_perguntas_geekhunter(driver, perfil: dict, resumo_curriculo
                     el = None
             if el is None:
                 return
-            _digitar_no_input(el, str(resp))
+            _digitar_no_input(driver, el, str(resp))
             print(f"[GEEK] Pergunta '{label[:35]}' = {str(resp)[:30]}")
 
         for _tp in range(3):
@@ -789,6 +823,136 @@ async def _responder_perguntas_geekhunter(driver, perfil: dict, resumo_curriculo
                 await asyncio.sleep(0.6)
         feitas.append(label)
         await asyncio.sleep(random.uniform(0.6, 1.2))  # pacing entre perguntas
+    return feitas
+
+
+# Texto exibido por um dropdown AINDA no placeholder (nada escolhido).
+_DROPDOWN_PLACEHOLDER = ("selecione", "selecionar", "select", "escolha", "choose")
+
+
+async def _responder_dropdowns_geekhunter(driver, perfil: dict, resumo_curriculo: str,
+                                          idioma: str, vaga_titulo: str) -> list:
+    """Responde os DROPDOWNS customizados do GeekHunter. Eles NÃO são <select> nativos:
+    são um <div name="..."> (Chakra/react-select) com um <p>Selecione uma opção</p> e um
+    chevron (svg). Por isso a coleta de <input>/<select> não os enxerga e ficavam em
+    branco → o form 'obrigatório' não avança. Aqui: acha os controles ainda no
+    placeholder, abre cada um, lê as opções do menu, escolhe via IA (SELECT:) e clica na
+    opção. Uma de cada vez, com pacing (React fecha o menu se clicar rápido demais)."""
+    import time as _t
+    _IGNORAR = ("nome", "email", "e-mail", "linkedin", "celular", "telefone", "ddd",
+                "remunera", "salári", "salari", "pretens", "currículo", "curriculo",
+                "política de privacidade", "politica de privacidade", "ciente de que")
+
+    def _coletar_controles():
+        ctrls = []
+        for div in driver.find_elements(By.CSS_SELECTOR, "div[name]"):
+            try:
+                if not div.is_displayed():
+                    continue
+                # Precisa ter o chevron (svg) — é o que caracteriza o dropdown.
+                if not div.find_elements(By.CSS_SELECTOR, "svg"):
+                    continue
+                # 1ª linha do texto = valor/placeholder exibido. Se não é placeholder,
+                # já foi respondido → pula (não reabre e troca por engano).
+                primeira = (div.text or "").strip().split("\n")[0].strip().lower()
+                if not primeira or not any(ph in primeira for ph in _DROPDOWN_PLACEHOLDER):
+                    continue
+                label = _label_pergunta_gh(driver, div)
+                if not label or any(k in label.lower() for k in _IGNORAR):
+                    continue
+                ctrls.append({"name": div.get_attribute("name") or "", "label": label})
+            except Exception:
+                continue
+        return ctrls
+
+    feitas = []
+    try:
+        controles = await _run_in_thread(_coletar_controles)
+    except Exception as e:
+        logger.warning("geekhunter _coletar_dropdowns erro: %s", e)
+        return feitas
+
+    for c in controles:
+        name, label = c["name"], c["label"]
+        if not name:
+            continue
+
+        # Abre o menu e lê as opções visíveis (react-select/Chakra menu).
+        def _abrir_e_ler(nm=name):
+            try:
+                ctrl = driver.find_element(By.CSS_SELECTOR, f"div[name='{nm}']")
+            except Exception:
+                return []
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", ctrl)
+            driver.execute_script("arguments[0].click();", ctrl)
+            _t.sleep(0.7)
+            opts = []
+            for o in driver.find_elements(
+                By.CSS_SELECTOR,
+                "[role='option'], [id*='option'], .chakra-menu__menuitem, li[role='menuitem']",
+            ):
+                try:
+                    if o.is_displayed() and (o.text or "").strip():
+                        t = o.text.strip()
+                        if t.lower() not in _DROPDOWN_PLACEHOLDER and t not in opts:
+                            opts.append(t)
+                except Exception:
+                    continue
+            return opts
+
+        try:
+            opcoes = await _run_in_thread(_abrir_e_ler)
+        except Exception as e:
+            logger.warning("geekhunter abrir dropdown '%s' erro: %s", label[:30], e)
+            opcoes = []
+
+        if not opcoes:
+            print(f"[GEEK] Dropdown '{label[:35]}' sem opções legíveis — pulando")
+            continue
+
+        # IA escolhe a opção (mesmo mecanismo SELECT: do Indeed). Fallback: 1ª opção
+        # (fail-open, coerente com o resto — na dúvida, avança em vez de travar).
+        pergunta = "SELECT:" + label + ":" + ";".join(opcoes[:15])
+        try:
+            escolha = responder_pergunta(pergunta, perfil, vaga_titulo=vaga_titulo,
+                                         vaga_empresa="", resumo_curriculo=resumo_curriculo,
+                                         idioma=idioma)
+        except Exception as e:
+            logger.warning("responder_pergunta (dropdown) erro: %s", e)
+            escolha = ""
+        escolha = (escolha or "").strip()
+        alvo = next((o for o in opcoes if o.lower() == escolha.lower()), None) \
+            or next((o for o in opcoes if escolha and escolha.lower() in o.lower()), None) \
+            or opcoes[0]
+
+        def _clicar_opcao(txt=alvo):
+            for o in driver.find_elements(
+                By.CSS_SELECTOR,
+                "[role='option'], [id*='option'], .chakra-menu__menuitem, li[role='menuitem']",
+            ):
+                try:
+                    if o.is_displayed() and (o.text or "").strip() == txt:
+                        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", o)
+                        o.click()
+                        return True
+                except Exception:
+                    continue
+            return False
+
+        clicado = False
+        for _tp in range(3):
+            try:
+                clicado = await _run_in_thread(_clicar_opcao)
+                if clicado:
+                    break
+            except StaleElementReferenceException:
+                await asyncio.sleep(0.5)
+        if clicado:
+            print(f"[GEEK] Dropdown '{label[:35]}' = {alvo[:30]}")
+            feitas.append(label)
+        else:
+            print(f"[GEEK] Dropdown '{label[:35]}' não consegui selecionar '{alvo[:25]}'")
+        await asyncio.sleep(random.uniform(0.6, 1.2))  # pacing entre dropdowns
     return feitas
 
 
@@ -1081,6 +1245,15 @@ async def _preencher_e_enviar_formulario(driver, perfil: dict, resumo_curriculo:
                 if p not in perguntas_feitas:
                     perguntas_feitas.append(p)
             await asyncio.sleep(random.uniform(0.5, 1.0))
+            # Dropdowns customizados (div[name] Chakra/react-select — não são <select>):
+            # abrir, ler opções e escolher via IA. Depois das perguntas de texto/número.
+            novos_dd = await _responder_dropdowns_geekhunter(
+                driver, perfil, resumo_curriculo, idioma, vaga_titulo
+            )
+            for p in novos_dd:
+                if p not in perguntas_feitas:
+                    perguntas_feitas.append(p)
+            await asyncio.sleep(random.uniform(0.5, 1.0))
             await _marcar_consentimentos_geekhunter(driver)          # checkbox LGPD (Chakra)
             await asyncio.sleep(random.uniform(0.5, 1.0))
         except StaleElementReferenceException:
@@ -1232,21 +1405,18 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
 
     resultados = {"sucesso": True, "aplicacoes": [], "falhas": 0}
     aplicadas = 0
-    teto = _cont.get_teto()
-    # Condição de PARADA pelo .env (pedido do usuário): se há teto configurado
-    # (GEEK_HUNTER_TETO_APLICACOES), o lote vai até BATER o teto persistente e IGNORA
-    # o max_vagas do dashboard (que parava cedo, em 5). `limite` = quantas ainda faltam
-    # pra chegar no teto. Sem teto (0), respeita o max_vagas passado.
-    limite = max(teto - _cont.get_count(user_id), 0) if teto > 0 else max_vagas
+    # GeekHunter (pedido do usuário): SEM teto de candidaturas e SEM limite de vagas.
+    # Aplica em TODAS as vagas, página após página, até NÃO haver mais página de
+    # inscrição (n_cards == 0) ou o usuário pedir "parar". `max_vagas` é ignorado aqui.
+    # O contador persistente continua sendo incrementado só para histórico/estatística.
     pagina = 1
-    MAX_PAGINAS = int(os.getenv("GEEK_HUNTER_MAX_PAGINAS", "20"))
+    # Trava de segurança contra loop infinito patológico; default alto = efetivamente
+    # ilimitado (a parada real é acabarem as vagas). Ajustável por GEEK_HUNTER_MAX_PAGINAS.
+    MAX_PAGINAS = int(os.getenv("GEEK_HUNTER_MAX_PAGINAS", "1000"))
 
     # Loop de PÁGINAS: aplica em todos os cards da página; ao esgotar, vai pra
-    # page=2, page=3... até bater o limite/teto ou não haver mais vagas.
-    while aplicadas < limite and pagina <= MAX_PAGINAS:
-        if teto > 0 and _cont.teto_atingido(user_id):
-            resultados["mensagem"] = f"Teto de candidaturas atingido ({teto})."
-            break
+    # page=2, page=3... até não haver mais vagas (ou o usuário parar).
+    while pagina <= MAX_PAGINAS:
         control = await get_intervention_state()
         if control.get("current_action") == "parar":
             resultados["mensagem"] = "Interrompido pelo usuário."
@@ -1269,11 +1439,6 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
         print(f"[GEEK] Página {pagina}: {n_cards} vaga(s)")
 
         for i in range(n_cards):
-            if aplicadas >= limite:
-                break
-            if teto > 0 and _cont.teto_atingido(user_id):
-                resultados["mensagem"] = f"Teto de candidaturas atingido ({teto})."
-                break
             control = await get_intervention_state()
             if control.get("current_action") == "parar":
                 resultados["mensagem"] = "Interrompido pelo usuário."

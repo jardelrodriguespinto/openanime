@@ -67,7 +67,13 @@
       "Bash(docker info *)",
       "Bash(python3 -c 'import sys,json; *)",
       "Bash(python3 -c \"import ast; ast.parse\\(open\\('automation/linkedin_selenium.py'\\).read\\(\\)\\); print\\('linkedin_selenium sintaxe OK'\\)\")",
-      "Bash(grep -avE 'GqlStatusObject|Received notification|MATCH \\\\\\(u:Usuario|OPTIONAL MATCH|RETURN u,|collect\\\\\\(DISTINCT|cargos_desejados|CONNECTION|defunct' __TRACKED_VAR__/geek_test.log)"
+      "Bash(grep -avE 'GqlStatusObject|Received notification|MATCH \\\\\\(u:Usuario|OPTIONAL MATCH|RETURN u,|collect\\\\\\(DISTINCT|cargos_desejados|CONNECTION|defunct' __TRACKED_VAR__/geek_test.log)",
+      "Read(//snap/firefox/**)",
+      "Read(//snap/firefox/8585/usr/lib/firefox/**)",
+      "Bash(timeout 120 python -c ' *)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('automation/selenium_browser.py'\\).read\\(\\)\\); print\\('OK selenium_browser'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('bot/dashboard.py'\\).read\\(\\)\\); print\\('OK dashboard.py'\\)\")",
+      "Bash(timeout 60 python -c ' *)"
     ],
     "additionalDirectories": [
       "/tmp/claude-1000/-home-jard-Documents-projetos-openanime/1a53c565-4c8f-4f74-a284-3b4533a83336/scratchpad"
