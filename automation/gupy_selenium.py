@@ -1049,18 +1049,18 @@ async def _preencher_e_enviar_formulario(driver, perfil: dict, resumo_curriculo:
             continue
         nao_avancou += 1
         if nao_avancou >= 3:
-            # Não avançou após 3 tentativas (provável campo obrigatório que não consegui
-            # preencher) → PULA a vaga em vez de parar o lote (pedido do usuário: continuar).
-            await notify_browser_step(f"gupy_step_{step}", "pulando",
-                                      "Formulário não avançou — pulando a vaga")
-            b64 = await screenshot_base64()
-            print(f"[GUPY] Vaga pulada (form não avançou 3x): {vaga_url}")
-            return {"sucesso": False, "motivo_falha": "formulario_travado",
-                    "mensagem": f"Formulário não avançou — pulei a vaga: {vaga_url}",
-                    "screenshot": b64[:100] if b64 else ""}
+            # Não avançou após 3 tentativas → intervenção manual (paridade com as outras
+            # plataformas; NUNCA silencia). Com o fill de perguntas corrigido (clique
+            # escopado por name + pula respondidas + textarea React-safe), o form avança
+            # sozinho e esse caminho quase não é atingido.
+            await notify_browser_step(f"gupy_step_{step}", "manual", "Formulário travou — controle manual")
+            if not await _aguardar_resolucao_manual(driver, f"formulário travado Gupy step {step}"):
+                return {"sucesso": False, "motivo_falha": "formulario_travado",
+                        "mensagem": f"Formulário travou. Candidate-se à mão: {vaga_url}"}
+            nao_avancou = 0
 
     return {"sucesso": False, "motivo_falha": "formulario_incompleto",
-            "mensagem": f"Não consegui concluir o formulário — pulei a vaga: {vaga_url}"}
+            "mensagem": f"Não consegui concluir o formulário. Candidate-se à mão: {vaga_url}"}
 
 
 # ── Fechar aba e voltar pra busca ─────────────────────────────────────────────

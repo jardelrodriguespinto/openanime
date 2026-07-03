@@ -263,7 +263,7 @@ VUE_DASHBOARD = """
         <div class="automacao-plataformas" v-if="plataformasAtivas.length" style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:15px;">
             <div v-for="p in plataformasAtivas" :key="p.nome" style="background:#16213e;padding:8px 14px;border-radius:8px;display:flex;align-items:center;gap:8px;">
                 <span class="status-dot" :class="p.running ? 'online' : (p.action !== 'idle' ? 'busy' : 'offline')"></span>
-                <strong :style="{color: p.nome === 'indeed' ? '#2557a7' : (p.nome === 'geekhunter' ? '#7c3aed' : (p.nome === 'gupy' ? '#f472b6' : '#00d4ff'))}">{{p.nome === 'indeed' ? '🟦 Indeed' : (p.nome === 'linkedin' ? '🔗 LinkedIn' : (p.nome === 'geekhunter' ? '🟣 GeekHunter' : (p.nome === 'gupy' ? '🟢 Gupy' : p.nome)))}}</strong>
+                <strong :style="{color: p.nome === 'indeed' ? '#2557a7' : (p.nome === 'geekhunter' ? '#7c3aed' : (p.nome === 'gupy' ? '#f472b6' : (p.nome === 'senior' ? '#22c55e' : '#00d4ff')))}">{{p.nome === 'indeed' ? '🟦 Indeed' : (p.nome === 'linkedin' ? '🔗 LinkedIn' : (p.nome === 'geekhunter' ? '🟣 GeekHunter' : (p.nome === 'gupy' ? '🟢 Gupy' : (p.nome === 'senior' ? '🟩 Senior' : p.nome))))}}</strong>
                 <span style="color:#aaa;font-size:0.82rem;">{{p.action}}<span v-if="p.ultima_mensagem"> — {{p.ultima_mensagem}}</span></span>
             </div>
         </div>
@@ -311,6 +311,16 @@ VUE_DASHBOARD = """
             <input v-model="queryBuscaGupy" placeholder="Palavra-chave (ex: desenvolvedor golang)" style="flex:1;min-width:200px;padding:8px;border-radius:4px;background:#1a1a2e;color:#fff;border:1px solid #f472b6;">
             <button @click="extrairVagasGupy" style="padding:8px 16px;background:#f472b6;border:none;border-radius:4px;color:#0f0f23;font-weight:bold;cursor:pointer;">🔎 Buscar Vagas Gupy</button>
             <button @click="aplicarVagasVisiveisGupy" style="padding:8px 16px;background:#00ff88;border:none;border-radius:4px;color:#0f0f23;font-weight:bold;cursor:pointer;">🤖 Aplicar Vagas Gupy</button>
+        </div>
+
+        <div class="senior-bar" style="background:#16213e;padding:12px 15px;border-radius:8px;margin-bottom:15px;display:flex;align-items:center;justify-content:space-between;gap:15px;flex-wrap:wrap;">
+            <div style="display:flex;align-items:center;gap:10px;">
+                <strong style="color:#22c55e">🟩 Senior</strong>
+                <span style="color:#aaa;font-size:0.85rem;">Login por e-mail/senha do .env; busca por palavra-chave e aplica card a card (Portal de Talentos)</span>
+            </div>
+            <input v-model="queryBuscaSenior" placeholder="Palavra-chave (ex: desenvolvedor)" style="flex:1;min-width:200px;padding:8px;border-radius:4px;background:#1a1a2e;color:#fff;border:1px solid #22c55e;">
+            <button @click="extrairVagasSenior" style="padding:8px 16px;background:#22c55e;border:none;border-radius:4px;color:#0f0f23;font-weight:bold;cursor:pointer;">🔎 Buscar Vagas Senior</button>
+            <button @click="aplicarVagasVisiveisSenior" style="padding:8px 16px;background:#00ff88;border:none;border-radius:4px;color:#0f0f23;font-weight:bold;cursor:pointer;">🤖 Aplicar Vagas Senior</button>
         </div>
 
         <div style="background:#16213e;padding:12px 15px;border-radius:8px;margin-bottom:15px;">
@@ -373,6 +383,7 @@ VUE_DASHBOARD = """
                     <option value="indeed">Indeed</option>
                     <option value="geekhunter">GeekHunter</option>
                     <option value="gupy">Gupy</option>
+                    <option value="senior">Senior</option>
                 </select>
                 <span style="color:#666;font-size:0.78rem;">Os dois rodam em paralelo; os controles abaixo agem na plataforma escolhida aqui.</span>
             </div>
@@ -414,6 +425,7 @@ VUE_DASHBOARD = """
                 <select v-model="plataformaAplicacao" style="padding: 6px; border-radius: 4px; background: #1a1a2e; color: #fff; border: 1px solid #00d4ff;">
                     <option value="">Auto-detectar plataforma</option>
                     <option value="gupy">Gupy</option>
+                    <option value="senior">Senior</option>
                     <option value="linkedin">LinkedIn</option>
                     <option value="indeed">Indeed</option>
                 </select>
@@ -437,6 +449,7 @@ VUE_DASHBOARD = """
              <select v-model="plataformaSelecionada" style="padding: 8px; border-radius: 4px; background: #1a1a2e; color: #fff; border: 1px solid #00d4ff;">
                  <option value="">Todas as plataformas</option>
                  <option value="gupy">Gupy</option>
+                 <option value="senior">Senior</option>
                  <option value="linkedin">LinkedIn</option>
                  <option value="indeed">Indeed</option>
              </select>
@@ -491,6 +504,7 @@ VUE_DASHBOARD = """
                 queryBusca: '',
                 queryBuscaGeek: '',
                 queryBuscaGupy: '',
+                queryBuscaSenior: '',
                 filtroStatus: '',
                 browser: {screenshot: '', url: '', title: ''},
                 browserControl: {paused: false, current_action: 'idle', manual_input: '', intervention_type: null},
@@ -513,7 +527,7 @@ VUE_DASHBOARD = """
             plataformasAtivas() {
                 const pp = (this.automacao && this.automacao.por_plataforma) || {};
                 return Object.keys(pp)
-                    .filter(k => k === 'linkedin' || k === 'indeed' || k === 'geekhunter' || k === 'gupy')
+                    .filter(k => k === 'linkedin' || k === 'indeed' || k === 'geekhunter' || k === 'gupy' || k === 'senior')
                     .map(k => ({nome: k, ...pp[k]}));
             },
             automacaoLabel() {
@@ -767,6 +781,7 @@ VUE_DASHBOARD = """
             _detectarPlataforma(url) {
                 const u = (url || '').toLowerCase();
                 if (u.includes('gupy.io')) return 'gupy';
+                if (u.includes('portaldetalentos.senior.com.br')) return 'senior';
                 if (u.includes('linkedin.com')) return 'linkedin';
                 if (u.includes('indeed.com') || u.includes('br.indeed.com')) return 'indeed';
                 return '';
@@ -952,6 +967,44 @@ VUE_DASHBOARD = """
                     if (d.success) {
                         this.showNotif('✅ Aplicação iniciada! Acompanhe o browser abaixo.', 'success');
                         this.automacao = {...this.automacao, running: true, action: 'aplicando', platform: 'gupy'};
+                    } else {
+                        this.showNotif('❌ Falha: ' + (d.message || 'Erro ao iniciar'), 'error');
+                    }
+                } catch(e) {
+                    this.showNotif('Erro de conexão', 'error');
+                }
+            },
+            async extrairVagasSenior() {
+                this.showNotif('🔎 Buscando vagas na Senior... (login por e-mail/senha)', 'info');
+                try {
+                    const r = await fetch('/api/automacao/extrair-vagas-senior', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({max_vagas: 3000, query: this.queryBuscaSenior || this.busca || ''})
+                    });
+                    const d = await r.json();
+                    if (d.success) {
+                        await this.carregarAutomacao();
+                        this.showNotif('Busca iniciada — acompanhe o browser abaixo', 'info');
+                    } else {
+                        this.showNotif('❌ Falha na busca: ' + (d.message || ''), 'error');
+                    }
+                } catch(e) {
+                    this.showNotif('Erro de conexão ao buscar vagas na Senior', 'error');
+                }
+            },
+            async aplicarVagasVisiveisSenior() {
+                this.showNotif('🤖 Iniciando aplicação nas vagas da Senior...', 'info');
+                try {
+                    const r = await fetch('/api/automacao/aplicar-vagas-visiveis-senior', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({max_vagas: 5, query: this.queryBuscaSenior || this.busca || ''})
+                    });
+                    const d = await r.json();
+                    if (d.success) {
+                        this.showNotif('✅ Aplicação iniciada! Acompanhe o browser abaixo.', 'success');
+                        this.automacao = {...this.automacao, running: true, action: 'aplicando', platform: 'senior'};
                     } else {
                         this.showNotif('❌ Falha: ' + (d.message || 'Erro ao iniciar'), 'error');
                     }
@@ -1880,6 +1933,113 @@ async def aplicar_vagas_visiveis_gupy_endpoint(request: Request):
     return JSONResponse({"success": True, "message": "Iniciando aplicação nas vagas do Gupy"})
 
 
+@fastapi_app.post("/api/automacao/extrair-vagas-senior")
+async def extrair_vagas_senior_endpoint(request: Request):
+    """Extrai vagas da busca da Senior (palavra-chave do dashboard)."""
+    body = await request.json()
+    max_vagas = int(body.get("max_vagas", 3000))
+    query = (body.get("query") or "").strip()
+    user_id = os.getenv("DASHBOARD_USER_ID", "admin")
+
+    try:
+        from automation.browser import set_intervention_state, get_intervention_state
+        ctrl = await get_intervention_state(platform="senior")
+        if ctrl.get("current_action") == "parar":
+            await set_intervention_state("current_action", "rodando", platform="senior")
+    except Exception:
+        pass
+
+    async def _run_extracao():
+        try:
+            from graph.neo4j_client import get_neo4j
+            from automation.senior_selenium import extrair_vagas_da_busca
+
+            neo4j = get_neo4j()
+            perfil = neo4j.get_perfil_profissional(user_id) or {}
+
+            _set_automacao_status(True, "extraindo", "senior", f"Buscando na Senior: {query or 'padrão'}")
+            set_browser_current_step("extracao_senior", "extraindo", f"Buscando até {max_vagas} vagas")
+            emit_status_update()
+
+            resultado = await extrair_vagas_da_busca(perfil, max_vagas=max_vagas, query=query)
+
+            if resultado.get("sucesso"):
+                vagas = resultado.get("vagas", [])
+                for vaga in vagas:
+                    try:
+                        neo4j.upsert_vaga({
+                            "id": vaga.get("id", ""),
+                            "titulo": vaga.get("titulo", ""),
+                            "empresa": vaga.get("empresa", ""),
+                            "url": vaga.get("url", ""),
+                            "fonte": vaga.get("fonte", "Senior"),
+                            "salario": vaga.get("salario", ""),
+                            "modalidade": vaga.get("modalidade", ""),
+                            "descricao": vaga.get("descricao", "")[:500],
+                        })
+                    except Exception:
+                        pass
+                _set_automacao_status(False, "idle", "senior", f"Extraídas {len(vagas)} vagas da Senior")
+                set_browser_current_step("extracao_senior_fim", "concluido", f"{len(vagas)} vagas")
+            else:
+                _set_automacao_status(False, "idle", "senior", resultado.get("mensagem", "Falha na extração"))
+                set_browser_current_step("extracao_senior_fim", "falha", resultado.get("mensagem", ""))
+            emit_status_update()
+        except Exception as e:
+            logger.error(f"Erro em extrair_vagas_senior: {e}")
+            _set_automacao_status(False, "erro", "senior", str(e))
+            set_browser_current_step("extracao_senior_fim", "falha", str(e))
+            emit_status_update()
+
+    _track_task(_run_extracao(), platform="senior")
+    return JSONResponse({"success": True, "message": f"Extraindo até {max_vagas} vagas da Senior"})
+
+
+@fastapi_app.post("/api/automacao/aplicar-vagas-visiveis-senior")
+async def aplicar_vagas_visiveis_senior_endpoint(request: Request):
+    """Aplica card a card nas vagas da Senior (wizard de candidatura, master-detail)."""
+    body = await request.json()
+    max_vagas = int(body.get("max_vagas", 5))
+    query = (body.get("query") or "").strip()
+    user_id = os.getenv("DASHBOARD_USER_ID", "admin")
+
+    try:
+        from automation.browser import set_intervention_state, get_intervention_state
+        ctrl = await get_intervention_state(platform="senior")
+        if ctrl.get("current_action") == "parar":
+            await set_intervention_state("current_action", "rodando", platform="senior")
+    except Exception:
+        pass
+
+    async def _run_apply_visiveis():
+        try:
+            from automation.senior_selenium import aplicar_vagas_visiveis_na_pagina
+            from graph.neo4j_client import get_neo4j
+
+            neo4j = get_neo4j()
+            perfil = neo4j.get_perfil_profissional(user_id) or {}
+
+            _set_automacao_status(True, "aplicando", "senior", "Aplicando nas vagas da Senior")
+            set_browser_current_step("visiveis_senior", "aplicando", "Buscando vagas na página")
+            emit_status_update()
+
+            resultado = await aplicar_vagas_visiveis_na_pagina(perfil, max_vagas, user_id, query=query)
+
+            _set_automacao_status(
+                False, "finalizando", "senior",
+                f"Concluído: {len(resultado.get('aplicacoes', []))} vagas processadas"
+            )
+            set_browser_current_step("visiveis_senior_fim", "concluido", resultado.get("mensagem", ""))
+            emit_status_update()
+        except Exception as e:
+            logger.error(f"Erro em aplicar_vagas_visiveis_senior: {e}")
+            _set_automacao_status(False, "erro", "senior", str(e))
+            emit_status_update()
+
+    _track_task(_run_apply_visiveis(), platform="senior")
+    return JSONResponse({"success": True, "message": "Iniciando aplicação nas vagas da Senior"})
+
+
 def _detectar_plataforma(url: str) -> str:
     url_lower = (url or "").lower()
     if "linkedin.com" in url_lower:
@@ -1890,6 +2050,8 @@ def _detectar_plataforma(url: str) -> str:
         return "geekhunter"
     if "gupy.io" in url_lower:
         return "gupy"
+    if "portaldetalentos.senior.com.br" in url_lower:
+        return "senior"
     if "greenhouse.io" in url_lower or "jobs.greenhouse" in url_lower:
         return "greenhouse"
     if "lever.co" in url_lower or "jobs.lever" in url_lower:

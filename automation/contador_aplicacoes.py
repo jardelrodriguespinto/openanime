@@ -145,3 +145,7 @@ GEEK_HUNTER = PlatformCounter("geekhunter", "GEEK_HUNTER_TETO_APLICACOES")
 
 # Contador dedicado do Gupy — chave 'gupy:aplicacoes:*' e env GUPY_TETO_APLICACOES.
 GUPY = PlatformCounter("gupy", "GUPY_TETO_APLICACOES")
+
+# Contador dedicado da Senior (Portal de Talentos) — chave 'senior:aplicacoes:*' e env
+# SENIOR_TETO_APLICACOES.
+SENIOR = PlatformCounter("senior", "SENIOR_TETO_APLICACOES")
