@@ -79,7 +79,8 @@
       "Bash(python -c \"import ast; ast.parse\\(open\\('bot/dashboard.py'\\).read\\(\\)\\); print\\('OK dashboard.py sintaxe válida'\\)\")",
       "Bash(python -c \"import ast; ast.parse\\(open\\('automation/indeed_selenium.py'\\).read\\(\\)\\); print\\('OK indeed_selenium sintaxe'\\)\")",
       "Bash(grep -oE '<\\(h3|label|input|textarea\\)[^>]{0,220}')",
-      "Bash(grep -oE 'MuiFormControlLabel-root|type=\"radio\"|type=\"checkbox\"|MuiCheckbox|MuiRadio|name=\"checkbox-[^\"]*\"|name=\"radioGroup[^\"]*\"|data-testid=\"[^\"]{0,40}\"|<textarea[^>]{0,120}')"
+      "Bash(grep -oE 'MuiFormControlLabel-root|type=\"radio\"|type=\"checkbox\"|MuiCheckbox|MuiRadio|name=\"checkbox-[^\"]*\"|name=\"radioGroup[^\"]*\"|data-testid=\"[^\"]{0,40}\"|<textarea[^>]{0,120}')",
+      "Bash(python -c \"import importlib, automation.senior_selenium as s; importlib.reload\\(s\\); print\\('reimport OK'\\); print\\('helpers:', all\\(hasattr\\(s,n\\) for n in \\('_sucesso_estrutural_senior','_controles_apply_presentes','_acompanhar_ou_frase','_botao_login_visivel','_marcar_consentimento_senior'\\)\\)\\)\")"
     ],
     "additionalDirectories": [
       "/tmp/claude-1000/-home-jard-Documents-projetos-openanime/1a53c565-4c8f-4f74-a284-3b4533a83336/scratchpad"
