@@ -104,6 +104,7 @@ _BTN_RESPONDER_AGORA = [
     'button:has-text("Responder agora")',
 ]
 _BTN_SALVAR_CONTINUAR = [
+    'button[name="saveAndContinueButton"]',
     'button:has-text("Salvar e continuar")',
     'button:has-text("Salvar")',
 ]
@@ -146,17 +147,28 @@ _FRASES_SUCESSO_GUPY = (
 # ── Login ────────────────────────────────────────────────────────────────────
 
 def _esta_logado(url: str, html: str = "") -> bool:
-    """Heurística de login no Gupy. Conservadora: na dúvida NÃO está logado."""
+    """Heurística de login no Gupy pela página ATUAL (busca do portal).
+
+    NUNCA decidir pela URL da busca: 'job-search' está SEMPRE na URL → o fallback
+    antigo retornava True deslogado, o login do portal era PULADO ('Já está logado')
+    e todo Candidatar-se batia no signin da empresa. Marcador REAL (confirmado no dump
+    do DOM): o menu do usuário diz 'Usuário deslogado'/'Logged out user' quando não há
+    sessão — se presente, NÃO está logado, ponto."""
     u = (url or "").lower()
     if "/login" in u or "/signin" in u or "/sign_in" in u or "/auth" in u:
         return False
     h = (html or "").lower()
+    # Marcador de DESLOGADO tem prioridade (visto no DOM real da busca, PT e EN).
+    for marca in ("usuário deslogado", "usuario deslogado", "logged out user", "logged-out"):
+        if marca in h:
+            return False
     for marca in ("sair", "logout", "minha conta", "meu perfil", "meus dados",
-                  "candidaturas", "sign out"):
-        if marca in h[:8000]:
+                  "minhas candidaturas", "sign out"):
+        if marca in h:
             return True
-    # Estar na busca sem bounce pro login é bom sinal.
-    return "job-search" in u or "/candidates" in u
+    # Sem nenhum marcador: portal sempre renderiza o menu do usuário (deslogado OU
+    # logado); se não achamos 'deslogado', considera logado (fail-open, igual projeto).
+    return True
 
 
 async def _pagina_de_login_gupy(driver) -> bool:
@@ -206,6 +218,45 @@ async def _tratar_login_gupy(driver) -> bool:
         return True
 
     await notify_browser_step("gupy_login", "login", "Preenchendo login do Gupy")
+
+    def _tem_campo_senha():
+        try:
+            return any(e.is_displayed() for e in driver.find_elements(
+                By.CSS_SELECTOR,
+                "input#password, input[type='password'], input[autocomplete='current-password']"))
+        except Exception:
+            return False
+
+    # PORTAL signin (portal.gupy.io/candidates/signin): NÃO tem campos diretos — tem um
+    # botão "Entrar" (#btn-link-signin) que abre o form de login em OUTRA ABA. Clica,
+    # troca pra aba nova e loga lá. (No subdomínio da empresa os campos já vêm diretos →
+    # este bloco é pulado.)
+    janela_orig, aba_login = None, None
+    if not await _run_in_thread(_tem_campo_senha):
+        try:
+            janela_orig = await _run_in_thread(lambda: driver.current_window_handle)
+            antes = await _run_in_thread(lambda: list(driver.window_handles))
+        except Exception:
+            antes = []
+        _, clic = await _clicar_botao_smartapply(driver, [
+            "#btn-link-signin", "button#btn-link-signin", "a#btn-link-signin",
+            "button[aria-label='Entrar']", "button[aria-label='Login']",
+            "a[href*='signin']", "a[href*='login']",
+        ])
+        if clic:
+            print("[GUPY] Portal signin: cliquei 'Entrar' (#btn-link-signin) — abre login")
+            await asyncio.sleep(3.5)
+            try:
+                depois = await _run_in_thread(lambda: list(driver.window_handles))
+                novas = [h for h in depois if h not in antes]
+                if novas:
+                    aba_login = novas[0]
+                    await _run_in_thread(lambda h=aba_login: driver.switch_to.window(h))
+                    await asyncio.sleep(2)
+                    print("[GUPY] Trocado pra aba de login")
+            except Exception:
+                pass
+
     preencheu_user = await digitar_robusto(
         "input#username, input[name='username'], input[autocomplete='username'], "
         "input[type='email'], input[name='email'], input[name*='email' i]",
@@ -222,13 +273,17 @@ async def _tratar_login_gupy(driver) -> bool:
         return True
 
     await asyncio.sleep(0.6)
+    # ATENÇÃO: a tela de senha tem DOIS botões — "Acessar conta" (login com SENHA) e
+    # "Entrar sem senha" (passwordless). NUNCA casar "Entrar"/"Login"/submit genérico:
+    # "Entrar" pega o passwordless e o login com senha nunca acontece. Só o específico:
     _, clicou = await _clicar_botao_smartapply(driver, [
-        'button[type="submit"]',
-        'button:has-text("Entrar")', 'button:has-text("Login")',
-        'button:has-text("Acessar")', 'button:has-text("Continuar")',
-        'input[type="submit"]',
+        'button:has-text("Acessar conta")',
+        'button:has-text("Access account")',
+        'button:has-text("Acessar")',
+        'button:has-text("Access")',
     ])
     if not clicou:
+        # Fallback: Enter no campo de senha submete o form de SENHA (não o passwordless).
         def _enter():
             el = driver.find_element(By.CSS_SELECTOR, "input#password, input[type='password']")
             el.send_keys(Keys.RETURN)
@@ -239,7 +294,30 @@ async def _tratar_login_gupy(driver) -> bool:
             pass
     await asyncio.sleep(4)
 
-    # Verificação/CAPTCHA (ou login ainda falhando) → manual.
+    # Se logamos numa ABA de login separada, fecha e volta pra original (o cookie de
+    # sessão vale pra todas as abas), e refresca a busca (o signin não atualiza sozinho).
+    if aba_login:
+        try:
+            handles = await _run_in_thread(lambda: list(driver.window_handles))
+            if aba_login in handles and len(handles) > 1:
+                try:
+                    cur_win = await _run_in_thread(lambda: driver.current_window_handle)
+                except Exception:
+                    cur_win = None
+                if cur_win == aba_login:
+                    await _run_in_thread(lambda: driver.close())
+            handles = await _run_in_thread(lambda: list(driver.window_handles))
+            alvo = janela_orig if (janela_orig and janela_orig in handles) else (handles[0] if handles else None)
+            if alvo:
+                await _run_in_thread(lambda h=alvo: driver.switch_to.window(h))
+                await asyncio.sleep(1)
+            await navegar(_build_search_url())
+            await asyncio.sleep(2)
+        except Exception:
+            pass
+        return True  # launcher: login é best-effort; a busca segue (deslogada funciona)
+
+    # Fluxo direto (subdomínio da empresa): verificação/CAPTCHA ou ainda no login → manual.
     try:
         cur = await _run_in_thread(lambda: driver.current_url)
         html = await _run_in_thread(lambda: driver.page_source)
@@ -387,8 +465,9 @@ async def _abrir_busca(driver, query: str = "", page: int = 1) -> None:
 async def extrair_vagas_da_busca(perfil: dict, max_vagas: int = 100, query: str = "") -> dict:
     """Extrai (título, url) dos cards da busca — usado pelo dashboard pra listar vagas."""
     set_platform("gupy")
+    # Best-effort (a busca funciona deslogada — ver aplicar_vagas_visiveis_na_pagina).
     if not await _garantir_login():
-        return {"sucesso": False, "vagas": [], "mensagem": "Não foi possível logar no Gupy."}
+        print("[GUPY] Login do portal não confirmado — extraindo mesmo assim")
     driver = await get_driver()
     await _abrir_busca(driver, query)
 
@@ -434,26 +513,110 @@ async def _extrair_descricao_detalhe(driver) -> str:
         return ""
 
 
-async def _marcar_indicado_nao(driver) -> None:
-    """Radio 'Alguém indicou você?' → marca 'Não' (radioGroupIsIndicatedNo). Já costuma
-    vir checked por padrão; garante mesmo assim. Radio nativo, clica o input."""
-    def _marca():
-        for sel in ("input[data-testid='radioGroupIsIndicatedNo']",
-                    "input[name='radioGroupIsIndicatedTitle'][value='no']"):
-            for el in driver.find_elements(By.CSS_SELECTOR, sel):
-                try:
-                    if not el.is_selected():
-                        driver.execute_script("arguments[0].click();", el)
-                    return True
-                except Exception:
+async def _responder_radios_gupy(driver, perfil: dict, resumo_curriculo: str,
+                                 idioma: str, vaga_titulo: str) -> None:
+    """Responde os radio-groups (styled-components) do step de dados. A resposta DEPENDE
+    DA PERGUNTA (legend do <fieldset>): 'Alguém indicou você?' → 'Não' (honesto p/
+    referral); demais grupos AINDA sem seleção → IA escolhe pela legend. Radio nativo
+    dentro de <label> — clica via JS pelo data-testid/value."""
+    def _coletar():
+        grupos = {}
+        for el in driver.find_elements(By.CSS_SELECTOR, "input[type='radio']"):
+            try:
+                if not el.is_displayed():
                     continue
-        return False
+                name = el.get_attribute("name") or ""
+                if not name:
+                    continue
+                g = grupos.setdefault(name, {"legend": "", "opts": [], "sel": False})
+                txt = ""
+                try:
+                    lbl = el.find_element(By.XPATH, "./ancestor::label[1]")
+                    txt = (lbl.text or "").strip()
+                except Exception:
+                    pass
+                g["opts"].append({"texto": txt or (el.get_attribute("value") or ""),
+                                  "value": el.get_attribute("value") or "",
+                                  "testid": el.get_attribute("data-testid") or ""})
+                if el.is_selected():
+                    g["sel"] = True
+                if not g["legend"]:
+                    try:
+                        fs = el.find_element(By.XPATH, "./ancestor::fieldset[1]")
+                        g["legend"] = (fs.find_element(By.TAG_NAME, "legend").text or "").strip()
+                    except Exception:
+                        pass
+            except Exception:
+                continue
+        return grupos
+
     try:
-        if await _run_in_thread(_marca):
-            print("[GUPY] Indicação: marcado 'Não'")
-            await asyncio.sleep(0.4)
+        grupos = await _run_in_thread(_coletar)
     except Exception as e:
-        logger.warning("gupy _marcar_indicado_nao erro: %s", e)
+        logger.warning("gupy _coletar_radios erro: %s", e)
+        return
+
+    for name, g in grupos.items():
+        # Referral ('Alguém indicou você?') → sempre 'Não' (honesto; já vem checked, garante).
+        if "indicated" in name.lower() or "indicad" in (g["legend"] or "").lower():
+            def _marca_nao(nm=name):
+                for sel in ("input[data-testid='radioGroupIsIndicatedNo']",
+                            f"input[name='{nm}'][value='no']"):
+                    for el in driver.find_elements(By.CSS_SELECTOR, sel):
+                        try:
+                            if not el.is_selected():
+                                driver.execute_script("arguments[0].click();", el)
+                            return True
+                        except Exception:
+                            continue
+                return False
+            try:
+                if await _run_in_thread(_marca_nao):
+                    print("[GUPY] Radio 'indicou você?' = Não")
+                    await asyncio.sleep(0.3)
+            except Exception:
+                pass
+            continue
+
+        # Outros grupos: só responde se NENHUM selecionado (não mexe em default alheio).
+        if g["sel"] or not g["opts"]:
+            continue
+        legend = g["legend"] or name
+        opcoes = [o["texto"] for o in g["opts"] if o["texto"]]
+        if not opcoes:
+            continue
+        pergunta = "SELECT:" + legend + ":" + ";".join(opcoes[:12])
+        try:
+            escolha = responder_pergunta(pergunta, perfil, vaga_titulo=vaga_titulo, vaga_empresa="",
+                                         resumo_curriculo=resumo_curriculo, idioma=idioma)
+        except Exception as e:
+            logger.warning("responder_pergunta (gupy radio) erro: %s", e)
+            escolha = ""
+        escolha = (escolha or "").strip().lower()
+        alvo = next((o for o in g["opts"] if o["texto"].lower() == escolha), None) \
+            or next((o for o in g["opts"] if escolha and escolha in o["texto"].lower()), None) \
+            or g["opts"][0]
+
+        def _clica(tid=alvo["testid"], val=alvo["value"], nm=name):
+            sels = []
+            if tid:
+                sels.append(f"input[data-testid='{tid}']")
+            if val:
+                sels.append(f"input[name='{nm}'][value='{val}']")
+            for s in sels:
+                for el in driver.find_elements(By.CSS_SELECTOR, s):
+                    try:
+                        driver.execute_script("arguments[0].click();", el)
+                        return True
+                    except Exception:
+                        continue
+            return False
+        try:
+            if await _run_in_thread(_clica):
+                print(f"[GUPY] Radio '{legend[:35]}' = {alvo['texto'][:20]}")
+                await asyncio.sleep(0.3)
+        except Exception:
+            pass
 
 
 async def _preencher_how_did_you_hear(driver) -> None:
@@ -729,7 +892,7 @@ async def _preencher_e_enviar_formulario(driver, perfil: dict, resumo_curriculo:
 
         # Preenche o que estiver na tela (idempotente — só mexe no que existe/está vazio).
         try:
-            await _marcar_indicado_nao(driver)
+            await _responder_radios_gupy(driver, perfil, resumo_curriculo, idioma, vaga_titulo)
             await _preencher_how_did_you_hear(driver)
             novas = await _responder_perguntas_gupy(driver, perfil, resumo_curriculo, idioma, vaga_titulo)
             for p in novas:
@@ -852,8 +1015,12 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
     if resumo_curriculo and not perfil.get("resumo_curriculo"):
         perfil = {**perfil, "resumo_curriculo": resumo_curriculo}
 
+    # Login do portal é BEST-EFFORT, não fatal: a BUSCA funciona deslogada (confirmado
+    # no dump — cards aparecem) e o login que realmente destrava o apply é o do
+    # SUBDOMÍNIO da empresa, tratado no wizard (_tratar_login_gupy). Abortar aqui
+    # deixaria o Gupy "logando mas sem aplicar" de novo.
     if not await _garantir_login():
-        return {"sucesso": False, "aplicacoes": [], "mensagem": "Não foi possível logar no Gupy."}
+        print("[GUPY] Login do portal não confirmado — seguindo (login da empresa é tratado no apply)")
 
     driver = await get_driver()
     resultados = {"sucesso": True, "aplicacoes": [], "falhas": 0}
@@ -1024,9 +1191,9 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "", user_id
     if resumo_curriculo and not perfil.get("resumo_curriculo"):
         perfil = {**perfil, "resumo_curriculo": resumo_curriculo}
 
+    # Best-effort: o login que destrava o apply é o do subdomínio da empresa (wizard).
     if not await _garantir_login():
-        return {"sucesso": False, "motivo_falha": "login_falhou",
-                "mensagem": "Não foi possível logar no Gupy."}
+        print("[GUPY] Login do portal não confirmado — seguindo (login da empresa é tratado no apply)")
     driver = await get_driver()
     await navegar(vaga_url)
     await asyncio.sleep(3)
