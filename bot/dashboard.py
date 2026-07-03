@@ -263,7 +263,7 @@ VUE_DASHBOARD = """
         <div class="automacao-plataformas" v-if="plataformasAtivas.length" style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:15px;">
             <div v-for="p in plataformasAtivas" :key="p.nome" style="background:#16213e;padding:8px 14px;border-radius:8px;display:flex;align-items:center;gap:8px;">
                 <span class="status-dot" :class="p.running ? 'online' : (p.action !== 'idle' ? 'busy' : 'offline')"></span>
-                <strong :style="{color: p.nome === 'indeed' ? '#2557a7' : (p.nome === 'geekhunter' ? '#7c3aed' : '#00d4ff')}">{{p.nome === 'indeed' ? '🟦 Indeed' : (p.nome === 'linkedin' ? '🔗 LinkedIn' : (p.nome === 'geekhunter' ? '🟣 GeekHunter' : p.nome))}}</strong>
+                <strong :style="{color: p.nome === 'indeed' ? '#2557a7' : (p.nome === 'geekhunter' ? '#7c3aed' : (p.nome === 'gupy' ? '#f472b6' : '#00d4ff'))}">{{p.nome === 'indeed' ? '🟦 Indeed' : (p.nome === 'linkedin' ? '🔗 LinkedIn' : (p.nome === 'geekhunter' ? '🟣 GeekHunter' : (p.nome === 'gupy' ? '🟢 Gupy' : p.nome)))}}</strong>
                 <span style="color:#aaa;font-size:0.82rem;">{{p.action}}<span v-if="p.ultima_mensagem"> — {{p.ultima_mensagem}}</span></span>
             </div>
         </div>
@@ -301,6 +301,16 @@ VUE_DASHBOARD = """
             <input v-model="queryBuscaGeek" placeholder="Palavra-chave (ex: desenvolvedor golang)" style="flex:1;min-width:200px;padding:8px;border-radius:4px;background:#1a1a2e;color:#fff;border:1px solid #7c3aed;">
             <button @click="extrairVagasGeekhunter" style="padding:8px 16px;background:#7c3aed;border:none;border-radius:4px;color:#fff;font-weight:bold;cursor:pointer;">🔎 Buscar Vagas GeekHunter</button>
             <button @click="aplicarVagasVisiveisGeekhunter" style="padding:8px 16px;background:#00ff88;border:none;border-radius:4px;color:#0f0f23;font-weight:bold;cursor:pointer;">🤖 Aplicar Vagas GeekHunter</button>
+        </div>
+
+        <div class="gupy-bar" style="background:#16213e;padding:12px 15px;border-radius:8px;margin-bottom:15px;display:flex;align-items:center;justify-content:space-between;gap:15px;flex-wrap:wrap;">
+            <div style="display:flex;align-items:center;gap:10px;">
+                <strong style="color:#f472b6">🟢 Gupy</strong>
+                <span style="color:#aaa;font-size:0.85rem;">Login por e-mail/senha do .env; busca por palavra-chave e aplica card a card (wizard Gupy)</span>
+            </div>
+            <input v-model="queryBuscaGupy" placeholder="Palavra-chave (ex: desenvolvedor golang)" style="flex:1;min-width:200px;padding:8px;border-radius:4px;background:#1a1a2e;color:#fff;border:1px solid #f472b6;">
+            <button @click="extrairVagasGupy" style="padding:8px 16px;background:#f472b6;border:none;border-radius:4px;color:#0f0f23;font-weight:bold;cursor:pointer;">🔎 Buscar Vagas Gupy</button>
+            <button @click="aplicarVagasVisiveisGupy" style="padding:8px 16px;background:#00ff88;border:none;border-radius:4px;color:#0f0f23;font-weight:bold;cursor:pointer;">🤖 Aplicar Vagas Gupy</button>
         </div>
 
         <div style="background:#16213e;padding:12px 15px;border-radius:8px;margin-bottom:15px;">
@@ -362,6 +372,7 @@ VUE_DASHBOARD = """
                     <option value="linkedin">LinkedIn</option>
                     <option value="indeed">Indeed</option>
                     <option value="geekhunter">GeekHunter</option>
+                    <option value="gupy">Gupy</option>
                 </select>
                 <span style="color:#666;font-size:0.78rem;">Os dois rodam em paralelo; os controles abaixo agem na plataforma escolhida aqui.</span>
             </div>
@@ -479,6 +490,7 @@ VUE_DASHBOARD = """
                 busca: '',
                 queryBusca: '',
                 queryBuscaGeek: '',
+                queryBuscaGupy: '',
                 filtroStatus: '',
                 browser: {screenshot: '', url: '', title: ''},
                 browserControl: {paused: false, current_action: 'idle', manual_input: '', intervention_type: null},
@@ -501,7 +513,7 @@ VUE_DASHBOARD = """
             plataformasAtivas() {
                 const pp = (this.automacao && this.automacao.por_plataforma) || {};
                 return Object.keys(pp)
-                    .filter(k => k === 'linkedin' || k === 'indeed' || k === 'geekhunter')
+                    .filter(k => k === 'linkedin' || k === 'indeed' || k === 'geekhunter' || k === 'gupy')
                     .map(k => ({nome: k, ...pp[k]}));
             },
             automacaoLabel() {
@@ -902,6 +914,44 @@ VUE_DASHBOARD = """
                     if (d.success) {
                         this.showNotif('✅ Aplicação iniciada! Acompanhe o browser abaixo.', 'success');
                         this.automacao = {...this.automacao, running: true, action: 'aplicando', platform: 'geekhunter'};
+                    } else {
+                        this.showNotif('❌ Falha: ' + (d.message || 'Erro ao iniciar'), 'error');
+                    }
+                } catch(e) {
+                    this.showNotif('Erro de conexão', 'error');
+                }
+            },
+            async extrairVagasGupy() {
+                this.showNotif('🔎 Buscando vagas no Gupy... (login por e-mail/senha)', 'info');
+                try {
+                    const r = await fetch('/api/automacao/extrair-vagas-gupy', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({max_vagas: 3000, query: this.queryBuscaGupy || this.busca || ''})
+                    });
+                    const d = await r.json();
+                    if (d.success) {
+                        await this.carregarAutomacao();
+                        this.showNotif('Busca iniciada — acompanhe o browser abaixo', 'info');
+                    } else {
+                        this.showNotif('❌ Falha na busca: ' + (d.message || ''), 'error');
+                    }
+                } catch(e) {
+                    this.showNotif('Erro de conexão ao buscar vagas no Gupy', 'error');
+                }
+            },
+            async aplicarVagasVisiveisGupy() {
+                this.showNotif('🤖 Iniciando aplicação nas vagas do Gupy...', 'info');
+                try {
+                    const r = await fetch('/api/automacao/aplicar-vagas-visiveis-gupy', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({max_vagas: 5, query: this.queryBuscaGupy || this.busca || ''})
+                    });
+                    const d = await r.json();
+                    if (d.success) {
+                        this.showNotif('✅ Aplicação iniciada! Acompanhe o browser abaixo.', 'success');
+                        this.automacao = {...this.automacao, running: true, action: 'aplicando', platform: 'gupy'};
                     } else {
                         this.showNotif('❌ Falha: ' + (d.message || 'Erro ao iniciar'), 'error');
                     }
@@ -1721,6 +1771,113 @@ async def aplicar_vagas_visiveis_geekhunter_endpoint(request: Request):
 
     _track_task(_run_apply_visiveis(), platform="geekhunter")
     return JSONResponse({"success": True, "message": "Iniciando aplicação em todas as vagas do GeekHunter (ilimitado)"})
+
+
+@fastapi_app.post("/api/automacao/extrair-vagas-gupy")
+async def extrair_vagas_gupy_endpoint(request: Request):
+    """Extrai vagas da busca do Gupy (palavra-chave do dashboard)."""
+    body = await request.json()
+    max_vagas = int(body.get("max_vagas", 3000))
+    query = (body.get("query") or "").strip()
+    user_id = os.getenv("DASHBOARD_USER_ID", "admin")
+
+    try:
+        from automation.browser import set_intervention_state, get_intervention_state
+        ctrl = await get_intervention_state(platform="gupy")
+        if ctrl.get("current_action") == "parar":
+            await set_intervention_state("current_action", "rodando", platform="gupy")
+    except Exception:
+        pass
+
+    async def _run_extracao():
+        try:
+            from graph.neo4j_client import get_neo4j
+            from automation.gupy_selenium import extrair_vagas_da_busca
+
+            neo4j = get_neo4j()
+            perfil = neo4j.get_perfil_profissional(user_id) or {}
+
+            _set_automacao_status(True, "extraindo", "gupy", f"Buscando no Gupy: {query or 'padrão'}")
+            set_browser_current_step("extracao_gupy", "extraindo", f"Buscando até {max_vagas} vagas")
+            emit_status_update()
+
+            resultado = await extrair_vagas_da_busca(perfil, max_vagas=max_vagas, query=query)
+
+            if resultado.get("sucesso"):
+                vagas = resultado.get("vagas", [])
+                for vaga in vagas:
+                    try:
+                        neo4j.upsert_vaga({
+                            "id": vaga.get("id", ""),
+                            "titulo": vaga.get("titulo", ""),
+                            "empresa": vaga.get("empresa", ""),
+                            "url": vaga.get("url", ""),
+                            "fonte": vaga.get("fonte", "Gupy"),
+                            "salario": vaga.get("salario", ""),
+                            "modalidade": vaga.get("modalidade", ""),
+                            "descricao": vaga.get("descricao", "")[:500],
+                        })
+                    except Exception:
+                        pass
+                _set_automacao_status(False, "idle", "gupy", f"Extraídas {len(vagas)} vagas do Gupy")
+                set_browser_current_step("extracao_gupy_fim", "concluido", f"{len(vagas)} vagas")
+            else:
+                _set_automacao_status(False, "idle", "gupy", resultado.get("mensagem", "Falha na extração"))
+                set_browser_current_step("extracao_gupy_fim", "falha", resultado.get("mensagem", ""))
+            emit_status_update()
+        except Exception as e:
+            logger.error(f"Erro em extrair_vagas_gupy: {e}")
+            _set_automacao_status(False, "erro", "gupy", str(e))
+            set_browser_current_step("extracao_gupy_fim", "falha", str(e))
+            emit_status_update()
+
+    _track_task(_run_extracao(), platform="gupy")
+    return JSONResponse({"success": True, "message": f"Extraindo até {max_vagas} vagas do Gupy"})
+
+
+@fastapi_app.post("/api/automacao/aplicar-vagas-visiveis-gupy")
+async def aplicar_vagas_visiveis_gupy_endpoint(request: Request):
+    """Aplica card a card nas vagas do Gupy (wizard de candidatura)."""
+    body = await request.json()
+    max_vagas = int(body.get("max_vagas", 5))
+    query = (body.get("query") or "").strip()
+    user_id = os.getenv("DASHBOARD_USER_ID", "admin")
+
+    try:
+        from automation.browser import set_intervention_state, get_intervention_state
+        ctrl = await get_intervention_state(platform="gupy")
+        if ctrl.get("current_action") == "parar":
+            await set_intervention_state("current_action", "rodando", platform="gupy")
+    except Exception:
+        pass
+
+    async def _run_apply_visiveis():
+        try:
+            from automation.gupy_selenium import aplicar_vagas_visiveis_na_pagina
+            from graph.neo4j_client import get_neo4j
+
+            neo4j = get_neo4j()
+            perfil = neo4j.get_perfil_profissional(user_id) or {}
+
+            _set_automacao_status(True, "aplicando", "gupy", "Aplicando nas vagas do Gupy")
+            set_browser_current_step("visiveis_gupy", "aplicando", "Buscando vagas na página")
+            emit_status_update()
+
+            resultado = await aplicar_vagas_visiveis_na_pagina(perfil, max_vagas, user_id, query=query)
+
+            _set_automacao_status(
+                False, "finalizando", "gupy",
+                f"Concluído: {len(resultado.get('aplicacoes', []))} vagas processadas"
+            )
+            set_browser_current_step("visiveis_gupy_fim", "concluido", resultado.get("mensagem", ""))
+            emit_status_update()
+        except Exception as e:
+            logger.error(f"Erro em aplicar_vagas_visiveis_gupy: {e}")
+            _set_automacao_status(False, "erro", "gupy", str(e))
+            emit_status_update()
+
+    _track_task(_run_apply_visiveis(), platform="gupy")
+    return JSONResponse({"success": True, "message": "Iniciando aplicação nas vagas do Gupy"})
 
 
 def _detectar_plataforma(url: str) -> str:

@@ -1,96 +1,1033 @@
 """
-Candidatura via Gupy usando Selenium + Firefox.
+Automação de candidatura no Gupy (portal.gupy.io) via Selenium/Firefox.
+
+Criada nos moldes do GeekHunter (ver automation/geekhunter_selenium.py): login por
+e-mail+senha do .env, busca por palavra-chave do dashboard, e aplica card a card —
+abrir a vaga leva ao detalhe (subdomínio da empresa, ex.: firedev.gupy.io/job/…),
+onde roda o WIZARD de candidatura do Gupy (passos FIXOS, não é o form Chakra genérico
+do GeekHunter):
+
+  Candidatar-se (a[data-testid=job-cta-link])
+    → Continuar
+    → "Alguém indicou você?" radio → Não (radioGroupIsIndicatedNo)
+    → "Onde você encontrou essa vaga?" (Opcional) combobox → tenta e segue
+    → Responder agora (button[aria-label=Responder agora])
+    → perguntas (MUI: clica o LABEL, o input é oculto) [se houver]
+    → Salvar e continuar
+    → modal → Finalizar candidatura (#dialog-give-up-personalization-step)
+  → fecha a aba, volta pra busca, próxima página.
+
+Regras herdadas do resto do projeto:
+- Todo seletor incerto degrada para intervenção manual (_aguardar_resolucao_manual),
+  NUNCA falha silenciosa.
+- Sucesso é CONSERVADOR (sinal forte: clicar o #dialog-give-up-personalization-step
+  e/ou frase de confirmação) — evita o bug de falso-sucesso que envenena o dedup.
 """
 
 import asyncio
 import logging
 import os
+import random
+from urllib.parse import quote_plus
 
-from automation.browser import notify_browser_step
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from automation.selenium_browser import (
-    nova_pagina, navegar, wait_for_selector, wait_for_selector_visible,
-    click, digitar, digitar_com_delay, screenshot_base64, fechar, get_driver, get_title
+    nova_pagina, navegar, digitar_robusto, screenshot_base64,
+    get_driver, get_title, _run_in_thread,
 )
+from automation.browser import (
+    notify_browser_step, get_intervention_state,
+)
+from automation.run_context import set_platform
+
+# Reuso dos helpers GENÉRICOS do Indeed (agnósticos de plataforma): clique por texto,
+# detecção de bloqueio, espera de intervenção manual, resposta de perguntas por IA.
+from automation.indeed_selenium import (
+    _clicar_botao_smartapply,
+    _pagina_bloqueada,
+    _smartapply_bloqueado,
+    _aguardar_resolucao_manual,
+    _get_resumo_curriculo,
+)
+from automation.form_filler import responder_pergunta
+from automation.contador_aplicacoes import GUPY as _cont
+
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.common.exceptions import StaleElementReferenceException
 
 logger = logging.getLogger(__name__)
-GUPY_EMAIL = os.getenv("GUPY_EMAIL", "")
-GUPY_PASSWORD = os.getenv("GUPY_PASSWORD", "")
 
 
-async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "") -> dict:
-    """Aplica em vaga Gupy via Selenium."""
-    try:
-        await notify_browser_step("selenium_gupy", "iniciando", "Abrindo Gupy")
-        print(f"[GUPY] Aplicando em: {vaga_url}")
+# ── Config via .env ──────────────────────────────────────────────────────────
 
-        await nova_pagina(vaga_url)
-        await asyncio.sleep(3)
-        driver = await get_driver()
-        print(f"[GUPY] Carregado: {await get_title()[:80]} | URL: {driver.current_url[:100]}")
+_PORTAL = "https://portal.gupy.io"
+# Login do Gupy: /candidates/signin (aparece no portal E no subdomínio da empresa, ex.:
+# fcamara.gupy.io/candidates/signin — ao clicar Candidatar-se a Gupy pode mandar pra lá).
+_LOGIN = f"{_PORTAL}/candidates/signin"
 
-        # Tenta encontrar botao de candidatura
-        aplicar_btn = await wait_for_selector_visible(
-            "button[data-testid='apply-button'], .jobs-apply-button",
-            timeout=10
-        )
-        if aplicar_btn:
-            await click("button[data-testid='apply-button'], .jobs-apply-button")
-            await asyncio.sleep(3)
-            print("[GUPY] Clicou em Candidatar")
 
-            # Preenche campos basicos se aparecerem
-            campos = 0
-            nome = perfil.get("nome", "")
-            partes = nome.split()
-            primeiro = partes[0] if partes else ""
-            ultimo = " ".join(partes[1:]) if len(partes) > 1 else ""
+def _get_email() -> str:
+    return os.getenv("GUPY_EMAIL", "")
 
-            if await digitar_com_delay("input[name='firstName']", primeiro, delay_min=20, delay_max=50):
-                campos += 1
-            if await digitar_com_delay("input[name='lastName']", ultimo, delay_min=20, delay_max=50):
-                campos += 1
-            if await digitar_com_delay("input[name='email'], input[type='email']", perfil.get("email", GUPY_EMAIL), delay_min=20, delay_max=50):
-                campos += 1
-            telefone = perfil.get("telefone", perfil.get("phone", ""))
-            if telefone and await digitar_com_delay("input[name='phone'], input[type='tel']", str(telefone), delay_min=20, delay_max=50):
-                campos += 1
 
-            print(f"[GUPY] Campos preenchidos: {campos}")
+def _get_password() -> str:
+    return os.getenv("GUPY_PASSWORD", "")
 
-            # Tenta enviar
-            await notify_browser_step("selenium_gupy", "enviando", "Enviando candidatura...")
 
-            submit = await wait_for_selector_visible(
-                "button[type='submit'], button.submit-button, .submit-button",
-                timeout=10
-            )
-            if submit:
-                await click("button[type='submit'], button.submit-button, .submit-button")
-                await asyncio.sleep(3)
-                print("[GUPY] Candidatura enviada!")
-                await notify_browser_step("selenium_gupy", "sucesso", "Candidatura enviada!")
-                b64 = await screenshot_base64()
-                await fechar()
-                return {"sucesso": True, "mensagem": "Candidatura enviada no Gupy!", "screenshot": b64[:100] if b64 else ""}
-            else:
-                print("[GUPY] Botao enviar nao encontrado")
-                await notify_browser_step("selenium_gupy", "erro", "Botao enviar nao encontrado")
-                b64 = await screenshot_base64()
-                await fechar()
-                return {"sucesso": False, "mensagem": "Botao enviar nao encontrado. Complete manualmente.", "screenshot": b64[:100] if b64 else ""}
-        else:
-            print("[GUPY] Botao candidatar nao encontrado")
-            await notify_browser_step("selenium_gupy", "erro", "Botao candidatar nao encontrado")
-            b64 = await screenshot_base64()
-            await fechar()
-            return {"sucesso": False, "mensagem": "Botao candidatar nao encontrado. Vaga pode exigir aplicacao externa.", "screenshot": b64[:100] if b64 else ""}
+def _get_query_padrao() -> str:
+    return os.getenv("GUPY_QUERY", "desenvolvedor")
 
-    except Exception as e:
-        logger.error(f"aplicar_gupy_selenium erro: {e}")
-        await notify_browser_step("selenium_gupy", "erro", str(e))
-        print(f"[GUPY] ERRO: {e}")
+
+def _build_search_url(query: str = "", page: int = 1) -> str:
+    """URL da busca do portal Gupy com a palavra-chave (do dashboard). Formato que o
+    usuário forneceu: /job-search/term=<q>. Paginação via ?page=N (best-effort — o
+    terminador REAL é acabarem os cards; confirmar o mecanismo no dump da busca)."""
+    q = (query or "").strip() or _get_query_padrao()
+    base = f"{_PORTAL}/job-search/term={quote_plus(q)}"
+    return base if page <= 1 else f"{base}?page={page}"
+
+
+# Botões de avançar do wizard (styled-components: classes sc-* são hasheadas/instáveis
+# → SEMPRE por TEXTO/atributo, nunca por classe).
+_BTN_CONTINUAR = [
+    'button:has-text("Continuar")',
+    'button:has-text("Próximo")',
+    'button:has-text("Próxima")',
+    'button:has-text("Avançar")',
+]
+_BTN_RESPONDER_AGORA = [
+    'button[aria-label="Responder agora"]',
+    'button:has-text("Responder agora")',
+]
+_BTN_SALVAR_CONTINUAR = [
+    'button:has-text("Salvar e continuar")',
+    'button:has-text("Salvar")',
+]
+# Botão que FINALIZA a candidatura no modal "pular personalização". FORTE = ID estável
+# + texto específico "Finalizar candidatura" → clicar = ENVIO (conta sucesso). O bare
+# "Finalizar" fica no FRACO (só avança; sucesso só se vier frase de confirmação) — evita
+# o falso-sucesso que envenena o dedup (lição do GeekHunter).
+_BTN_FINALIZAR = [
+    '#dialog-give-up-personalization-step',
+    'button#dialog-give-up-personalization-step',
+    'button:has-text("Finalizar candidatura")',
+]
+_BTN_FINALIZAR_FRACO = [
+    'button:has-text("Finalizar")',
+    'button:has-text("Concluir")',
+]
+# Botão/atalho que abre o formulário de candidatura no detalhe da vaga.
+_BTN_CANDIDATAR = [
+    'a[data-testid="job-cta-link"]',
+    'a[href*="/apply"]',
+    'button:has-text("Candidatar-se")',
+    'a:has-text("Candidatar-se")',
+    'button:has-text("Candidatar")',
+]
+
+# Frases ESPECÍFICAS de candidatura enviada (conservador — nada genérico que possa
+# aparecer como marketing/estatística e dar falso sucesso, que envenena o dedup).
+_FRASES_SUCESSO_GUPY = (
+    "candidatura realizada",
+    "candidatura foi realizada",
+    "inscrição realizada",
+    "você se candidatou",
+    "sua candidatura foi enviada",
+    "recebemos sua candidatura",
+    "application submitted",
+    "you have applied",
+)
+
+
+# ── Login ────────────────────────────────────────────────────────────────────
+
+def _esta_logado(url: str, html: str = "") -> bool:
+    """Heurística de login no Gupy. Conservadora: na dúvida NÃO está logado."""
+    u = (url or "").lower()
+    if "/login" in u or "/signin" in u or "/sign_in" in u or "/auth" in u:
+        return False
+    h = (html or "").lower()
+    for marca in ("sair", "logout", "minha conta", "meu perfil", "meus dados",
+                  "candidaturas", "sign out"):
+        if marca in h[:8000]:
+            return True
+    # Estar na busca sem bounce pro login é bom sinal.
+    return "job-search" in u or "/candidates" in u
+
+
+async def _pagina_de_login_gupy(driver) -> bool:
+    """A tela ATUAL é de login? (URL /signin|/login OU tem os campos username+password
+    visíveis). Login do Gupy pode surgir no portal E no subdomínio da empresa."""
+    def _tem_form():
         try:
-            await fechar()
+            pw = driver.find_elements(By.CSS_SELECTOR,
+                "input#password, input[type='password'], input[autocomplete='current-password']")
+            us = driver.find_elements(By.CSS_SELECTOR,
+                "input#username, input[name='username'], input[autocomplete='username'], "
+                "input[type='email'], input[name='email']")
+            return any(e.is_displayed() for e in pw) and any(e.is_displayed() for e in us)
+        except Exception:
+            return False
+    try:
+        u = (await _run_in_thread(lambda: driver.current_url) or "").lower()
+    except Exception:
+        u = ""
+    if "/signin" in u or "/login" in u or "/sign_in" in u:
+        return True
+    try:
+        return await _run_in_thread(_tem_form)
+    except Exception:
+        return False
+
+
+async def _tratar_login_gupy(driver) -> bool:
+    """Se a tela ATUAL é de login do Gupy, preenche username+password do .env e submete.
+    O login pode surgir A QUALQUER MOMENTO (ao clicar Candidatar-se numa vaga a Gupy
+    redireciona pro signin da EMPRESA, ex.: fcamara.gupy.io/candidates/signin). Campos são
+    MUI: input#username[name=username] (type=text, NÃO email!) e input#password. Retorna
+    True se detectou e tratou um login (mesmo caindo em manual); False se não era login."""
+    if not await _pagina_de_login_gupy(driver):
+        return False
+
+    try:
+        u = await _run_in_thread(lambda: driver.current_url)
+    except Exception:
+        u = ""
+    email, senha = _get_email(), _get_password()
+    print(f"[GUPY] Tela de login detectada ({(u or '')[:70]})")
+    if not (email and senha):
+        await notify_browser_step("gupy_login", "manual",
+                                  "Defina GUPY_EMAIL/PASSWORD no .env ou logue à mão")
+        await _aguardar_resolucao_manual(driver, "login manual Gupy")
+        return True
+
+    await notify_browser_step("gupy_login", "login", "Preenchendo login do Gupy")
+    preencheu_user = await digitar_robusto(
+        "input#username, input[name='username'], input[autocomplete='username'], "
+        "input[type='email'], input[name='email'], input[name*='email' i]",
+        email,
+    )
+    preencheu_senha = await digitar_robusto(
+        "input#password, input[type='password'], input[name='password'], "
+        "input[autocomplete='current-password']",
+        senha,
+    )
+    if not (preencheu_user and preencheu_senha):
+        print("[GUPY] Campos de login não preenchidos — intervenção manual")
+        await _aguardar_resolucao_manual(driver, "login manual Gupy")
+        return True
+
+    await asyncio.sleep(0.6)
+    _, clicou = await _clicar_botao_smartapply(driver, [
+        'button[type="submit"]',
+        'button:has-text("Entrar")', 'button:has-text("Login")',
+        'button:has-text("Acessar")', 'button:has-text("Continuar")',
+        'input[type="submit"]',
+    ])
+    if not clicou:
+        def _enter():
+            el = driver.find_element(By.CSS_SELECTOR, "input#password, input[type='password']")
+            el.send_keys(Keys.RETURN)
+            return True
+        try:
+            await _run_in_thread(_enter)
         except Exception:
             pass
-        return {"sucesso": False, "mensagem": str(e)}
+    await asyncio.sleep(4)
+
+    # Verificação/CAPTCHA (ou login ainda falhando) → manual.
+    try:
+        cur = await _run_in_thread(lambda: driver.current_url)
+        html = await _run_in_thread(lambda: driver.page_source)
+    except Exception:
+        cur, html = "", ""
+    if _pagina_bloqueada(cur, await get_title(), html) or await _pagina_de_login_gupy(driver):
+        await notify_browser_step("gupy_login", "manual",
+                                  "🔒 Verificação/senha — conclua no browser e clique 🔄 Retomar Auto")
+        await _aguardar_resolucao_manual(driver, "verificação de login Gupy")
+    return True
+
+
+async def _garantir_login() -> bool:
+    """Garante sessão logada no Gupy. Detect-ou-manual: navega pra busca; se cair num
+    login (portal OU subdomínio da empresa), preenche pelo .env (_tratar_login_gupy);
+    CAPTCHA → manual. Retorna True se logado."""
+    driver = await get_driver()
+    if not driver:
+        await nova_pagina(_build_search_url(), reutilizar=False)
+        await asyncio.sleep(2)
+        driver = await get_driver()
+    if not driver:
+        print("[GUPY] ERRO: driver é None")
+        return False
+
+    # Perfil persistente pode já ter sessão → busca carrega sem bounce pro login.
+    try:
+        await navegar(_build_search_url())
+        await asyncio.sleep(2.5)
+        cur = await _run_in_thread(lambda: driver.current_url)
+        html = await _run_in_thread(lambda: driver.page_source)
+    except Exception:
+        cur, html = "", ""
+    if _pagina_bloqueada(cur, await get_title(), html):
+        if not await _aguardar_resolucao_manual(driver, "acesso ao Gupy"):
+            return False
+        try:
+            cur = await _run_in_thread(lambda: driver.current_url)
+            html = await _run_in_thread(lambda: driver.page_source)
+        except Exception:
+            pass
+    if _esta_logado(cur, html):
+        print("[GUPY] Já está logado")
+        return True
+
+    # Não logado → trata o login que apareceu; se não apareceu, navega pro signin e trata.
+    print("[GUPY] Não logado — tratando login")
+    if not await _tratar_login_gupy(driver):
+        try:
+            await navegar(_LOGIN)
+            await asyncio.sleep(3)
+        except Exception:
+            pass
+        await _tratar_login_gupy(driver)
+
+    try:
+        cur = await _run_in_thread(lambda: driver.current_url)
+        html = await _run_in_thread(lambda: driver.page_source)
+    except Exception:
+        cur, html = "", ""
+    logado = _esta_logado(cur, html)
+    if logado:
+        await notify_browser_step("gupy_login", "sucesso", "Login concluído")
+    return logado
+
+
+# ── Busca / cards ─────────────────────────────────────────────────────────────
+
+# Seletores candidatos do link/card de uma vaga no portal (Gupy usa data-testid).
+_CARD_SELECTORS = (
+    "[data-testid='job-list__listitem'] a",
+    "a[data-testid='job-list__listitem']",
+    "a[href*='/job/']",
+    "a[href*='gupy.io/job/']",
+    "[data-testid*='job'] a[href]",
+)
+
+
+def _achar_cards(driver):
+    """Elementos clicáveis de card de vaga (dedupe por href). Best-effort — Gupy é SPA."""
+    vistos = set()
+    cards = []
+    for sel in _CARD_SELECTORS:
+        try:
+            for el in driver.find_elements(By.CSS_SELECTOR, sel):
+                try:
+                    if not el.is_displayed():
+                        continue
+                    href = el.get_attribute("href") or ""
+                    chave = href or el.id
+                    if chave in vistos:
+                        continue
+                    vistos.add(chave)
+                    cards.append(el)
+                except Exception:
+                    continue
+        except Exception:
+            continue
+        if cards:
+            break  # primeiro seletor que rende cards vence
+    return cards
+
+
+async def _abrir_busca(driver, query: str = "", page: int = 1) -> None:
+    """Navega para a busca do portal Gupy com a palavra-chave (do dashboard) na página."""
+    url = _build_search_url(query, page)
+    print(f"[GUPY] Abrindo busca (pág. {page}) → {url}")
+    await notify_browser_step("gupy_busca", "navegando", f"Buscando: {query or _get_query_padrao()} (pág. {page})")
+    await navegar(url)
+    await asyncio.sleep(3)
+    try:
+        cur = await _run_in_thread(lambda: driver.current_url)
+        html = await _run_in_thread(lambda: driver.page_source)
+    except Exception:
+        cur, html = "", ""
+    if _pagina_bloqueada(cur, await get_title(), html):
+        await _aguardar_resolucao_manual(driver, "busca no Gupy")
+    # Scroll pra carregar mais cards (lazy-load).
+    def _scroll():
+        import time as _t
+        last = driver.execute_script("return document.body.scrollHeight")
+        for _ in range(4):
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            _t.sleep(1.2)
+            new = driver.execute_script("return document.body.scrollHeight")
+            if new == last:
+                break
+            last = new
+        driver.execute_script("window.scrollTo(0, 0);")
+    try:
+        await _run_in_thread(_scroll)
+    except Exception:
+        pass
+    # Instrumentação da PÁGINA DE BUSCA (a parte mais incerta: URL de busca + seletores
+    # de card). Sem isto, n_cards==0 retornaria "sem vagas" SEM diagnóstico do porquê.
+    try:
+        n = await _run_in_thread(lambda: len(_achar_cards(driver)))
+        cur2 = await _run_in_thread(lambda: driver.current_url)
+        print(f"[GUPY] busca pág.{page}: {n} card(s) | URL: {cur2}")
+    except Exception:
+        pass
+    await _dump_gupy_debug(driver, f"busca-pag{page}")
+
+
+async def extrair_vagas_da_busca(perfil: dict, max_vagas: int = 100, query: str = "") -> dict:
+    """Extrai (título, url) dos cards da busca — usado pelo dashboard pra listar vagas."""
+    set_platform("gupy")
+    if not await _garantir_login():
+        return {"sucesso": False, "vagas": [], "mensagem": "Não foi possível logar no Gupy."}
+    driver = await get_driver()
+    await _abrir_busca(driver, query)
+
+    def _coletar():
+        vagas = []
+        for el in _achar_cards(driver)[:max_vagas]:
+            try:
+                href = el.get_attribute("href") or ""
+                titulo = (el.text or "").strip().split("\n")[0]
+                vagas.append({"id": href, "titulo": titulo, "empresa": "",
+                              "url": href, "fonte": "Gupy"})
+            except Exception:
+                continue
+        return vagas
+
+    try:
+        vagas = await _run_in_thread(_coletar)
+    except Exception as e:
+        logger.warning("gupy extrair vagas erro: %s", e)
+        vagas = []
+    return {"sucesso": True, "vagas": vagas, "mensagem": f"{len(vagas)} vaga(s) no Gupy."}
+
+
+# ── Wizard de candidatura ─────────────────────────────────────────────────────
+
+def _tem_elemento(driver, css: str) -> bool:
+    try:
+        return any(e.is_displayed() for e in driver.find_elements(By.CSS_SELECTOR, css))
+    except Exception:
+        return False
+
+
+async def _extrair_descricao_detalhe(driver) -> str:
+    """Texto do detalhe da vaga (pro filtro modalidade/região). Igual GeekHunter: body."""
+    def _txt():
+        try:
+            return (driver.find_element(By.TAG_NAME, "body").text or "")[:3000]
+        except Exception:
+            return ""
+    try:
+        return await _run_in_thread(_txt)
+    except Exception:
+        return ""
+
+
+async def _marcar_indicado_nao(driver) -> None:
+    """Radio 'Alguém indicou você?' → marca 'Não' (radioGroupIsIndicatedNo). Já costuma
+    vir checked por padrão; garante mesmo assim. Radio nativo, clica o input."""
+    def _marca():
+        for sel in ("input[data-testid='radioGroupIsIndicatedNo']",
+                    "input[name='radioGroupIsIndicatedTitle'][value='no']"):
+            for el in driver.find_elements(By.CSS_SELECTOR, sel):
+                try:
+                    if not el.is_selected():
+                        driver.execute_script("arguments[0].click();", el)
+                    return True
+                except Exception:
+                    continue
+        return False
+    try:
+        if await _run_in_thread(_marca):
+            print("[GUPY] Indicação: marcado 'Não'")
+            await asyncio.sleep(0.4)
+    except Exception as e:
+        logger.warning("gupy _marcar_indicado_nao erro: %s", e)
+
+
+async def _preencher_how_did_you_hear(driver) -> None:
+    """Combobox 'Onde você encontrou essa vaga? (Opcional)'. Try-then-skip: abre, pega a
+    1ª opção do listbox; se não der, segue (é opcional, NUNCA bloqueia)."""
+    def _fill():
+        campos = driver.find_elements(By.CSS_SELECTOR,
+                                      "input[name='howDidYouHearAboutUs'], input[role='combobox']")
+        for inp in campos:
+            try:
+                if not inp.is_displayed() or (inp.get_attribute("value") or "").strip():
+                    continue
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", inp)
+                inp.click()
+                import time as _t
+                _t.sleep(0.8)
+                # Opções do listbox (react-aria/MUI).
+                for osel in ("li[role='option']", "[role='option']"):
+                    opts = [o for o in driver.find_elements(By.CSS_SELECTOR, osel) if o.is_displayed()]
+                    if opts:
+                        opts[0].click()
+                        return True
+                # Sem listbox: fecha e segue (campo é opcional).
+                inp.send_keys(Keys.ESCAPE)
+                return False
+            except Exception:
+                continue
+        return False
+    try:
+        if await _run_in_thread(_fill):
+            print("[GUPY] 'Onde encontrou a vaga' preenchido (1ª opção)")
+            await asyncio.sleep(0.4)
+    except Exception as e:
+        logger.warning("gupy _preencher_how_did_you_hear erro: %s", e)
+
+
+def _coletar_perguntas_gupy(driver) -> list:
+    """Perguntas do step de perguntas (MUI). Agrupa por <h3> (enunciado); as opções são
+    label.MuiFormControlLabel-root (checkbox/radio ocultos — clica o LABEL). Também pega
+    inputs/textarea de texto livre. Retorna [{pergunta, tipo, opcoes:[texto,...]}].
+
+    Varre h3 + labels + inputs em ORDEM DE DOCUMENTO (uma única query) e atribui cada
+    opção/campo ao h3 mais recente. Evita XPath posicional com current() (que é XSLT, não
+    existe no XPath 1.0 do browser e lançaria exceção)."""
+    perguntas = []
+    try:
+        els = driver.find_elements(
+            By.XPATH,
+            "//*[self::h3 or (self::label and contains(@class,'MuiFormControlLabel-root')) "
+            "or self::input or self::textarea]",
+        )
+    except Exception:
+        els = []
+
+    atual = None  # {pergunta, tipo, opcoes}
+
+    def _flush(q):
+        if q and (q["opcoes"] or q["tipo"] == "texto"):
+            perguntas.append(q)
+
+    for el in els:
+        try:
+            if not el.is_displayed():
+                continue
+            tag = (el.tag_name or "").lower()
+            if tag == "h3":
+                _flush(atual)
+                texto = (el.text or "").strip().lstrip("0123456789. ").rstrip(" *").strip()
+                atual = {"pergunta": texto, "tipo": None, "opcoes": []} if texto else None
+            elif atual is not None:
+                if tag == "label":
+                    t = (el.text or "").strip()
+                    if t:
+                        atual["tipo"] = "mui"
+                        if t not in atual["opcoes"]:
+                            atual["opcoes"].append(t)
+                elif tag in ("input", "textarea") and atual["tipo"] is None:
+                    tipo_input = (el.get_attribute("type") or "").lower()
+                    if tag == "textarea" or tipo_input in ("", "text"):
+                        if not (el.get_attribute("value") or "").strip():
+                            atual["tipo"] = "texto"
+        except Exception:
+            continue
+    _flush(atual)
+    return [q for q in perguntas if q["tipo"]]
+
+
+async def _responder_perguntas_gupy(driver, perfil: dict, resumo_curriculo: str,
+                                    idioma: str, vaga_titulo: str) -> list:
+    """Responde as perguntas do wizard (MUI + texto). Escolha via IA (mesmo mecanismo
+    SELECT: do resto do projeto). Clica o LABEL (o input MUI é oculto). Fail-open."""
+    feitas = []
+    try:
+        perguntas = await _run_in_thread(lambda: _coletar_perguntas_gupy(driver))
+    except Exception as e:
+        logger.warning("gupy _coletar_perguntas erro: %s", e)
+        return feitas
+
+    for q in perguntas:
+        label = q["pergunta"]
+        if q["tipo"] == "mui":
+            pergunta_fmt = "SELECT:" + label + ":" + ";".join(q["opcoes"][:15])
+            try:
+                escolha = responder_pergunta(pergunta_fmt, perfil, vaga_titulo=vaga_titulo,
+                                             vaga_empresa="", resumo_curriculo=resumo_curriculo,
+                                             idioma=idioma)
+            except Exception as e:
+                logger.warning("responder_pergunta (gupy mui) erro: %s", e)
+                escolha = ""
+            escolha = (escolha or "").strip()
+            alvo = next((o for o in q["opcoes"] if o.lower() == escolha.lower()), None) \
+                or next((o for o in q["opcoes"] if escolha and escolha.lower() in o.lower()), None) \
+                or q["opcoes"][0]
+
+            def _clicar_label(txt=alvo):
+                for lb in driver.find_elements(By.CSS_SELECTOR, "label.MuiFormControlLabel-root"):
+                    try:
+                        if lb.is_displayed() and (lb.text or "").strip() == txt:
+                            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", lb)
+                            lb.click()
+                            return True
+                    except Exception:
+                        continue
+                return False
+
+            clicado = False
+            for _tp in range(3):
+                try:
+                    clicado = await _run_in_thread(_clicar_label)
+                    if clicado:
+                        break
+                except StaleElementReferenceException:
+                    await asyncio.sleep(0.5)
+            if clicado:
+                print(f"[GUPY] Pergunta '{label[:35]}' = {alvo[:25]}")
+                feitas.append(label)
+        else:
+            try:
+                resp = responder_pergunta(label, perfil, vaga_titulo=vaga_titulo, vaga_empresa="",
+                                          resumo_curriculo=resumo_curriculo, idioma=idioma)
+            except Exception as e:
+                logger.warning("responder_pergunta (gupy texto) erro: %s", e)
+                from automation.form_filler import resposta_segura
+                resp = resposta_segura(label, idioma)
+
+            def _fill_texto(resp=resp):
+                els = driver.find_elements(By.CSS_SELECTOR, "input[type='text'], textarea")
+                for c in els:
+                    try:
+                        if c.is_displayed() and not (c.get_attribute("value") or "").strip():
+                            c.click(); c.clear(); c.send_keys(str(resp))
+                            return True
+                    except Exception:
+                        continue
+                return False
+            try:
+                await _run_in_thread(_fill_texto)
+                print(f"[GUPY] Pergunta texto '{label[:35]}' respondida")
+                feitas.append(label)
+            except Exception:
+                pass
+        await asyncio.sleep(random.uniform(0.5, 1.0))
+    return feitas
+
+
+async def _sucesso_gupy(driver) -> bool:
+    """Sinal FORTE de candidatura enviada (conservador — evita falso-sucesso): frase
+    específica de confirmação no page_source."""
+    def _check():
+        try:
+            html = (driver.page_source or "").lower()
+        except Exception:
+            return False
+        return any(f in html for f in _FRASES_SUCESSO_GUPY)
+    try:
+        return await _run_in_thread(_check)
+    except Exception:
+        return False
+
+
+# ── Instrumentação (debug do 1º run supervisionado) ───────────────────────────
+
+_GUPY_DEBUG = os.getenv("GUPY_DEBUG", "true").lower() == "true"
+_GUPY_DEBUG_PATH = os.path.join(os.path.dirname(__file__), "_gupy_form_debug.txt")
+
+
+async def _dump_gupy_debug(driver, tag: str = "") -> None:
+    """Grava URL + botões visíveis + campos + HTML (append) pra diagnosticar o wizard no
+    1º run. Gate por GUPY_DEBUG. Best-effort, nunca quebra o fluxo."""
+    if not _GUPY_DEBUG:
+        return
+
+    def _dump():
+        try:
+            url = driver.current_url
+            botoes = []
+            for b in driver.find_elements(By.CSS_SELECTOR, "button, a[data-testid], [role='button']"):
+                try:
+                    if b.is_displayed():
+                        t = (b.text or b.get_attribute("aria-label") or "").strip()
+                        if t:
+                            botoes.append(t[:50])
+                except Exception:
+                    continue
+            campos = []
+            for c in driver.find_elements(By.CSS_SELECTOR, "input, textarea, label.MuiFormControlLabel-root, h3"):
+                try:
+                    if c.is_displayed():
+                        desc = (c.get_attribute("name") or c.get_attribute("data-testid")
+                                or (c.text or "")[:40])
+                        campos.append(f"{c.tag_name}:{desc}"[:60])
+                except Exception:
+                    continue
+            html = driver.page_source[:20000]
+            with open(_GUPY_DEBUG_PATH, "a", encoding="utf-8") as f:
+                f.write(f"\n\n===== {tag} =====\nURL: {url}\n"
+                        f"BOTÕES: {botoes}\nCAMPOS: {campos}\n--- HTML(20k) ---\n{html}\n")
+        except Exception:
+            pass
+    try:
+        await _run_in_thread(_dump)
+    except Exception:
+        pass
+
+
+async def _preencher_e_enviar_formulario(driver, perfil: dict, resumo_curriculo: str,
+                                         idioma: str, vaga_titulo: str, vaga_url: str) -> dict:
+    """Roda o wizard de candidatura do Gupy no detalhe da vaga. Passos fixos; cada miss
+    degrada para manual. Sucesso só com sinal FORTE (Finalizar clicado / frase de
+    confirmação) — nunca marca enviado no escuro."""
+    # 1) Candidatar-se (abre o formulário de apply).
+    _, clicou = await _clicar_botao_smartapply(driver, _BTN_CANDIDATAR)
+    if not clicou:
+        # Talvez já esteja no form (ex.: aplicar() direto na URL de apply).
+        if not _tem_elemento(driver, "input, textarea, [role='radiogroup'], label.MuiFormControlLabel-root"):
+            await notify_browser_step("gupy_apply", "manual", "Não achei 'Candidatar-se' — controle manual")
+            if not await _aguardar_resolucao_manual(driver, "abrir candidatura Gupy"):
+                return {"sucesso": False, "motivo_falha": "sem_candidatar",
+                        "mensagem": f"Não abriu a candidatura. Candidate-se à mão: {vaga_url}"}
+    await asyncio.sleep(2.5)
+
+    await _dump_gupy_debug(driver, "apos-candidatar")
+
+    perguntas_feitas = []
+    max_steps = 10
+    nao_avancou = 0
+
+    for step in range(max_steps):
+        control = await get_intervention_state()
+        if control.get("current_action") == "parar":
+            return {"sucesso": False, "motivo_falha": "parado", "mensagem": "Interrompido pelo usuário."}
+
+        await asyncio.sleep(random.uniform(0.6, 1.2))
+        await notify_browser_step(f"gupy_step_{step}", "preenchendo", "Preenchendo candidatura Gupy")
+
+        # CAPTCHA/verificação → manual.
+        if await _smartapply_bloqueado(driver):
+            await notify_browser_step(f"gupy_step_{step}", "manual",
+                                      "🔒 Verificação — resolva no browser e clique 🔄 Retomar Auto")
+            if not await _aguardar_resolucao_manual(driver, f"verificação no Gupy step {step}"):
+                return {"sucesso": False, "motivo_falha": "captcha",
+                        "mensagem": f"Verificação não resolvida. Candidate-se à mão: {vaga_url}"}
+            continue
+
+        # Login pode surgir NO MEIO: ao clicar Candidatar-se a Gupy manda pro signin da
+        # empresa. Preenche pelo .env e re-tenta abrir a candidatura (o redirect pós-login
+        # costuma voltar pro detalhe da vaga, não pro form).
+        if await _tratar_login_gupy(driver):
+            await asyncio.sleep(1.5)
+            await _clicar_botao_smartapply(driver, _BTN_CANDIDATAR)
+            await asyncio.sleep(2)
+            continue
+
+        # Preenche o que estiver na tela (idempotente — só mexe no que existe/está vazio).
+        try:
+            await _marcar_indicado_nao(driver)
+            await _preencher_how_did_you_hear(driver)
+            novas = await _responder_perguntas_gupy(driver, perfil, resumo_curriculo, idioma, vaga_titulo)
+            for p in novas:
+                if p not in perguntas_feitas:
+                    perguntas_feitas.append(p)
+        except StaleElementReferenceException:
+            await asyncio.sleep(1.0)
+            continue
+
+        # Assinatura antes de clicar (detecta não-avanço).
+        try:
+            sig_antes = await _run_in_thread(
+                lambda: driver.current_url + "|" + str(len(driver.find_elements(By.CSS_SELECTOR, "input,textarea,button,label")))
+            )
+        except Exception:
+            sig_antes = ""
+
+        await _dump_gupy_debug(driver, f"step{step}-antes-clique")
+
+        # Avançar: Finalizar-FORTE (ENVIO, conta sucesso) > Salvar e continuar >
+        # Responder agora > Continuar > Finalizar-FRACO (só avança; sucesso só por frase).
+        btn_text, clicou = await _clicar_botao_smartapply(driver, _BTN_FINALIZAR)
+        is_finalizar = clicou
+        if not clicou:
+            btn_text, clicou = await _clicar_botao_smartapply(driver, _BTN_SALVAR_CONTINUAR)
+        if not clicou:
+            btn_text, clicou = await _clicar_botao_smartapply(driver, _BTN_RESPONDER_AGORA)
+        if not clicou:
+            btn_text, clicou = await _clicar_botao_smartapply(driver, _BTN_CONTINUAR)
+        if not clicou:
+            btn_text, clicou = await _clicar_botao_smartapply(driver, _BTN_FINALIZAR_FRACO)
+
+        if not clicou:
+            await notify_browser_step(f"gupy_step_{step}", "manual",
+                                      "Não achei botão de avançar/finalizar — controle manual")
+            if not await _aguardar_resolucao_manual(driver, f"formulário Gupy step {step}"):
+                return {"sucesso": False, "motivo_falha": "formulario_incompleto",
+                        "mensagem": f"Formulário não concluído. Candidate-se à mão: {vaga_url}"}
+            continue
+
+        print(f"[GUPY] Step {step}: clicou '{btn_text[:40]}'")
+        await asyncio.sleep(3 if is_finalizar else 2)
+        await _dump_gupy_debug(driver, f"step{step}-apos-{btn_text[:15]}")
+
+        # Clicar o #dialog-give-up-personalization-step É o envio final. Confirma com
+        # frase forte; mesmo sem a frase, esse botão é específico o bastante = enviado.
+        if is_finalizar:
+            await asyncio.sleep(1.5)
+            confirmado = await _sucesso_gupy(driver)
+            b64 = await screenshot_base64()
+            await notify_browser_step(f"gupy_step_{step}", "sucesso", "Candidatura enviada!")
+            return {"sucesso": True, "perguntas_respondidas": perguntas_feitas,
+                    "mensagem": "Candidatura enviada com sucesso no Gupy!"
+                               + ("" if confirmado else " (sem frase de confirmação explícita)"),
+                    "screenshot": b64[:100] if b64 else ""}
+
+        # Confirmação pode aparecer após um "Salvar e continuar" final (vaga sem modal).
+        if await _sucesso_gupy(driver):
+            b64 = await screenshot_base64()
+            await notify_browser_step(f"gupy_step_{step}", "sucesso", "Candidatura enviada!")
+            return {"sucesso": True, "perguntas_respondidas": perguntas_feitas,
+                    "mensagem": "Candidatura enviada com sucesso no Gupy!",
+                    "screenshot": b64[:100] if b64 else ""}
+
+        # Detecta avanço.
+        try:
+            sig_depois = await _run_in_thread(
+                lambda: driver.current_url + "|" + str(len(driver.find_elements(By.CSS_SELECTOR, "input,textarea,button,label")))
+            )
+        except Exception:
+            sig_depois = ""
+        if sig_antes and sig_antes != sig_depois:
+            nao_avancou = 0
+            continue
+        nao_avancou += 1
+        if nao_avancou >= 3:
+            await notify_browser_step(f"gupy_step_{step}", "manual", "Formulário travou — controle manual")
+            if not await _aguardar_resolucao_manual(driver, f"formulário travado Gupy step {step}"):
+                return {"sucesso": False, "motivo_falha": "formulario_travado",
+                        "mensagem": f"Formulário travou. Candidate-se à mão: {vaga_url}"}
+            nao_avancou = 0
+
+    return {"sucesso": False, "motivo_falha": "formulario_incompleto",
+            "mensagem": f"Não consegui concluir o formulário. Candidate-se à mão: {vaga_url}"}
+
+
+# ── Fechar aba e voltar pra busca ─────────────────────────────────────────────
+
+async def _fechar_aba_e_voltar(driver, aba_nova, janela_busca) -> None:
+    """Fecha a aba do detalhe e volta pra aba da busca."""
+    try:
+        if aba_nova:
+            try:
+                await _run_in_thread(lambda: driver.close())
+            except Exception:
+                pass
+        handles = await _run_in_thread(lambda: driver.window_handles)
+        alvo = janela_busca if janela_busca in handles else (handles[0] if handles else None)
+        if alvo:
+            await _run_in_thread(lambda: driver.switch_to.window(alvo))
+            await asyncio.sleep(1)
+    except Exception as e:
+        logger.warning("gupy _fechar_aba_e_voltar erro: %s", e)
+
+
+# ── Loop: aplicar card a card ─────────────────────────────────────────────────
+
+async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, user_id: str = "admin",
+                                           query: str = "") -> dict:
+    """Login → busca → para cada card: abre a vaga (nova aba OU mesma aba) → roda o
+    wizard → fecha/volta → próximo. `query` = palavra-chave do dashboard."""
+    set_platform("gupy")
+    try:
+        from graph.neo4j_client import get_neo4j
+        neo4j = get_neo4j()
+    except Exception:
+        neo4j = None
+
+    resumo_curriculo = perfil.get("resumo_curriculo", "") or await _get_resumo_curriculo(user_id)
+    if resumo_curriculo and not perfil.get("resumo_curriculo"):
+        perfil = {**perfil, "resumo_curriculo": resumo_curriculo}
+
+    if not await _garantir_login():
+        return {"sucesso": False, "aplicacoes": [], "mensagem": "Não foi possível logar no Gupy."}
+
+    driver = await get_driver()
+    resultados = {"sucesso": True, "aplicacoes": [], "falhas": 0}
+    aplicadas = 0
+    teto = _cont.get_teto()
+
+    # Loop de PÁGINAS: aplica em todos os cards da página; ao esgotar, vai pra page=2,
+    # page=3… até não haver mais vagas (n_cards==0) ou o usuário parar. Terminador REAL
+    # = acabarem os cards; GUPY_MAX_PAGINAS é só trava anti-loop.
+    MAX_PAGINAS = int(os.getenv("GUPY_MAX_PAGINAS", "1000"))
+    pagina = 1
+    parar = False
+    while pagina <= MAX_PAGINAS and not parar:
+        control = await get_intervention_state()
+        if control.get("current_action") == "parar":
+            resultados["mensagem"] = "Interrompido pelo usuário."
+            break
+        if teto > 0 and _cont.teto_atingido(user_id):
+            resultados["mensagem"] = f"Teto de candidaturas atingido ({teto})."
+            break
+
+        await _abrir_busca(driver, query, pagina)
+        try:
+            janela_busca = await _run_in_thread(lambda: driver.current_window_handle)
+        except Exception:
+            janela_busca = None
+        try:
+            n_cards = await _run_in_thread(lambda: len(_achar_cards(driver)))
+        except Exception:
+            n_cards = 0
+        if n_cards == 0:
+            print(f"[GUPY] Página {pagina} sem vagas — encerrando paginação")
+            break
+        print(f"[GUPY] Página {pagina}: {n_cards} vaga(s)")
+
+        for i in range(n_cards):
+            control = await get_intervention_state()
+            if control.get("current_action") == "parar":
+                resultados["mensagem"] = "Interrompido pelo usuário."
+                parar = True
+                break
+            if teto > 0 and _cont.teto_atingido(user_id):
+                resultados["mensagem"] = f"Teto de candidaturas atingido ({teto})."
+                parar = True
+                break
+
+            # Re-busca os cards a cada iteração (evita stale após fechar a aba).
+            def _clicar_card(idx=i):
+                cards = _achar_cards(driver)
+                if idx >= len(cards):
+                    return "", False, ""
+                c = cards[idx]
+                titulo = (c.text or "").strip().split("\n")[0]
+                href = c.get_attribute("href") or ""
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", c)
+                handles_antes = len(driver.window_handles)
+                c.click()
+                return titulo, handles_antes, href
+
+            try:
+                titulo, handles_antes, href = await _run_in_thread(_clicar_card)
+            except Exception as e:
+                logger.warning("gupy clicar card %d erro: %s", i, e)
+                continue
+            if handles_antes is False:
+                break  # acabaram os cards desta página → próxima página
+
+            await notify_browser_step("selenium_gupy", "abrindo", f"Abrindo: {titulo[:40]}")
+            await asyncio.sleep(2.5)
+
+            # Tolera nova aba OU mesma aba (subdomínio da empresa abre dos dois jeitos).
+            try:
+                handles = await _run_in_thread(lambda: driver.window_handles)
+            except Exception:
+                handles = []
+            aba_nova = None
+            if handles and isinstance(handles_antes, int) and len(handles) > handles_antes:
+                aba_nova = handles[-1]
+                await _run_in_thread(lambda h=aba_nova: driver.switch_to.window(h))
+                await asyncio.sleep(2)
+
+            # Abrir a vaga (subdomínio da empresa) pode exigir login → trata pelo .env
+            # ANTES de capturar a URL (senão o dedup guardaria a URL do signin).
+            if await _tratar_login_gupy(driver):
+                await asyncio.sleep(1.5)
+
+            vaga_url = ""
+            try:
+                vaga_url = await _run_in_thread(lambda: driver.current_url)
+            except Exception:
+                pass
+
+            async def _voltar_busca():
+                # Fecha a aba (se abriu) ou re-navega pra MESMA página (mesma aba).
+                if aba_nova:
+                    await _fechar_aba_e_voltar(driver, aba_nova, janela_busca)
+                else:
+                    await navegar(_build_search_url(query, pagina))
+                    await asyncio.sleep(2)
+
+            # Dedup por URL do detalhe.
+            if neo4j and vaga_url:
+                try:
+                    if neo4j.ja_se_candidatou(user_id, vaga_url):
+                        print(f"[GUPY] Já aplicada, pulando: {vaga_url}")
+                        await _voltar_busca()
+                        continue
+                except Exception:
+                    pass
+
+            # Filtro de MODALIDADE + REGIÃO (igual GeekHunter): presencial/híbrido só
+            # candidata se a cidade da vaga estiver numa região aceita; remoto passa
+            # livre. Fail-open: sem config/modalidade indefinida, candidata.
+            try:
+                from automation.localizacao import vaga_aceita
+                texto_vaga = f"{titulo} {await _extrair_descricao_detalhe(driver)}"
+                aceita, motivo = vaga_aceita(
+                    texto_vaga, perfil.get("modalidades_aceitas", []),
+                    perfil.get("regioes_relocacao", []),
+                )
+                if not aceita:
+                    print(f"[GUPY] Pulando por modalidade/região: {motivo} — {titulo[:40]}")
+                    await notify_browser_step("selenium_gupy", "pulada", f"Fora do filtro: {motivo[:50]}")
+                    await _voltar_busca()
+                    continue
+            except Exception as e:
+                logger.warning("gupy filtro modalidade/região erro: %s", e)
+
+            await notify_browser_step("selenium_gupy", "aplicando", f"Candidatando: {titulo[:40]}")
+            try:
+                res = await _preencher_e_enviar_formulario(
+                    driver, perfil, resumo_curriculo, "pt", titulo, vaga_url,
+                )
+            except Exception as e:
+                logger.error("gupy aplicar erro: %s", e)
+                res = {"sucesso": False, "mensagem": str(e)}
+
+            status = "candidatado" if res.get("sucesso") else "tentativa_falhou"
+            if res.get("sucesso"):
+                aplicadas += 1
+                _cont.incr_count(user_id)
+            else:
+                resultados["falhas"] += 1
+            resultados["aplicacoes"].append({"vaga": titulo, "status": status})
+
+            if neo4j:
+                try:
+                    neo4j.registrar_candidatura(user_id=user_id, vaga_id=vaga_url or f"gupy-p{pagina}-{i}",
+                                                plataforma="gupy", status=status)
+                except Exception:
+                    pass
+
+            await _voltar_busca()
+            await asyncio.sleep(random.uniform(1.5, 3.0))
+
+        pagina += 1  # esgotou a página atual → subsequente
+
+    resultados.setdefault("mensagem", f"{aplicadas} candidatura(s) enviada(s) no Gupy.")
+    return resultados
+
+
+# ── Aplicação em uma vaga única (por URL) — paridade com Indeed/GeekHunter ─────
+
+async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "", user_id: str = "admin") -> dict:
+    """Aplica numa vaga específica do Gupy pela URL do detalhe."""
+    set_platform("gupy")
+    resumo_curriculo = perfil.get("resumo_curriculo", "") or await _get_resumo_curriculo(user_id)
+    if resumo_curriculo and not perfil.get("resumo_curriculo"):
+        perfil = {**perfil, "resumo_curriculo": resumo_curriculo}
+
+    if not await _garantir_login():
+        return {"sucesso": False, "motivo_falha": "login_falhou",
+                "mensagem": "Não foi possível logar no Gupy."}
+    driver = await get_driver()
+    await navegar(vaga_url)
+    await asyncio.sleep(3)
+    return await _preencher_e_enviar_formulario(driver, perfil, resumo_curriculo, "pt", "", vaga_url)

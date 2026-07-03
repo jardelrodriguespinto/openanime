@@ -142,3 +142,6 @@ INDEED = PlatformCounter("indeed", "INDEED_TETO_APLICACOES")
 
 # Contador dedicado do GeekHunter — chave 'geekhunter:aplicacoes:*' e env GEEK_HUNTER_TETO_APLICACOES.
 GEEK_HUNTER = PlatformCounter("geekhunter", "GEEK_HUNTER_TETO_APLICACOES")
+
+# Contador dedicado do Gupy — chave 'gupy:aplicacoes:*' e env GUPY_TETO_APLICACOES.
+GUPY = PlatformCounter("gupy", "GUPY_TETO_APLICACOES")
