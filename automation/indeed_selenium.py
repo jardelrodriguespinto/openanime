@@ -1245,6 +1245,24 @@ async def _clicar_botao_smartapply(driver, seletores: list) -> tuple:
     """Clica no primeiro botão visível dentre os seletores (suporta :has-text).
     Retorna (texto_do_botao, clicou)."""
     def _clicar():
+        # Clique robusto: nativo e, se falhar (interceptado/stale em SPA React/styled-
+        # components — causa do "às vezes não clica em Continuar" no Gupy), cai no JS
+        # click, que ignora sobreposição. Retorna True se algum dos dois pegou.
+        def _do_click(el):
+            try:
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+            except Exception:
+                pass
+            try:
+                el.click()
+                return True
+            except Exception:
+                try:
+                    driver.execute_script("arguments[0].click();", el)
+                    return True
+                except Exception:
+                    return False
+
         # Busca genérica por botões visíveis e casa por texto/atributo.
         alvos_texto = []
         for s in seletores:
@@ -1260,9 +1278,8 @@ async def _clicar_botao_smartapply(driver, seletores: list) -> tuple:
                 for el in driver.find_elements(By.CSS_SELECTOR, s):
                     if el.is_displayed() and el.is_enabled():
                         txt = (el.text or el.get_attribute("aria-label") or "").strip()
-                        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
-                        el.click()
-                        return (txt or s, True)
+                        if _do_click(el):
+                            return (txt or s, True)
             except Exception:
                 continue
 
@@ -1274,9 +1291,8 @@ async def _clicar_botao_smartapply(driver, seletores: list) -> tuple:
                         continue
                     txt = (el.text or el.get_attribute("aria-label") or "").strip().lower()
                     if any(a in txt for a in alvos_texto):
-                        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
-                        el.click()
-                        return (txt, True)
+                        if _do_click(el):
+                            return (txt, True)
                 except Exception:
                     continue
         return ("", False)

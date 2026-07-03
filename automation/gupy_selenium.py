@@ -653,28 +653,67 @@ async def _preencher_how_did_you_hear(driver) -> None:
         logger.warning("gupy _preencher_how_did_you_hear erro: %s", e)
 
 
-def _coletar_perguntas_gupy(driver) -> list:
-    """Perguntas do step de perguntas (MUI). Agrupa por <h3> (enunciado); as opções são
-    label.MuiFormControlLabel-root (checkbox/radio ocultos — clica o LABEL). Também pega
-    inputs/textarea de texto livre. Retorna [{pergunta, tipo, opcoes:[texto,...]}].
+def _fill_react(driver, el, valor: str) -> None:
+    """Preenche um input/textarea React-safe: send_keys e, se não assentar (React
+    controlado ignora), força pelo setter NATIVO + dispatch input/change/blur."""
+    import time as _t
+    try:
+        el.click()
+    except Exception:
+        pass
+    try:
+        el.clear()
+    except Exception:
+        pass
+    try:
+        el.send_keys(valor)
+    except Exception:
+        pass
+    try:
+        atual = (el.get_attribute("value") or "").strip()
+        if not atual and str(valor).strip():
+            driver.execute_script(
+                "const el=arguments[0],val=arguments[1];"
+                "const p=el.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;"
+                "const s=Object.getOwnPropertyDescriptor(p,'value').set;s.call(el,val);"
+                "el.dispatchEvent(new Event('input',{bubbles:true}));"
+                "el.dispatchEvent(new Event('change',{bubbles:true}));",
+                el, str(valor),
+            )
+    except Exception:
+        pass
+    try:
+        driver.execute_script("arguments[0].dispatchEvent(new Event('blur',{bubbles:true}));", el)
+    except Exception:
+        pass
+    _t.sleep(0.4)
 
-    Varre h3 + labels + inputs em ORDEM DE DOCUMENTO (uma única query) e atribui cada
-    opção/campo ao h3 mais recente. Evita XPath posicional com current() (que é XSLT, não
-    existe no XPath 1.0 do browser e lançaria exceção)."""
+
+def _coletar_perguntas_gupy(driver) -> list:
+    """Perguntas do step de perguntas (MUI). Agrupa por <h3> (enunciado). Varre h3 +
+    labels(MUI) + campos de texto em ORDEM DE DOCUMENTO (uma query) e atribui ao h3 mais
+    recente. Evita XPath com current() (XSLT, não existe no XPath 1.0 → lançava exceção).
+
+    CRÍTICO: as opções são CHECKBOX MUI e há textos repetidos entre perguntas (vários
+    'Sim'/'Não') → captura o `name` ÚNICO do input de cada opção (ex.: checkbox-<idQ>-<i>)
+    pra clicar ESCOPADO, e PULA perguntas já respondidas (opção marcada / texto preenchido)
+    — senão re-clicar alterna (toggle) o checkbox e trava o 'Salvar e continuar'."""
     perguntas = []
     try:
         els = driver.find_elements(
             By.XPATH,
             "//*[self::h3 or (self::label and contains(@class,'MuiFormControlLabel-root')) "
-            "or self::input or self::textarea]",
+            "or self::textarea or (self::input and (@type='text' or not(@type)))]",
         )
     except Exception:
         els = []
 
-    atual = None  # {pergunta, tipo, opcoes}
+    atual = None  # {pergunta, tipo, opcoes:[{texto,name}], campo:{name,id}, respondida}
 
     def _flush(q):
-        if q and (q["opcoes"] or q["tipo"] == "texto"):
+        if not q or q.get("respondida"):
+            return
+        if q["opcoes"] or q.get("campo"):
             perguntas.append(q)
 
     for el in els:
@@ -685,19 +724,32 @@ def _coletar_perguntas_gupy(driver) -> list:
             if tag == "h3":
                 _flush(atual)
                 texto = (el.text or "").strip().lstrip("0123456789. ").rstrip(" *").strip()
-                atual = {"pergunta": texto, "tipo": None, "opcoes": []} if texto else None
+                atual = ({"pergunta": texto, "tipo": None, "opcoes": [], "campo": None,
+                          "respondida": False} if texto else None)
             elif atual is not None:
                 if tag == "label":
                     t = (el.text or "").strip()
-                    if t:
-                        atual["tipo"] = "mui"
-                        if t not in atual["opcoes"]:
-                            atual["opcoes"].append(t)
-                elif tag in ("input", "textarea") and atual["tipo"] is None:
-                    tipo_input = (el.get_attribute("type") or "").lower()
-                    if tag == "textarea" or tipo_input in ("", "text"):
-                        if not (el.get_attribute("value") or "").strip():
-                            atual["tipo"] = "texto"
+                    if not t:
+                        continue
+                    atual["tipo"] = "mui"
+                    nome, checked = "", False
+                    try:
+                        inp = el.find_element(By.CSS_SELECTOR, "input")
+                        nome = inp.get_attribute("name") or ""
+                        checked = inp.is_selected()
+                    except Exception:
+                        pass
+                    if checked:
+                        atual["respondida"] = True
+                    if not any(o["texto"] == t for o in atual["opcoes"]):
+                        atual["opcoes"].append({"texto": t, "name": nome})
+                elif atual["tipo"] is None:  # textarea / input de texto livre
+                    if (el.get_attribute("value") or "").strip():
+                        atual["respondida"] = True
+                    else:
+                        atual["tipo"] = "texto"
+                        atual["campo"] = {"name": el.get_attribute("name") or "",
+                                          "id": el.get_attribute("id") or ""}
         except Exception:
             continue
     _flush(atual)
@@ -706,8 +758,9 @@ def _coletar_perguntas_gupy(driver) -> list:
 
 async def _responder_perguntas_gupy(driver, perfil: dict, resumo_curriculo: str,
                                     idioma: str, vaga_titulo: str) -> list:
-    """Responde as perguntas do wizard (MUI + texto). Escolha via IA (mesmo mecanismo
-    SELECT: do resto do projeto). Clica o LABEL (o input MUI é oculto). Fail-open."""
+    """Responde as perguntas AINDA não respondidas (MUI + texto). MUI: clica a opção
+    ESCOPADA pelo `name` do input (o input é oculto → clica o label ancestral, com
+    fallback JS). Texto: fill React-safe no campo certo (por name/id). IA via SELECT:."""
     feitas = []
     try:
         perguntas = await _run_in_thread(lambda: _coletar_perguntas_gupy(driver))
@@ -718,7 +771,8 @@ async def _responder_perguntas_gupy(driver, perfil: dict, resumo_curriculo: str,
     for q in perguntas:
         label = q["pergunta"]
         if q["tipo"] == "mui":
-            pergunta_fmt = "SELECT:" + label + ":" + ";".join(q["opcoes"][:15])
+            opcoes_txt = [o["texto"] for o in q["opcoes"]]
+            pergunta_fmt = "SELECT:" + label + ":" + ";".join(opcoes_txt[:15])
             try:
                 escolha = responder_pergunta(pergunta_fmt, perfil, vaga_titulo=vaga_titulo,
                                              vaga_empresa="", resumo_curriculo=resumo_curriculo,
@@ -727,17 +781,30 @@ async def _responder_perguntas_gupy(driver, perfil: dict, resumo_curriculo: str,
                 logger.warning("responder_pergunta (gupy mui) erro: %s", e)
                 escolha = ""
             escolha = (escolha or "").strip()
-            alvo = next((o for o in q["opcoes"] if o.lower() == escolha.lower()), None) \
-                or next((o for o in q["opcoes"] if escolha and escolha.lower() in o.lower()), None) \
+            alvo = next((o for o in q["opcoes"] if o["texto"].lower() == escolha.lower()), None) \
+                or next((o for o in q["opcoes"] if escolha and escolha.lower() in o["texto"].lower()), None) \
                 or q["opcoes"][0]
 
-            def _clicar_label(txt=alvo):
-                for lb in driver.find_elements(By.CSS_SELECTOR, "label.MuiFormControlLabel-root"):
+            # Clica ESCOPADO pelo name do input (único por pergunta+opção). Se já marcado,
+            # no-op. Input MUI é oculto → clica o <label> ancestral (fallback: JS no input).
+            def _clicar_opcao(nome=alvo["name"], txt=alvo["texto"]):
+                inputs = []
+                if nome:
+                    inputs = driver.find_elements(By.CSS_SELECTOR, f"input[name='{nome}']")
+                for inp in inputs:
                     try:
-                        if lb.is_displayed() and (lb.text or "").strip() == txt:
-                            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", lb)
-                            lb.click()
+                        if inp.is_selected():
                             return True
+                        try:
+                            lbl = inp.find_element(By.XPATH, "./ancestor::label[1]")
+                            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", lbl)
+                            try:
+                                lbl.click()
+                            except Exception:
+                                driver.execute_script("arguments[0].click();", lbl)
+                        except Exception:
+                            driver.execute_script("arguments[0].click();", inp)
+                        return True
                     except Exception:
                         continue
                 return False
@@ -745,13 +812,13 @@ async def _responder_perguntas_gupy(driver, perfil: dict, resumo_curriculo: str,
             clicado = False
             for _tp in range(3):
                 try:
-                    clicado = await _run_in_thread(_clicar_label)
+                    clicado = await _run_in_thread(_clicar_opcao)
                     if clicado:
                         break
                 except StaleElementReferenceException:
                     await asyncio.sleep(0.5)
             if clicado:
-                print(f"[GUPY] Pergunta '{label[:35]}' = {alvo[:25]}")
+                print(f"[GUPY] Pergunta '{label[:35]}' = {alvo['texto'][:25]}")
                 feitas.append(label)
         else:
             try:
@@ -762,20 +829,28 @@ async def _responder_perguntas_gupy(driver, perfil: dict, resumo_curriculo: str,
                 from automation.form_filler import resposta_segura
                 resp = resposta_segura(label, idioma)
 
-            def _fill_texto(resp=resp):
-                els = driver.find_elements(By.CSS_SELECTOR, "input[type='text'], textarea")
-                for c in els:
+            campo = q.get("campo") or {}
+
+            def _fill_texto(campo=campo, resp=resp):
+                el = None
+                if campo.get("id"):
                     try:
-                        if c.is_displayed() and not (c.get_attribute("value") or "").strip():
-                            c.click(); c.clear(); c.send_keys(str(resp))
-                            return True
+                        el = driver.find_element(By.ID, campo["id"])
                     except Exception:
-                        continue
-                return False
+                        el = None
+                if el is None and campo.get("name"):
+                    try:
+                        el = driver.find_element(By.CSS_SELECTOR, f"[name='{campo['name']}']")
+                    except Exception:
+                        el = None
+                if el is None:
+                    return False
+                _fill_react(driver, el, str(resp))
+                return True
             try:
-                await _run_in_thread(_fill_texto)
-                print(f"[GUPY] Pergunta texto '{label[:35]}' respondida")
-                feitas.append(label)
+                if await _run_in_thread(_fill_texto):
+                    print(f"[GUPY] Pergunta texto '{label[:35]}' respondida")
+                    feitas.append(label)
             except Exception:
                 pass
         await asyncio.sleep(random.uniform(0.5, 1.0))
@@ -861,7 +936,9 @@ async def _preencher_e_enviar_formulario(driver, perfil: dict, resumo_curriculo:
     await _dump_gupy_debug(driver, "apos-candidatar")
 
     perguntas_feitas = []
-    max_steps = 10
+    # Formulários do Gupy podem ter VÁRIAS páginas de perguntas (cada "Salvar e continuar"
+    # abre outra) + login no meio consome steps → margem folgada.
+    max_steps = 20
     nao_avancou = 0
 
     for step in range(max_steps):
@@ -926,6 +1003,9 @@ async def _preencher_e_enviar_formulario(driver, perfil: dict, resumo_curriculo:
             btn_text, clicou = await _clicar_botao_smartapply(driver, _BTN_FINALIZAR_FRACO)
 
         if not clicou:
+            # Sem botão de avançar → intervenção manual (paridade com LinkedIn/Indeed/
+            # GeekHunter: degrada pra manual, NUNCA falha/silencia). Com o fill de perguntas
+            # corrigido, esse caminho quase nunca é atingido.
             await notify_browser_step(f"gupy_step_{step}", "manual",
                                       "Não achei botão de avançar/finalizar — controle manual")
             if not await _aguardar_resolucao_manual(driver, f"formulário Gupy step {step}"):
@@ -969,14 +1049,18 @@ async def _preencher_e_enviar_formulario(driver, perfil: dict, resumo_curriculo:
             continue
         nao_avancou += 1
         if nao_avancou >= 3:
-            await notify_browser_step(f"gupy_step_{step}", "manual", "Formulário travou — controle manual")
-            if not await _aguardar_resolucao_manual(driver, f"formulário travado Gupy step {step}"):
-                return {"sucesso": False, "motivo_falha": "formulario_travado",
-                        "mensagem": f"Formulário travou. Candidate-se à mão: {vaga_url}"}
-            nao_avancou = 0
+            # Não avançou após 3 tentativas (provável campo obrigatório que não consegui
+            # preencher) → PULA a vaga em vez de parar o lote (pedido do usuário: continuar).
+            await notify_browser_step(f"gupy_step_{step}", "pulando",
+                                      "Formulário não avançou — pulando a vaga")
+            b64 = await screenshot_base64()
+            print(f"[GUPY] Vaga pulada (form não avançou 3x): {vaga_url}")
+            return {"sucesso": False, "motivo_falha": "formulario_travado",
+                    "mensagem": f"Formulário não avançou — pulei a vaga: {vaga_url}",
+                    "screenshot": b64[:100] if b64 else ""}
 
     return {"sucesso": False, "motivo_falha": "formulario_incompleto",
-            "mensagem": f"Não consegui concluir o formulário. Candidate-se à mão: {vaga_url}"}
+            "mensagem": f"Não consegui concluir o formulário — pulei a vaga: {vaga_url}"}
 
 
 # ── Fechar aba e voltar pra busca ─────────────────────────────────────────────
