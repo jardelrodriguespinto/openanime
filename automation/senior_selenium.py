@@ -120,6 +120,11 @@ _BTN_AVANCAR = [
     'button:has-text("Continuar")',
     'button:has-text("Próximo")',
     'button:has-text("Próxima")',
+    'button:has-text("Concluir")',
+    # Modal pós-preenchimento "salvar seus dados p/ candidaturas futuras" (aria-label
+    # "Salvar meus dados", texto "Salvar seus dados") — o usuário quer SALVAR os dados.
+    'button:has-text("Salvar seus dados")',
+    'button:has-text("Salvar meus dados")',
     'button:has-text("Enviar")',
     'button:has-text("Finalizar")',
 ]
@@ -128,6 +133,21 @@ _BTN_AVANCAR = [
 _BTN_ACOMPANHAR = [
     'button:has-text("Acompanhar candidatura")',
     'button:has-text("Acompanhar")',
+]
+# X que FECHA o drawer da candidatura no final ("Sair da Candidatura") — a candidatura
+# roda num painel lateral; fechar o X volta pra lista de vagas. Só tem ÍCONE (sem texto),
+# então casa por CLASSE e por aria-label.
+_BTN_FECHAR_DRAWER = [
+    "button.drawer-close-button",
+    "button[aria-label*='Sair da Candidatura']",
+    "button[aria-label*='Sair da candidatura']",
+    'button:has-text("Sair da Candidatura")',
+]
+# Modal pós-apply INTERMITENTE "Busque por mais oportunidades..." → botão "Entendi"
+# (`button.btn-default.withoutBackground`, aria-label "Entendi...fechar"). Só fecha.
+_BTN_ENTENDI = [
+    "button[aria-label^='Entendi']",
+    'button:has-text("Entendi")',
 ]
 
 # Frases que SÓ existem APÓS o envio (conservador — nada genérico nem "acompanhar",
@@ -216,6 +236,56 @@ def _tem_campo(driver, css: str) -> bool:
         return False
 
 
+async def _submeter_login_senior(driver) -> bool:
+    """Clica o botão de SUBMIT do login (o DOM real: `button.btn-default`, aria-label
+    'Entrar ... entrar na sua conta'). CRÍTICO: é DIFERENTE do 'Entrar' de NAVEGAÇÃO
+    (`login-btn`, aria-label '... fazer login') e do 'Candidatar-se'
+    (`apply-to-candidature-button`). Casar 'Entrar' genérico clicava o nav (1º no DOM),
+    que só reabre o login → login nunca acontecia e a automação parava no manual. Aqui
+    pontuamos: aria-label 'entrar na sua conta' > btn-default com texto 'Entrar' >
+    genérico, e EXCLUÍMOS login-btn/apply."""
+    def _click():
+        cands = []
+        for el in driver.find_elements(By.CSS_SELECTOR, "button, [role='button']"):
+            try:
+                if not (el.is_displayed() and el.is_enabled()):
+                    continue
+                cls = el.get_attribute("class") or ""
+                if "login-btn" in cls or "apply-to-candidature" in cls:
+                    continue  # nav 'Entrar' (fazer login) / 'Candidatar-se'
+                aria = (el.get_attribute("aria-label") or "").lower()
+                txt = (el.text or "").strip().lower()
+                score = 0
+                if "entrar na sua conta" in aria:
+                    score = 4
+                elif "btn-default" in cls and (txt == "entrar" or "entrar" in aria):
+                    score = 3
+                elif el.get_attribute("type") == "submit":
+                    score = 2
+                elif txt in ("entrar", "acessar", "login"):
+                    score = 1
+                if score:
+                    cands.append((score, el))
+            except Exception:
+                continue
+        cands.sort(key=lambda x: x[0], reverse=True)
+        for _, el in cands:
+            try:
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+                try:
+                    el.click()
+                except Exception:
+                    driver.execute_script("arguments[0].click();", el)
+                return True
+            except Exception:
+                continue
+        return False
+    try:
+        return await _run_in_thread(_click)
+    except Exception:
+        return False
+
+
 async def _tratar_login_senior(driver) -> bool:
     """Se a tela ATUAL é de login, preenche e-mail+senha do .env e submete. Trata tanto
     o formato de 1 tela (e-mail+senha juntos) quanto o de 2 telas (e-mail → Avançar →
@@ -246,10 +316,11 @@ async def _tratar_login_senior(driver) -> bool:
     preencheu_email = await digitar_robusto(_SEL_EMAIL, email)
 
     # 2) Senha. Se o campo de senha ainda não está na tela (login em 2 etapas), avança.
+    # NÃO usar 'Entrar' aqui (casaria o nav/submit prematuramente) — só avançar de etapa.
     if not await _run_in_thread(lambda: _tem_campo(driver, _SEL_SENHA)):
         await _clicar_botao_smartapply(driver, [
             'button:has-text("Avançar")', 'button:has-text("Continuar")',
-            'button:has-text("Próximo")', 'button:has-text("Entrar")',
+            'button:has-text("Próximo")',
         ])
         await asyncio.sleep(2)
     preencheu_senha = await digitar_robusto(_SEL_SENHA, senha)
@@ -260,25 +331,35 @@ async def _tratar_login_senior(driver) -> bool:
         return True
 
     await asyncio.sleep(0.6)
-    # 3) Submeter: RETURN na senha (mais confiável) e, se seguir na tela, botão "Entrar".
+    # 3) Submeter: clica o botão de login ESPECÍFICO (btn-default 'entrar na sua conta'),
+    # NÃO o nav 'Entrar' (login-btn). Fallback: RETURN na senha (forms Angular reativos
+    # nem sempre submetem no Enter → por isso o clique vem primeiro).
     def _enter():
         try:
-            el = driver.find_element(By.CSS_SELECTOR, _SEL_SENHA)
-            el.send_keys(Keys.RETURN)
+            driver.find_element(By.CSS_SELECTOR, _SEL_SENHA).send_keys(Keys.RETURN)
             return True
         except Exception:
             return False
-    try:
-        await _run_in_thread(_enter)
-    except Exception:
-        pass
-    await asyncio.sleep(2)
+
+    clicou = await _submeter_login_senior(driver)
+    if clicou:
+        print("[SENIOR] Submit de login clicado (btn-default)")
+    else:
+        try:
+            await _run_in_thread(_enter)
+        except Exception:
+            pass
+    await asyncio.sleep(3.5)
+    # Ainda no login? tenta o método que faltou.
     if await _pagina_de_login_senior(driver):
-        await _clicar_botao_smartapply(driver, [
-            'button:has-text("Entrar")', 'button:has-text("Acessar")',
-            'button:has-text("Login")', 'button[type="submit"]',
-        ])
-    await asyncio.sleep(4)
+        if clicou:
+            try:
+                await _run_in_thread(_enter)
+            except Exception:
+                pass
+        else:
+            await _submeter_login_senior(driver)
+        await asyncio.sleep(3.5)
 
     # Verificação/CAPTCHA ou ainda no login → manual.
     try:
@@ -396,6 +477,10 @@ async def _abrir_busca(driver, query: str = "") -> None:
         await _tratar_login_senior(driver)
         await navegar(url)
         await asyncio.sleep(2.5)
+    # Modal pós-apply "Busque por mais oportunidades..." pode estar por cima da lista ao
+    # voltar → fecha no "Entendi" (com retry) pra não bloquear o clique no próximo card
+    # NEM a abertura do form da próxima candidatura (causa raiz do 'ficou travada').
+    await _dismiss_overlays(driver)
     # Scroll pra carregar mais cards (lazy-load).
     def _scroll():
         import time as _t
@@ -512,6 +597,30 @@ async def _extrair_codigo_vaga(driver) -> str:
 
 # ── Widgets Angular Material ───────────────────────────────────────────────────
 
+# Rótulos de DADOS PESSOAIS / DOCUMENTOS / ENDEREÇO que a IA NÃO pode inventar (CEP,
+# endereço, filiação = nome dos pais, RG/CTPS/título eleitoral, estado civil, sexo/gênero,
+# raça, deficiência…). Esses campos vêm do PERFIL salvo na plataforma (o candidato
+# preenche UMA vez no portal e a Senior reusa) — chutar aqui = submissão com dado ERRADO.
+# Regra: nunca preencher/adivinhar estes; se ficarem obrigatórios e vazios, a vaga é
+# pulada com aviso pra completar o perfil.
+_NAO_INVENTAR = (
+    "cep", "logradouro", "endereço", "endereco", "bairro", "número", "numero",
+    "complemento", "cidade", "estado", "país", "pais", " uf", "naturalidade",
+    "nacionalidade", "filiação", "filiacao", "nome do pai", "nome da mãe", "nome da mae",
+    "carteira", "identidade", "órgão emissor", "orgao emissor", "ctps", "pis", "pasep",
+    "título", "titulo", "eleitor", "zona", "seção", "secao", "reservista",
+    "serviço militar", "servico militar", "estado civil", "sexo", "gênero", "genero",
+    "raça", "raca", " cor", "etnia", "deficiência", "deficiencia", "data de nascimento",
+    "nascimento", "naturalidade", "telefone", "celular", "e-mail", "email", "cpf",
+)
+
+
+def _eh_dado_sensivel(label: str) -> bool:
+    """True se o rótulo é dado pessoal/documento/endereço que NÃO se pode inventar."""
+    low = " " + (label or "").lower() + " "
+    return any(k in low for k in _NAO_INVENTAR)
+
+
 async def _responder_mat_selects_senior(driver, perfil: dict, resumo_curriculo: str,
                                          idioma: str, vaga_titulo: str) -> None:
     """Preenche os `mat-select` ainda vazios (ex.: 'Como você encontrou a vaga?').
@@ -561,6 +670,13 @@ async def _responder_mat_selects_senior(driver, perfil: dict, resumo_curriculo: 
             label, _ = await _run_in_thread(_label)
         except Exception:
             label = ""
+
+        # NUNCA adivinhar dado sensível (Estado Civil / Sexo / País / Estado / …): o
+        # fallback de "1ª opção" chutaria estado civil/gênero errado. Deixa em branco →
+        # o form não avança → a vaga é pulada (o candidato preenche isso no perfil).
+        if _eh_dado_sensivel(label):
+            print(f"[SENIOR] mat-select sensível '{label[:30]}' — não adivinho (perfil)")
+            continue
 
         # Abre o overlay e lê as opções (no body, não dentro do select).
         def _abrir(i=idx):
@@ -645,6 +761,139 @@ async def _responder_mat_selects_senior(driver, perfil: dict, resumo_curriculo: 
                 await asyncio.sleep(0.4)
         except Exception:
             pass
+
+
+async def _responder_radios_senior(driver, perfil: dict, resumo_curriculo: str,
+                                   idioma: str, vaga_titulo: str) -> list:
+    """Responde os `mat-radio-group` AINDA sem seleção (perguntas de triagem, ex.:
+    'Você possui curso superior... na área de TI? (requisito)').
+
+    DOM real da Senior: a PERGUNTA é o `aria-label` do `<mat-radio-group>` (ou o
+    `.portal-title-small` anterior). O texto visível de cada opção fica num
+    `.information .title` SEPARADO do `<label>` (o `.mat-radio-label-content` é VAZIO!),
+    e o input real é `input.mat-radio-input` (com `id`/`value` GUID). IA escolhe (SELECT:)
+    pela pergunta — resposta honesta, baseada no currículo (igual Gupy). Clica o `<label>`
+    da opção (fallback JS no input). NÃO mexe em grupo já respondido."""
+    feitas = []
+
+    def _coletar():
+        grupos = []
+        for grp in driver.find_elements(By.CSS_SELECTOR, "mat-radio-group"):
+            try:
+                if not grp.is_displayed():
+                    continue
+                inputs = grp.find_elements(By.CSS_SELECTOR,
+                                           "input.mat-radio-input, input[type='radio']")
+                if any((i.is_selected() for i in inputs)):
+                    continue  # já respondido → não sobrescreve
+                pergunta = (grp.get_attribute("aria-label") or "").strip()
+                if not pergunta:
+                    try:
+                        t = grp.find_element(
+                            By.XPATH, "./preceding::*[contains(@class,'portal-title-small')][1]")
+                        pergunta = (t.text or "").strip()
+                    except Exception:
+                        pass
+                opts = []
+                for inp in inputs:
+                    try:
+                        iid = inp.get_attribute("id") or ""
+                        if not iid or any(o["id"] == iid for o in opts):
+                            continue
+                        # Texto: .information .title do .item-container ancestral; senão o
+                        # texto da opção parseado do aria-label do input.
+                        txt = ""
+                        try:
+                            item = inp.find_element(
+                                By.XPATH, "./ancestor::*[contains(@class,'item-container')][1]")
+                            infos = item.find_elements(By.CSS_SELECTOR, ".information .title, .title")
+                            if infos:
+                                txt = (infos[0].text or "").strip()
+                        except Exception:
+                            pass
+                        if not txt:
+                            al = inp.get_attribute("aria-label") or ""
+                            # "Não selecionado, <texto>,  . Botão de opção..." → pega o meio.
+                            al = re.sub(r"^\s*(n[ãa]o\s+)?selecionado\s*,\s*", "", al, flags=re.I)
+                            txt = re.split(r",\s*\.|\.\s*bot[ãa]o", al, flags=re.I)[0].strip(" ,")
+                        if txt:
+                            opts.append({"texto": txt, "id": iid,
+                                         "value": inp.get_attribute("value") or ""})
+                    except Exception:
+                        continue
+                if pergunta and opts:
+                    grupos.append({"pergunta": pergunta, "opts": opts})
+            except Exception:
+                continue
+        return grupos
+
+    try:
+        grupos = await _run_in_thread(_coletar)
+    except Exception as e:
+        logger.warning("senior _coletar_radios erro: %s", e)
+        return feitas
+
+    for g in grupos:
+        pergunta, opts = g["pergunta"], g["opts"]
+        # NUNCA adivinhar dado sensível via radio (Sexo/Raça/Estado civil/Deficiência…) —
+        # o fallback de 1ª opção submeteria gênero/raça errado. Deixa em branco.
+        if _eh_dado_sensivel(pergunta):
+            print(f"[SENIOR] radio sensível '{pergunta[:35]}' — não adivinho (perfil)")
+            continue
+        opcoes_txt = [o["texto"] for o in opts]
+        pergunta_fmt = "SELECT:" + pergunta + ":" + ";".join(opcoes_txt[:15])
+        try:
+            escolha = responder_pergunta(pergunta_fmt, perfil, vaga_titulo=vaga_titulo,
+                                         vaga_empresa="", resumo_curriculo=resumo_curriculo,
+                                         idioma=idioma)
+        except Exception as e:
+            logger.warning("responder_pergunta (senior radio) erro: %s", e)
+            escolha = ""
+        escolha = (escolha or "").strip().lower()
+        alvo = next((o for o in opts if o["texto"].lower() == escolha), None) \
+            or next((o for o in opts if escolha and escolha in o["texto"].lower()), None) \
+            or next((o for o in opts if escolha and o["texto"].lower() in escolha), None) \
+            or opts[0]
+
+        def _clica(iid=alvo["id"]):
+            try:
+                inp = driver.find_element(By.ID, iid)
+            except Exception:
+                return False
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", inp)
+            # Clica o <label for=iid> (o input é estilizado pelo Material); fallback JS.
+            try:
+                lbl = driver.find_element(By.CSS_SELECTOR, f"label[for='{iid}']")
+                try:
+                    lbl.click()
+                    return True
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            try:
+                inp.click()
+                return True
+            except Exception:
+                try:
+                    driver.execute_script("arguments[0].click();", inp)
+                    return True
+                except Exception:
+                    return False
+
+        clicado = False
+        for _tp in range(3):
+            try:
+                clicado = await _run_in_thread(_clica)
+                if clicado:
+                    break
+            except StaleElementReferenceException:
+                await asyncio.sleep(0.5)
+        if clicado:
+            print(f"[SENIOR] Radio '{pergunta[:40]}' = {alvo['texto'][:30]}")
+            feitas.append(pergunta)
+            await asyncio.sleep(random.uniform(0.4, 0.8))
+    return feitas
 
 
 # Palavras que identificam um checkbox de CONSENTIMENTO/termo (marcar OK). Outros
@@ -757,6 +1006,12 @@ async def _responder_perguntas_senior(driver, perfil: dict, resumo_curriculo: st
             continue
         if any(k in label.lower() for k in _NAO_PERGUNTA):
             continue
+        # CRÍTICO: NÃO deixar a IA inventar dado pessoal/documento/endereço (CEP,
+        # Logradouro, Bairro, Filiação, Título eleitoral…). Esses vêm do perfil salvo na
+        # plataforma — inventar = submissão com endereço/documento FALSO. Deixa em branco.
+        if _eh_dado_sensivel(label):
+            print(f"[SENIOR] campo sensível '{label[:35]}' — não invento (perfil)")
+            continue
         pref = "NUMERO:" if c["tipo"] == "number" else ""
         try:
             resp = responder_pergunta(pref + label, perfil, vaga_titulo=vaga_titulo,
@@ -815,7 +1070,8 @@ async def _responder_perguntas_senior(driver, perfil: dict, resumo_curriculo: st
 # Rótulos dos botões que indicam que o WIZARD ainda está em curso (form aberto). Sua
 # AUSÊNCIA é o sinal estrutural de que já saímos do formulário (enviou).
 _CONTROLES_APPLY = ("candidatar", "avançar", "avancar", "continuar", "próximo",
-                    "proximo", "enviar", "finalizar")
+                    "proximo", "concluir", "salvar seus dados", "salvar meus dados",
+                    "enviar", "finalizar")
 
 
 async def _controles_apply_presentes(driver) -> bool:
@@ -904,13 +1160,21 @@ async def _dump_senior_debug(driver, tag: str = "") -> None:
                     continue
             campos = []
             for c in driver.find_elements(
-                    By.CSS_SELECTOR, "input, textarea, mat-select, mat-checkbox, mat-label, "
-                    "p.customized-card-job-function"):
+                    By.CSS_SELECTOR, "input, textarea, mat-select, mat-checkbox, mat-radio-group, "
+                    "mat-label, .portal-title-small, p.customized-card-job-function"):
                 try:
                     if c.is_displayed():
                         desc = (c.get_attribute("formcontrolname") or c.get_attribute("aria-label")
                                 or c.get_attribute("name") or (c.text or "")[:40])
-                        campos.append(f"{c.tag_name}:{desc}"[:70])
+                        # VALOR do campo (discrimina 'vazio→perfil incompleto' de
+                        # 'preenchido→widget não satisfeito'). Inputs/textarea têm value.
+                        val = ""
+                        try:
+                            if (c.tag_name or "").lower() in ("input", "textarea"):
+                                val = (c.get_attribute("value") or "").strip()
+                        except Exception:
+                            pass
+                        campos.append((f"{c.tag_name}:{desc}"[:70] + (f" =[{val[:25]}]" if val else " =[]")))
                 except Exception:
                     continue
             html = driver.page_source[:20000]
@@ -927,25 +1191,93 @@ async def _dump_senior_debug(driver, tag: str = "") -> None:
 
 # ── Wizard de candidatura ─────────────────────────────────────────────────────
 
+async def _form_aberto(driver) -> bool:
+    """True se o drawer/formulário de candidatura está ABERTO (há controle do wizard
+    visível: 'Sair da Candidatura'/'Avançar'/'Concluir'/'Salvar seus dados')."""
+    def _check():
+        marcas = ("sair da candidatura", "avançar", "avancar", "concluir",
+                  "salvar seus dados", "salvar meus dados")
+        for el in driver.find_elements(By.CSS_SELECTOR, "button, [role='button']"):
+            try:
+                if el.is_displayed() and any(
+                        m in (el.text or el.get_attribute("aria-label") or "").lower()
+                        for m in marcas):
+                    return True
+            except Exception:
+                continue
+        return False
+    try:
+        return await _run_in_thread(_check)
+    except Exception:
+        return False
+
+
+async def _secoes_obrigatorias(driver) -> list:
+    """Lista os nomes das seções '(informações obrigatórias)' visíveis no passo atual —
+    ex.: 'Endereço e contato', 'Declaração de deficiência', 'Estado Civil', 'Sexo',
+    'Filiação 1'. Usado pra (a) fast-skip quando o passo é de dado pessoal que a automação
+    não inventa e (b) dar um aviso ACIONÁVEL nomeando o que falta no perfil."""
+    def _get():
+        nomes = []
+        for el in driver.find_elements(
+                By.CSS_SELECTOR, "button, [role='button'], .portal-title-small, h2, h3, mat-panel-title"):
+            try:
+                if not el.is_displayed():
+                    continue
+                t = (el.text or el.get_attribute("aria-label") or "").strip()
+                low = t.lower()
+                if "informações obrigatórias" in low or "informacoes obrigatorias" in low:
+                    nome = re.split(r"\(inform", t, flags=re.I)[0].strip(" -–:")
+                    if nome and nome not in nomes:
+                        nomes.append(nome)
+            except Exception:
+                continue
+        return nomes[:8]
+    try:
+        return await _run_in_thread(_get)
+    except Exception:
+        return []
+
+
+async def _dismiss_overlays(driver) -> bool:
+    """Fecha modais que BLOQUEIAM o clique em Candidatar-se / a abertura do wizard —
+    principalmente o "Entendi" ("Busque por mais oportunidades…") que sobra da candidatura
+    ANTERIOR e trava a abertura do form da próxima (causa raiz do 'ficou travada').
+    Retorna True se fechou algo."""
+    fechou = False
+    for _ in range(3):
+        _, d = await _clicar_botao_smartapply(driver, _BTN_ENTENDI)
+        if not d:
+            break
+        fechou = True
+        await asyncio.sleep(0.6)
+    return fechou
+
+
 async def _preencher_e_enviar_formulario(driver, perfil: dict, resumo_curriculo: str,
                                          idioma: str, vaga_titulo: str, vaga_url: str) -> dict:
     """Roda o wizard de candidatura da Senior no detalhe da vaga. Passos fixos com
-    'Avançar'; cada miss degrada para manual. Sucesso só com sinal FORTE (tela
-    'Acompanhar candidatura' APÓS pelo menos um 'Avançar' real) — nunca marca no escuro."""
-    # 1) Candidatar-se (abre o formulário de candidatura).
+    'Avançar'/'Concluir'. Sucesso só com sinal FORTE (tela pós-envio APÓS um 'Avançar'
+    real) — nunca marca no escuro. NÃO congela o run: se o form não abrir/travar, PULA a
+    vaga (o freeze relatado vinha de esperar 'Avançar' num form que nunca abriu)."""
+    # 0) Fecha modais residuais (Entendi da candidatura anterior) que bloqueiam a abertura.
+    await _dismiss_overlays(driver)
+    # 1) Candidatar-se (abre o formulário). Se bloqueado, dismiss e re-tenta 1×.
     _, clicou = await _clicar_botao_smartapply(driver, _BTN_CANDIDATAR)
     if not clicou:
-        await notify_browser_step("senior_apply", "manual", "Não achei 'Candidatar-se' — controle manual")
-        if not await _aguardar_resolucao_manual(driver, "abrir candidatura Senior"):
-            return {"sucesso": False, "motivo_falha": "sem_candidatar",
-                    "mensagem": f"Não abriu a candidatura. Candidate-se à mão: {vaga_titulo}"}
+        await _dismiss_overlays(driver)
+        _, clicou = await _clicar_botao_smartapply(driver, _BTN_CANDIDATAR)
+    if not clicou:
+        return {"sucesso": False, "motivo_falha": "sem_candidatar",
+                "mensagem": f"Não achei 'Candidatar-se'. Candidate-se à mão: {vaga_titulo}"}
     await asyncio.sleep(2.5)
     await _dump_senior_debug(driver, "apos-candidatar")
 
     perguntas_feitas = []
-    max_steps = 15
+    max_steps = 20
     nao_avancou = 0
-    avancou_alguma_vez = False  # só aceita 'Acompanhar' como sucesso após um Avançar real
+    tentativas_abrir = 0    # re-aberturas do form quando um modal bloqueou o Candidatar-se
+    avancou_alguma_vez = False  # só aceita sinal de sucesso após um Avançar real
 
     for step in range(max_steps):
         control = await get_intervention_state()
@@ -959,9 +1291,18 @@ async def _preencher_e_enviar_formulario(driver, perfil: dict, resumo_curriculo:
         # 'Candidatar-se'/'Avançar' visível) + sinal pós-envio, estável em 2 checagens.
         # Isto evita o falso-sucesso que envenena o dedup (lição do GeekHunter).
         if avancou_alguma_vez and await _sucesso_estrutural_senior(driver):
-            await _clicar_botao_smartapply(driver, _BTN_ACOMPANHAR)  # navega pro tracking
             b64 = await screenshot_base64()
             await notify_browser_step(f"senior_step_{step}", "sucesso", "Candidatura enviada!")
+            # Fim: fecha o DRAWER da candidatura pelo X ("Sair da Candidatura") pra voltar
+            # à lista de vagas. Fallback: "Acompanhar candidatura" (navega pro tracking).
+            # A candidatura JÁ foi enviada (Concluir + Salvar seus dados) — fechar não perde.
+            _, fechou = await _clicar_botao_smartapply(driver, _BTN_FECHAR_DRAWER)
+            if not fechou:
+                await _clicar_botao_smartapply(driver, _BTN_ACOMPANHAR)
+            await asyncio.sleep(1.5)
+            # Modal intermitente "Busque por mais oportunidades..." → "Entendi".
+            await _clicar_botao_smartapply(driver, _BTN_ENTENDI)
+            await asyncio.sleep(0.8)
             return {"sucesso": True, "perguntas_respondidas": perguntas_feitas,
                     "mensagem": "Candidatura enviada com sucesso na Senior!",
                     "screenshot": b64[:100] if b64 else ""}
@@ -982,10 +1323,30 @@ async def _preencher_e_enviar_formulario(driver, perfil: dict, resumo_curriculo:
             await asyncio.sleep(2)
             continue
 
+        # CAUSA RAIZ DO 'FICOU TRAVADA': se o drawer da candidatura NÃO está aberto (o
+        # clique inicial de Candidatar-se foi bloqueado por um modal 'Entendi' residual da
+        # candidatura anterior), fecha os modais e RE-CLICA Candidatar-se. Sem isto o loop
+        # procurava 'Avançar' num form fechado pra sempre. Capado: após N re-tentativas
+        # sem abrir, PULA a vaga (não congela o run).
+        if not avancou_alguma_vez and not await _form_aberto(driver):
+            await _dismiss_overlays(driver)
+            await _clicar_botao_smartapply(driver, _BTN_CANDIDATAR)
+            tentativas_abrir += 1
+            await asyncio.sleep(2.5)
+            if tentativas_abrir >= 3 and not await _form_aberto(driver):
+                return {"sucesso": False, "motivo_falha": "form_nao_abriu",
+                        "mensagem": f"Formulário não abriu (modal bloqueando?). Candidate-se à mão: {vaga_titulo}"}
+            continue
+
         # Preenche o que estiver na tela (idempotente — só mexe no que existe/está vazio).
         try:
             novas = await _responder_perguntas_senior(driver, perfil, resumo_curriculo, idioma, vaga_titulo)
             for p in novas:
+                if p not in perguntas_feitas:
+                    perguntas_feitas.append(p)
+            # Radios (mat-radio-group) de triagem — ex.: 'curso superior em TI? (requisito)'.
+            novas_r = await _responder_radios_senior(driver, perfil, resumo_curriculo, idioma, vaga_titulo)
+            for p in novas_r:
                 if p not in perguntas_feitas:
                     perguntas_feitas.append(p)
             await _responder_mat_selects_senior(driver, perfil, resumo_curriculo, idioma, vaga_titulo)
@@ -1005,14 +1366,35 @@ async def _preencher_e_enviar_formulario(driver, perfil: dict, resumo_curriculo:
 
         await _dump_senior_debug(driver, f"step{step}-antes-clique")
 
-        # Avançar (passo do wizard; o último Avançar É o envio).
+        # Avançar (passo do wizard; o último Avançar/Concluir É o envio).
         btn_text, clicou = await _clicar_botao_smartapply(driver, _BTN_AVANCAR)
         if not clicou:
-            await notify_browser_step(f"senior_step_{step}", "manual",
-                                      "Não achei 'Avançar'/'Finalizar' — controle manual")
-            if not await _aguardar_resolucao_manual(driver, f"formulário Senior step {step}"):
+            # Modal 'Entendi' bloqueando? fecha e re-tenta o loop.
+            if await _dismiss_overlays(driver):
+                print("[SENIOR] Fechei modal 'Entendi' que bloqueava")
+                await asyncio.sleep(1.0)
+                continue
+            # 'Avançar' presente mas DESABILITADO. Se o passo é de DADOS PESSOAIS/DECLARAÇÃO
+            # obrigatória (deficiência, estado civil, sexo, filiação, endereço, documentos)
+            # que a automação NÃO inventa → PULA JÁ (fast, sem congelar) com aviso nomeando
+            # o que falta. Antes grinçava 4 iterações e PARECIA travado.
+            secoes = await _secoes_obrigatorias(driver)
+            nao_avancou += 1
+            if secoes and nao_avancou >= 2:
+                lista = ", ".join(secoes)
+                msg = (f"⚠️ Perfil Senior INCOMPLETO: o passo obrigatório '{lista}' pede dado "
+                       f"pessoal/declaração (deficiência, estado civil, sexo, endereço, "
+                       f"documentos) que a automação NÃO inventa. Preencha isso UMA vez no seu "
+                       f"perfil em portaldetalentos.senior.com.br (Meu Perfil) e re-rode — aí as "
+                       f"candidaturas pré-preenchem e passam direto.")
+                print(f"[SENIOR] Pulando (perfil incompleto): {lista}")
+                await notify_browser_step("senior_perfil", "aviso", msg)
+                return {"sucesso": False, "motivo_falha": "perfil_incompleto", "mensagem": msg}
+            print(f"[SENIOR] Sem 'Avançar' habilitado no step {step} ({nao_avancou}/4)")
+            if nao_avancou >= 4:
                 return {"sucesso": False, "motivo_falha": "formulario_incompleto",
-                        "mensagem": f"Formulário não concluído. Candidate-se à mão: {vaga_titulo}"}
+                        "mensagem": f"Não achei 'Avançar'. Candidate-se à mão: {vaga_titulo}"}
+            await asyncio.sleep(1.2)
             continue
 
         avancou_alguma_vez = True
@@ -1031,12 +1413,10 @@ async def _preencher_e_enviar_formulario(driver, perfil: dict, resumo_curriculo:
             nao_avancou = 0
             continue
         nao_avancou += 1
-        if nao_avancou >= 3:
-            await notify_browser_step(f"senior_step_{step}", "manual", "Formulário travou — controle manual")
-            if not await _aguardar_resolucao_manual(driver, f"formulário travado Senior step {step}"):
-                return {"sucesso": False, "motivo_falha": "formulario_travado",
-                        "mensagem": f"Formulário travou. Candidate-se à mão: {vaga_titulo}"}
-            nao_avancou = 0
+        if nao_avancou >= 4:
+            # Travou de vez (clicou mas não avança) → PULA a vaga em vez de congelar o run.
+            return {"sucesso": False, "motivo_falha": "formulario_travado",
+                    "mensagem": f"Formulário travou. Candidate-se à mão: {vaga_titulo}"}
 
     return {"sucesso": False, "motivo_falha": "formulario_incompleto",
             "mensagem": f"Não consegui concluir o formulário. Candidate-se à mão: {vaga_titulo}"}

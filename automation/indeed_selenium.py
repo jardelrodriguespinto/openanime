@@ -89,6 +89,21 @@ def _pausar_antes_envio() -> bool:
 
 _BASE = "https://br.indeed.com"
 
+# Run-log durável (o Indeed só printava pro terminal → sem como diagnosticar depois).
+# Grava marcos do fluxo (login/busca/cards/apply) em automation/_indeed_run.log.
+_INDEED_RUN_LOG = os.path.join(os.path.dirname(__file__), "_indeed_run.log")
+
+
+def _ilog(msg: str) -> None:
+    import datetime as _dt
+    line = f"{_dt.datetime.now().strftime('%H:%M:%S')} {msg}"
+    print(f"[INDEED] {msg}")
+    try:
+        with open(_INDEED_RUN_LOG, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+
 
 # Campos "de contato" já preenchidos automaticamente — não são perguntas customizadas.
 _CAMPOS_PADRAO = {
@@ -543,7 +558,9 @@ async def extrair_vagas_da_busca(perfil: dict, max_vagas: int = 20, query: str =
 
     # Login/bloqueio caem em manual.
     login_ok = await _garantir_login()
+    _ilog(f"login_ok={login_ok} query='{(query or _get_query_padrao())[:30]}'")
     if not login_ok:
+        _ilog("PAROU: login/verificação não concluído (Cloudflare/código por e-mail?)")
         return {
             "sucesso": False, "vagas": [],
             "mensagem": "Não foi possível acessar o Indeed (login/verificação). Resolva no browser e tente de novo.",
@@ -571,6 +588,13 @@ async def extrair_vagas_da_busca(perfil: dict, max_vagas: int = 20, query: str =
 
     await notify_browser_step("indeed_extracao", "iniciando", "Extraindo vagas do Indeed")
     cards = await _extrair_cards_vaga(max_vagas)
+    try:
+        cur_final = await _run_in_thread(lambda: driver.current_url)
+    except Exception:
+        cur_final = ""
+    _ilog(f"cards_extraidos={len(cards)} url_busca='{(cur_final or '')[:80]}'")
+    if not cards:
+        _ilog("PAROU/VAZIO: 0 cards na busca (seletor de card mudou? bloqueio? busca vazia?)")
     await notify_browser_step("indeed_extracao", "finalizando", f"Extraídas {len(cards)} vagas")
     return {"sucesso": True, "vagas": cards, "total": len(cards)}
 
@@ -1680,12 +1704,15 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
     if resumo_curriculo and not perfil.get("resumo_curriculo"):
         perfil = {**perfil, "resumo_curriculo": resumo_curriculo}
 
+    _ilog(f"=== APLICAR início | max_vagas={max_vagas} query='{query or _get_query_padrao()}' teto={_cont.get_teto()} count={_cont.get_count(user_id)} ===")
     extra = await extrair_vagas_da_busca(perfil, max_vagas=max(max_vagas * 3, 15), query=query)
     if not extra.get("sucesso"):
+        _ilog(f"PAROU: extrair_vagas falhou — {extra.get('mensagem','')[:80]}")
         return {"sucesso": False, "aplicacoes": [], "mensagem": extra.get("mensagem", "Falha ao extrair vagas")}
 
     todas = extra.get("vagas", [])
     elegiveis = [v for v in todas if v.get("easy_apply")]
+    _ilog(f"vagas_totais={len(todas)} elegiveis_easy_apply={len(elegiveis)}")
     # Fallback: se a heurística de "Candidatura simplificada" (string no innerHTML do
     # card) não marcou NENHUMA vaga, NÃO desiste — era exatamente isso que fazia o
     # Indeed "logar e não fazer nada": o rótulo no card muda de tempos em tempos e
@@ -1732,6 +1759,9 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
             logger.error("aplicar_vagas_visiveis: erro em %s: %s", vaga.get("url"), e)
             res = {"sucesso": False, "mensagem": str(e)}
 
+        _ilog(f"apply '{(vaga.get('titulo') or '')[:35]}' → sucesso={res.get('sucesso')} "
+              f"motivo={res.get('motivo_falha','')} {('| '+res.get('mensagem','')[:50]) if not res.get('sucesso') else ''}")
+
         # 'pulada' (sem match) ou vaga sem Candidatura Simplificada de verdade
         # (gate real do aplicar(), especialmente no fallback acima): segue para a
         # próxima SEM contar como falha — não é erro, só não é aplicável.
@@ -1755,4 +1785,5 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
         await asyncio.sleep(random.uniform(1.5, 3.0))
 
     resultados.setdefault("mensagem", f"{aplicadas} candidatura(s) enviada(s) no Indeed.")
+    _ilog(f"=== FIM | aplicadas={aplicadas} falhas={resultados.get('falhas',0)} | {resultados.get('mensagem','')[:60]} ===")
     return resultados

@@ -80,7 +80,16 @@
       "Bash(python -c \"import ast; ast.parse\\(open\\('automation/indeed_selenium.py'\\).read\\(\\)\\); print\\('OK indeed_selenium sintaxe'\\)\")",
       "Bash(grep -oE '<\\(h3|label|input|textarea\\)[^>]{0,220}')",
       "Bash(grep -oE 'MuiFormControlLabel-root|type=\"radio\"|type=\"checkbox\"|MuiCheckbox|MuiRadio|name=\"checkbox-[^\"]*\"|name=\"radioGroup[^\"]*\"|data-testid=\"[^\"]{0,40}\"|<textarea[^>]{0,120}')",
-      "Bash(python -c \"import importlib, automation.senior_selenium as s; importlib.reload\\(s\\); print\\('reimport OK'\\); print\\('helpers:', all\\(hasattr\\(s,n\\) for n in \\('_sucesso_estrutural_senior','_controles_apply_presentes','_acompanhar_ou_frase','_botao_login_visivel','_marcar_consentimento_senior'\\)\\)\\)\")"
+      "Bash(python -c \"import importlib, automation.senior_selenium as s; importlib.reload\\(s\\); print\\('reimport OK'\\); print\\('helpers:', all\\(hasattr\\(s,n\\) for n in \\('_sucesso_estrutural_senior','_controles_apply_presentes','_acompanhar_ou_frase','_botao_login_visivel','_marcar_consentimento_senior'\\)\\)\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('automation/senior_selenium.py'\\).read\\(\\)\\); print\\('final syntax OK'\\)\")",
+      "Bash(python -c \"import importlib, automation.senior_selenium as s; importlib.reload\\(s\\); print\\('reimport OK'\\); print\\('Concluir in AVANCAR:', any\\('Concluir' in x for x in s._BTN_AVANCAR\\)\\); print\\('concluir in CONTROLES:', 'concluir' in s._CONTROLES_APPLY\\)\")",
+      "Bash(python -c \"import ast; [ast.parse\\(open\\(f\\).read\\(\\)\\) for f in ['automation/senior_selenium.py','automation/gupy_selenium.py']]; import importlib, automation.senior_selenium as s, automation.gupy_selenium as g; print\\('all OK'\\)\")",
+      "Bash(curl -s --max-time 15 https://openrouter.ai/api/v1/models)",
+      "Bash(python -c \"import importlib, automation.senior_selenium as s; importlib.reload\\(s\\); print\\('reimport OK'\\); print\\('has _secoes_obrigatorias:', hasattr\\(s,'_secoes_obrigatorias'\\)\\); print\\('has stale _passo_dados_pessoais:', hasattr\\(s,'_passo_dados_pessoais'\\)\\)\")",
+      "Bash(python -c \"import importlib, automation.senior_selenium as s; importlib.reload\\(s\\); print\\('final reimport OK'\\)\")",
+      "Bash(ps -o pid,lstart,etime -p 133418)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('automation/gupy_selenium.py'\\).read\\(\\)\\); print\\('gupy syntax OK'\\)\")",
+      "Bash(python -c \"import importlib, automation.gupy_selenium as g; importlib.reload\\(g\\); print\\('gupy reimport OK'\\); print\\('has _qlog_gupy:', hasattr\\(g,'_qlog_gupy'\\)\\)\")"
     ],
     "additionalDirectories": [
       "/tmp/claude-1000/-home-jard-Documents-projetos-openanime/1a53c565-4c8f-4f74-a284-3b4533a83336/scratchpad"

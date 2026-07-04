@@ -500,6 +500,42 @@ def _tem_elemento(driver, css: str) -> bool:
         return False
 
 
+# Vagas 404/expiradas: o portal.gupy.io LISTA vagas já removidas → clicar/abrir o
+# subdomínio da empresa dá "not found" (HTTP 404; a página tem <title>404</title> e o
+# corpo diz "não encontrada"). Sem detectar isso, a automação tentava aplicar numa
+# página morta e travava/pulava sem motivo claro.
+_MARCAS_INDISPONIVEL_GUPY = (
+    "não encontrada", "nao encontrada", "não encontrado", "nao encontrado",
+    "not found", "página não encontrada", "pagina nao encontrada",
+    "não está mais disponível", "nao esta mais disponivel",
+    "não está mais recebendo", "nao esta mais recebendo",
+    "vaga encerrada", "vaga expirada", "esta vaga foi encerrada",
+)
+
+
+async def _vaga_indisponivel(driver) -> bool:
+    """True se a vaga aberta é 404/expirada/encerrada. Detecta pelo TÍTULO (mais confiável
+    — vaga viva tem o CARGO no <title>; a morta tem '404'/'não encontrada') e, como reforço,
+    pelo começo do corpo."""
+    def _check():
+        try:
+            titulo = (driver.title or "").strip().lower()
+        except Exception:
+            titulo = ""
+        if titulo == "404" or titulo.startswith("404") or any(
+                m in titulo for m in _MARCAS_INDISPONIVEL_GUPY):
+            return True
+        try:
+            corpo = (driver.find_element(By.TAG_NAME, "body").text or "").lower()[:600]
+        except Exception:
+            corpo = ""
+        return any(m in corpo for m in _MARCAS_INDISPONIVEL_GUPY)
+    try:
+        return await _run_in_thread(_check)
+    except Exception:
+        return False
+
+
 async def _extrair_descricao_detalhe(driver) -> str:
     """Texto do detalhe da vaga (pro filtro modalidade/região). Igual GeekHunter: body."""
     def _txt():
@@ -817,6 +853,21 @@ async def _responder_perguntas_gupy(driver, perfil: dict, resumo_curriculo: str,
                         break
                 except StaleElementReferenceException:
                     await asyncio.sleep(0.5)
+            # Estado REAL pós-clique: a opção escolhida ficou is_selected()? (detecta o bug
+            # de toggle MUI — marca e desmarca — que trava o 'Salvar e continuar'.)
+            def _mui_selecionado(nome=alvo["name"]):
+                try:
+                    for inp in driver.find_elements(By.CSS_SELECTOR, f"input[name='{nome}']"):
+                        return inp.is_selected()
+                except Exception:
+                    pass
+                return None
+            try:
+                post_sel = await _run_in_thread(_mui_selecionado)
+            except Exception:
+                post_sel = None
+            _qlog_gupy(f"label='{label[:30]}' tipo=mui ans='{escolha[:20]}' "
+                       f"clicado={clicado} post_selected={post_sel}")
             if clicado:
                 print(f"[GUPY] Pergunta '{label[:35]}' = {alvo['texto'][:25]}")
                 feitas.append(label)
@@ -848,11 +899,36 @@ async def _responder_perguntas_gupy(driver, perfil: dict, resumo_curriculo: str,
                 _fill_react(driver, el, str(resp))
                 return True
             try:
-                if await _run_in_thread(_fill_texto):
-                    print(f"[GUPY] Pergunta texto '{label[:35]}' respondida")
-                    feitas.append(label)
+                ok_fill = await _run_in_thread(_fill_texto)
             except Exception:
-                pass
+                ok_fill = False
+            # Estado REAL pós-fill: o textarea ficou com valor? (discrimina 'IA devolveu
+            # vazio' / 'campo não achado' / 'React não assentou' — o caso do Q5 vazio.)
+            def _texto_valor(campo=campo):
+                el = None
+                if campo.get("id"):
+                    try:
+                        el = driver.find_element(By.ID, campo["id"])
+                    except Exception:
+                        el = None
+                if el is None and campo.get("name"):
+                    try:
+                        el = driver.find_element(By.CSS_SELECTOR, f"[name='{campo['name']}']")
+                    except Exception:
+                        el = None
+                try:
+                    return len((el.get_attribute("value") or "").strip()) if el else -1
+                except Exception:
+                    return -1
+            try:
+                post_len = await _run_in_thread(_texto_valor)
+            except Exception:
+                post_len = -1
+            _qlog_gupy(f"label='{label[:30]}' tipo=texto ans_len={len(str(resp))} "
+                       f"achou_campo={ok_fill} post_val_len={post_len}")
+            if ok_fill:
+                print(f"[GUPY] Pergunta texto '{label[:35]}' respondida")
+                feitas.append(label)
         await asyncio.sleep(random.uniform(0.5, 1.0))
     return feitas
 
@@ -876,6 +952,20 @@ async def _sucesso_gupy(driver) -> bool:
 
 _GUPY_DEBUG = os.getenv("GUPY_DEBUG", "true").lower() == "true"
 _GUPY_DEBUG_PATH = os.path.join(os.path.dirname(__file__), "_gupy_form_debug.txt")
+
+
+def _qlog_gupy(line: str) -> None:
+    """Log por-pergunta do estado REAL pós-preenchimento — discrimina os 3 modos de falha
+    ('não tentou' / 'clicou mas não grudou' / 'preencheu ok mas validação ainda bloqueia').
+    Grava com tag [QLOG] no dump (grep 'QLOG' pra ler)."""
+    print(f"[GUPY][QLOG] {line}")
+    if not _GUPY_DEBUG:
+        return
+    try:
+        with open(_GUPY_DEBUG_PATH, "a", encoding="utf-8") as f:
+            f.write(f"[QLOG] {line}\n")
+    except Exception:
+        pass
 
 
 async def _dump_gupy_debug(driver, tag: str = "") -> None:
@@ -902,7 +992,17 @@ async def _dump_gupy_debug(driver, tag: str = "") -> None:
                     if c.is_displayed():
                         desc = (c.get_attribute("name") or c.get_attribute("data-testid")
                                 or (c.text or "")[:40])
-                        campos.append(f"{c.tag_name}:{desc}"[:60])
+                        # VALOR do campo — mostra quais estão VAZIOS (o que 'não preenche').
+                        val = ""
+                        try:
+                            tg = (c.tag_name or "").lower()
+                            if tg in ("input", "textarea"):
+                                val = (c.get_attribute("value") or "").strip()
+                                if not val and tg == "input" and c.get_attribute("type") == "checkbox":
+                                    val = "checked" if c.is_selected() else ""
+                        except Exception:
+                            pass
+                        campos.append((f"{c.tag_name}:{desc}"[:60] + (f" =[{val[:25]}]" if val else " =[]")))
                 except Exception:
                     continue
             html = driver.page_source[:20000]
@@ -1003,15 +1103,13 @@ async def _preencher_e_enviar_formulario(driver, perfil: dict, resumo_curriculo:
             btn_text, clicou = await _clicar_botao_smartapply(driver, _BTN_FINALIZAR_FRACO)
 
         if not clicou:
-            # Sem botão de avançar → intervenção manual (paridade com LinkedIn/Indeed/
-            # GeekHunter: degrada pra manual, NUNCA falha/silencia). Com o fill de perguntas
-            # corrigido, esse caminho quase nunca é atingido.
-            await notify_browser_step(f"gupy_step_{step}", "manual",
-                                      "Não achei botão de avançar/finalizar — controle manual")
-            if not await _aguardar_resolucao_manual(driver, f"formulário Gupy step {step}"):
-                return {"sucesso": False, "motivo_falha": "formulario_incompleto",
-                        "mensagem": f"Formulário não concluído. Candidate-se à mão: {vaga_url}"}
-            continue
+            # Sem botão de avançar → PULA a vaga (NÃO congela no manual). O usuário
+            # reclamou de "travado" no Gupy E na Senior → o pedido direto é NÃO travar; só
+            # CAPTCHA vai pra manual (acima). Antes ficava em _aguardar_resolucao_manual.
+            await notify_browser_step(f"gupy_step_{step}", "pulada",
+                                      "Sem botão de avançar/finalizar — pulando vaga")
+            return {"sucesso": False, "motivo_falha": "formulario_incompleto",
+                    "mensagem": f"Formulário não concluído (sem botão). Candidate-se à mão: {vaga_url}"}
 
         print(f"[GUPY] Step {step}: clicou '{btn_text[:40]}'")
         await asyncio.sleep(3 if is_finalizar else 2)
@@ -1049,15 +1147,12 @@ async def _preencher_e_enviar_formulario(driver, perfil: dict, resumo_curriculo:
             continue
         nao_avancou += 1
         if nao_avancou >= 3:
-            # Não avançou após 3 tentativas → intervenção manual (paridade com as outras
-            # plataformas; NUNCA silencia). Com o fill de perguntas corrigido (clique
-            # escopado por name + pula respondidas + textarea React-safe), o form avança
-            # sozinho e esse caminho quase não é atingido.
-            await notify_browser_step(f"gupy_step_{step}", "manual", "Formulário travou — controle manual")
-            if not await _aguardar_resolucao_manual(driver, f"formulário travado Gupy step {step}"):
-                return {"sucesso": False, "motivo_falha": "formulario_travado",
-                        "mensagem": f"Formulário travou. Candidate-se à mão: {vaga_url}"}
-            nao_avancou = 0
+            # Não avançou após 3 tentativas (form travado — ex.: pergunta obrigatória que
+            # não coube preencher) → PULA a vaga em vez de congelar no manual. Antes ficava
+            # em _aguardar_resolucao_manual e PARECIA travado (reclamação do usuário).
+            await notify_browser_step(f"gupy_step_{step}", "pulada", "Formulário travou — pulando vaga")
+            return {"sucesso": False, "motivo_falha": "formulario_travado",
+                    "mensagem": f"Formulário travou (não avançou). Candidate-se à mão: {vaga_url}"}
 
     return {"sucesso": False, "motivo_falha": "formulario_incompleto",
             "mensagem": f"Não consegui concluir o formulário. Candidate-se à mão: {vaga_url}"}
@@ -1205,6 +1300,14 @@ async def aplicar_vagas_visiveis_na_pagina(perfil: dict, max_vagas: int = 5, use
                     await navegar(_build_search_url(query, pagina))
                     await asyncio.sleep(2)
 
+            # Vaga 404/expirada (o portal lista vagas já removidas → abre 'not found').
+            # PULA limpo, sem tentar aplicar nem registrar nada.
+            if await _vaga_indisponivel(driver):
+                print(f"[GUPY] Vaga indisponível/404, pulando: {titulo[:40]} ({vaga_url[:60]})")
+                await notify_browser_step("selenium_gupy", "pulada", "Vaga 404/expirada")
+                await _voltar_busca()
+                continue
+
             # Dedup por URL do detalhe.
             if neo4j and vaga_url:
                 try:
@@ -1281,4 +1384,9 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "", user_id
     driver = await get_driver()
     await navegar(vaga_url)
     await asyncio.sleep(3)
+    # Vaga 404/expirada (URL removida) → não tenta aplicar numa página morta.
+    if await _vaga_indisponivel(driver):
+        print(f"[GUPY] Vaga indisponível/404: {vaga_url[:70]}")
+        return {"sucesso": False, "motivo_falha": "vaga_indisponivel",
+                "mensagem": f"Vaga não encontrada / expirada (404): {vaga_url}"}
     return await _preencher_e_enviar_formulario(driver, perfil, resumo_curriculo, "pt", "", vaga_url)
