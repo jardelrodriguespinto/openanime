@@ -185,6 +185,17 @@ _BTN_APPLY = [
     'button:has-text("Easily apply")',
 ]
 
+# Botão "Continue" da tela intersticial de passkey/WebAuthn ("Entre mais rápido
+# neste dispositivo / Crie uma chave de acesso"). Ela aparece JÁ LOGADO, entre o
+# login e a lista de vagas; se não for dispensada, cobre a página e trava tudo —
+# era isso que fazia o Indeed "logar e não fazer nada". Clicar Continue só pula a
+# etapa (o próprio Indeed diz "This device does not support passkeys").
+_BTN_PASSKEY = [
+    '#pass-WebAuthn-continue',
+    'button#pass-WebAuthn-continue',
+    'button[id*="WebAuthn" i]',
+]
+
 
 # ── Intervenção manual / bloqueio (Cloudflare, CAPTCHA, login) ────────────────
 
@@ -288,12 +299,131 @@ async def _aguardar_resolucao_manual(driver, origem: str = "login") -> bool:
         await asyncio.sleep(2)
 
 
+async def _passar_passkey(driver, timeout: float = 10.0, grace: float = 3.5) -> bool:
+    """Dispensa a tela "Sign in faster on this device" ("Create a passkey…" /
+    "Crie uma chave de acesso") clicando em Continue (#pass-WebAuthn-continue). Ela
+    aparece JÁ LOGADO, entre o login e a busca; sem dispensar, cobre a página e
+    trava o fluxo.
+
+    Clique BLINDADO (o handler anterior não pegava): (1) acha o botão por id e
+    clica via JS — NÃO depende de is_displayed(), que reporta False no intersticial;
+    (2) procura também DENTRO de iframes; (3) fallback: numa página cujo header é
+    "Sign in faster / passkey", clica qualquer botão cujo texto seja Continue/
+    Continuar. Poll: espera até `grace`s a tela APARECER (barato quando ausente) e,
+    uma vez detectada, insiste até ela sumir (teto `timeout`). Loga o que vê para
+    diagnóstico. Idempotente. Retorna True se dispensou algo."""
+    import time as _time
+
+    def _tentar():
+        # Retorna (achou_tela_passkey, clicou). Roda no doc principal e em iframes.
+        def _no_contexto():
+            achou = False
+            # 1) Botão por id — o caminho confiável. JS click ignora overlay/visibility.
+            els = driver.find_elements(
+                By.CSS_SELECTOR,
+                "#pass-WebAuthn-continue, button[id*='WebAuthn'], button[id*='webauthn']")
+            if not els:
+                # 2) Fallback por header: página de passkey → clica Continue por texto.
+                try:
+                    src = (driver.page_source or "").lower()
+                except Exception:
+                    src = ""
+                if any(k in src for k in (
+                        "sign in faster", "create a passkey", "passkey",
+                        "crie uma chave de acesso", "chave de acesso")):
+                    achou = True
+                    for b in driver.find_elements(By.CSS_SELECTOR, "button, [role='button']"):
+                        try:
+                            t = (b.text or "").strip().lower()
+                        except Exception:
+                            t = ""
+                        if t in ("continue", "continuar"):
+                            els = [b]
+                            break
+            if not els:
+                return achou, False
+            achou = True
+            el = els[0]
+            try:
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+            except Exception:
+                pass
+            # JS click primeiro (funciona mesmo "não exibido"/coberto); nativo de reserva.
+            try:
+                driver.execute_script("arguments[0].click();", el)
+                return achou, True
+            except Exception:
+                try:
+                    el.click()
+                    return achou, True
+                except Exception:
+                    return achou, False
+
+        achou, clicou = _no_contexto()
+        if clicou:
+            return True, True
+        for fr in driver.find_elements(By.CSS_SELECTOR, "iframe"):
+            try:
+                driver.switch_to.frame(fr)
+                a2, c2 = _no_contexto()
+            except Exception:
+                a2, c2 = False, False
+            finally:
+                try:
+                    driver.switch_to.default_content()
+                except Exception:
+                    pass
+            achou = achou or a2
+            if c2:
+                return True, True
+        return achou, False
+
+    dispensou = False
+    detectou = False
+    inicio = _time.monotonic()
+    while _time.monotonic() - inicio < timeout:
+        try:
+            achou, clicou = await _run_in_thread(_tentar)
+        except Exception:
+            achou, clicou = False, False
+        if achou and not detectou:
+            detectou = True
+            _ilog("passkey DETECTADA ('Sign in faster' / #pass-WebAuthn-continue)")
+        if clicou:
+            dispensou = True
+            _ilog("passkey: Continue clicado")
+            await asyncio.sleep(1.5)             # aguarda redirect / re-render
+            continue                            # re-checa: pode re-renderizar
+        if dispensou and not achou:
+            _ilog("passkey dispensada — tela saiu")
+            return True
+        if not achou:
+            if _time.monotonic() - inicio > grace:
+                return dispensou                # nunca apareceu → no-op barato
+            await asyncio.sleep(0.4)
+            continue
+        await asyncio.sleep(0.5)                 # detectada, botão ainda não clicável
+    if detectou and not dispensou:
+        _ilog("passkey DETECTADA mas NÃO consegui clicar Continue — pode travar")
+    return dispensou
+
+
 # ── Login (manual-first) ──────────────────────────────────────────────────────
 
 def _esta_logado(url: str, title: str, html: str = "") -> bool:
     """Heurística de login no Indeed. Conservadora: na dúvida, NÃO está logado
     (para cair na intervenção manual, que é segura)."""
     u = (url or "").lower()
+    h = (html or "").lower()
+    # A tela de passkey/WebAuthn ("crie uma chave de acesso") só aparece com sessão
+    # ativa → trata como logado (será dispensada por _passar_passkey). Precisa vir
+    # ANTES do early-return de /auth: a tela mora em secure.indeed.com/auth e a URL
+    # preemptaria esta checagem, jogando de volta no login por código (o travamento).
+    if any(m in h[:8000] for m in (
+        "pass-webauthn-continue", "crie uma chave de acesso",
+        "sign in faster", "entre mais rápido",
+    )):
+        return True
     if "login" in u or "/auth" in u or "account/login" in u:
         return False
     # Landings pós-login do Indeed (redireciona pra home/mensagens/settings/passport
@@ -301,7 +431,6 @@ def _esta_logado(url: str, title: str, html: str = "") -> bool:
     if ("from=gnav" in u or "from=passport" in u or "from=messaging" in u
             or "mypage" in u or "/myjobs" in u or "/settings/" in u):
         return True
-    h = (html or "").lower()
     # Indicadores de sessão ativa (menu da conta, sair, etc.)
     for marca in ("gnav-", "logout", "sair da conta", "account-menu", "minhas vagas", "myjobs"):
         if marca in h[:6000]:
@@ -404,6 +533,23 @@ async def _garantir_login() -> bool:
     except Exception:
         cur, ttl, html = "", "", ""
 
+    # Dispensa a tela de passkey ("Sign in faster on this device" → botão Continue)
+    # ANTES de decidir login/bloqueio. CRÍTICO p/ não travar: essa tela SÓ aparece
+    # com sessão já autenticada (é enrollment pós-login), então se conseguimos
+    # dispensá-la já ESTAMOS logados → retorna True direto e NÃO cai no login por
+    # e-mail+código (cuja espera manual é o que travava e "matava" a automação).
+    if await _passar_passkey(driver):
+        try:
+            cur = await _run_in_thread(lambda: driver.current_url)
+            ttl = await get_title()
+            html = await _run_in_thread(lambda: driver.page_source)
+        except Exception:
+            pass
+        if not _pagina_bloqueada(cur, ttl, html):
+            print("[INDEED] Passkey dispensada → sessão logada, seguindo pra busca")
+            await notify_browser_step("indeed_login", "sucesso", "Login OK (passkey dispensada)")
+            return True
+
     if _pagina_bloqueada(cur, ttl, html):
         print("[INDEED] Bloqueio (Cloudflare/CAPTCHA) na página inicial")
         if not await _aguardar_resolucao_manual(driver, "acesso ao Indeed"):
@@ -440,6 +586,10 @@ async def _garantir_login() -> bool:
     if not resolvido:
         return False
 
+    # Logo após o código, o Indeed abre a tela "Sign in faster / passkey" — dispensa
+    # aqui (com espera generosa, é o momento em que ela aparece) para não travar.
+    await _passar_passkey(driver, grace=8.0)
+
     try:
         cur = await _run_in_thread(lambda: driver.current_url)
         ttl = await get_title()
@@ -463,6 +613,9 @@ def _build_search_url(query: str = "") -> str:
     url = f"{_BASE}/jobs?q={quote_plus(q)}"
     cidade = _get_cidade().strip()
     url += f"&l={quote_plus(cidade)}" if cidade else "&l="
+    # Mimetiza uma busca feita a partir da home (é o que o Indeed anexa e o que o
+    # usuário vê ao pesquisar): reduz a chance do deep-link ser re-desafiado/redir.
+    url += "&from=searchOnHP"
     return url
 
 
@@ -478,6 +631,9 @@ async def _buscar_via_home(driver, query: str = "") -> bool:
         await asyncio.sleep(3)
     except Exception:
         return False
+
+    # Passkey pode aparecer na home e cobrir o campo de busca → dispensa antes.
+    await _passar_passkey(driver)
 
     # Cloudflare pode aparecer na home → intervenção manual.
     try:
@@ -566,9 +722,13 @@ async def extrair_vagas_da_busca(perfil: dict, max_vagas: int = 20, query: str =
             "mensagem": "Não foi possível acessar o Indeed (login/verificação). Resolva no browser e tente de novo.",
         }
 
-    # Pós-login o Indeed redireciona pra home/mensagens (ex. ?from=gnav-messaging).
-    # Garante que caímos na LISTA de resultados da busca antes de extrair/aplicar.
-    # Só evita re-navegar se já estamos numa busca da própria palavra-chave.
+    # Pós-login o Indeed cai numa LANDING que NÃO é a lista de vagas — tipicamente
+    # secure.indeed.com/settings/account (ou home/mensagens). Sequência: dispensa a
+    # passkey dessa landing → vai DIRETO pra /jobs?q=... (determinístico, é o que o
+    # usuário quer: sair de settings/account e cair na busca) → se o deep-link for
+    # redirecionado/re-desafiado, digita a palavra-chave na home (robusto vs
+    # Cloudflare). Só pula tudo se já estamos na busca da própria palavra-chave.
+    await _passar_passkey(driver)
     try:
         cur = await _run_in_thread(lambda: driver.current_url)
     except Exception:
@@ -577,15 +737,25 @@ async def extrair_vagas_da_busca(perfil: dict, max_vagas: int = 20, query: str =
     q_atual = (query or "").strip() or _get_query_padrao()
     ja_na_busca = "/jobs" in (cur or "").lower() and f"q={quote_plus(q_atual)}".lower() in (cur or "").lower()
     if not ja_na_busca:
-        # Vai pra home e digita a palavra-chave no campo de busca (humano, robusto
-        # contra Cloudflare). Fallback: navegação direta pra URL de busca.
-        if not await _buscar_via_home(driver, query):
-            url_busca = _build_search_url(query)
-            print(f"[INDEED] Fallback: navegação direta → {url_busca}")
-            await notify_browser_step("indeed_pos_login", "navegando", "Abrindo busca de vagas (direto)")
-            await navegar(url_busca)
-            await asyncio.sleep(3)
+        url_busca = _build_search_url(query)
+        _ilog(f"pos_login landing='{(cur or '')[:60]}' → indo direto pra {url_busca[:60]}")
+        await notify_browser_step("indeed_pos_login", "navegando", "Abrindo busca de vagas")
+        await navegar(url_busca)
+        await asyncio.sleep(3)
+        await _passar_passkey(driver)
+        try:
+            cur = await _run_in_thread(lambda: driver.current_url)
+        except Exception:
+            cur = ""
+        if "/jobs" not in (cur or "").lower():
+            # Deep-link foi redirecionado (settings/account de novo, home, Cloudflare)
+            # → tenta digitar a palavra-chave na home e submeter.
+            _ilog(f"deep-link não caiu em /jobs (='{(cur or '')[:50]}') — tentando via home")
+            await _buscar_via_home(driver, query)
 
+    # A passkey pode reaparecer no caminho até a lista (ela intercepta a navegação
+    # para /jobs). Dispensa antes de extrair, senão cobre os cards → 0 vagas.
+    await _passar_passkey(driver)
     await notify_browser_step("indeed_extracao", "iniciando", "Extraindo vagas do Indeed")
     cards = await _extrair_cards_vaga(max_vagas)
     try:
@@ -1565,6 +1735,8 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "", user_id
         await notify_browser_step("selenium_indeed", "navegando", "Abrindo vaga")
         await navegar(vaga_url)
         await asyncio.sleep(3)
+        # Intersticial de passkey pode interceptar a abertura da vaga também.
+        await _passar_passkey(driver)
 
         cur = await _run_in_thread(lambda: driver.current_url)
         ttl = await get_title()
