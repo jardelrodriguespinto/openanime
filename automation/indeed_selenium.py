@@ -243,11 +243,16 @@ async def _clicar_voltar_busca(driver) -> bool:
         return False
 
 
-async def _aguardar_resolucao_manual(driver, origem: str = "login") -> bool:
+async def _aguardar_resolucao_manual(driver, origem: str = "login", auto_ok=None) -> bool:
     """
     Pausa a automação e espera o usuário resolver login/CAPTCHA/Cloudflare no browser.
     Retorna True quando a página sai do estado de bloqueio, False se clicar Parar.
     Mesmo padrão do LinkedIn: qualquer seletor incerto deve cair aqui.
+
+    `auto_ok`: callable async opcional que retorna True quando a condição de sucesso
+    já foi atingida SOZINHA (ex.: login concluído → caiu em settings/account). Aí
+    RETOMA automático, sem exigir o clique "Retomar Auto" no dashboard — era o que
+    fazia a automação "parar em settings/account e não fazer nada" após o login.
     """
     await set_intervention_state("paused", True)
     await set_intervention_state("intervention_type", "manual")
@@ -263,6 +268,33 @@ async def _aguardar_resolucao_manual(driver, origem: str = "login") -> bool:
         if control.get("current_action") == "parar":
             print("[INDEED] Usuário clicou Parar durante espera manual")
             return False
+
+        # Passkey ("Acessar mais rápido neste dispositivo") pode surgir DURANTE a
+        # espera (ex.: logo após o código de login) e travar tudo. Dispensa aqui, na
+        # hora (find+click direto por id, barato) — depois a página avança pra
+        # settings/account e a auto-retomada abaixo detecta o login e segue sozinha.
+        try:
+            _t, _c = await _clicar_botao_smartapply(driver, _BTN_PASSKEY)
+            if _c:
+                _ilog("passkey dispensada durante espera manual (#pass-WebAuthn-continue)")
+                await asyncio.sleep(1.5)
+        except Exception:
+            pass
+
+        # Auto-retomada: se a condição de sucesso já foi atingida (login concluído →
+        # settings/account), continua SOZINHO sem esperar o "Retomar Auto".
+        if auto_ok is not None:
+            try:
+                pronto = await auto_ok()
+            except Exception:
+                pronto = False
+            if pronto:
+                print(f"[INDEED] Auto-retomando '{origem}': condição de sucesso detectada")
+                await notify_browser_step("selenium_indeed", "retomando",
+                                          "Login detectado — retomando automático")
+                await set_intervention_state("paused", False)
+                await set_intervention_state("intervention_type", None)
+                return True
 
         # Usuário clicou Continuar no dashboard: verifica se saiu do bloqueio.
         if not control.get("paused") and control.get("intervention_type") != "manual":
@@ -415,13 +447,15 @@ def _esta_logado(url: str, title: str, html: str = "") -> bool:
     (para cair na intervenção manual, que é segura)."""
     u = (url or "").lower()
     h = (html or "").lower()
-    # A tela de passkey/WebAuthn ("crie uma chave de acesso") só aparece com sessão
-    # ativa → trata como logado (será dispensada por _passar_passkey). Precisa vir
-    # ANTES do early-return de /auth: a tela mora em secure.indeed.com/auth e a URL
-    # preemptaria esta checagem, jogando de volta no login por código (o travamento).
-    if any(m in h[:8000] for m in (
+    # A tela de passkey/WebAuthn ("Acessar mais rápido neste dispositivo" / "crie uma
+    # chave de acesso") só aparece com sessão ativa → trata como logado (será
+    # dispensada por _passar_passkey). Vem ANTES do early-return de /auth (a tela mora
+    # em secure.indeed.com/auth). Escaneia o HTML INTEIRO (não h[:8000]): essa tela
+    # tem um SVG gigante (~15k chars) ANTES do botão/header, então os marcadores caem
+    # depois de 8000 — era por isso que a auto-retomada não detectava e travava.
+    if any(m in h for m in (
         "pass-webauthn-continue", "crie uma chave de acesso",
-        "sign in faster", "entre mais rápido",
+        "acessar mais rápido", "sign in faster", "entre mais rápido",
     )):
         return True
     if "login" in u or "/auth" in u or "account/login" in u:
@@ -438,6 +472,30 @@ def _esta_logado(url: str, title: str, html: str = "") -> bool:
     return False
 
 
+async def _aceitar_cookies(driver) -> bool:
+    """Dispensa o banner de cookies OneTrust do Indeed. Em perfil NOVO ele aparece no
+    RODAPÉ — exatamente onde fica o link 'Acessar com um código' na tela de login —
+    e intercepta/cobre o clique (era por isso que o OTP 'não clicava'). Clica
+    'Aceitar todos os cookies' (`#onetrust-accept-btn-handler`). No-op barato quando
+    ausente (com perfil persistente só aparece no 1º run). Retorna True se dispensou."""
+    sels = [
+        '#onetrust-accept-btn-handler',
+        'button#onetrust-accept-btn-handler',
+        '#onetrust-reject-all-handler',
+        'button:has-text("Aceitar todos os cookies")',
+        'button:has-text("Accept all cookies")',
+        'button:has-text("Aceitar todos")',
+    ]
+    try:
+        _txt, clicou = await _clicar_botao_smartapply(driver, sels)
+    except Exception:
+        return False
+    if clicou:
+        _ilog("cookies: banner OneTrust dispensado")
+        await asyncio.sleep(1)
+    return clicou
+
+
 async def _login_email_codigo(driver) -> None:
     """
     Executa o começo do login por e-mail + código do Indeed (o resto — digitar o
@@ -450,20 +508,24 @@ async def _login_email_codigo(driver) -> None:
     """
     email = _get_indeed_email()
 
-    # 1. E-mail.
+    # 0. Dispensa o banner de cookies (cobre o rodapé / o link de código).
+    await _aceitar_cookies(driver)
+
+    # 1. E-mail. O campo do Indeed passport tem id DINÂMICO (React useId, ex.
+    # `ifl-InputFormField-:passport-ssr-Reqktala:`) → NÃO dá pra ancorar num id fixo
+    # (o antigo `#ifl-InputFormField-ihl` nunca casava e ainda gastava 15s no
+    # WebDriverWait). Casa pelo que é ESTÁVEL: name="__email" primeiro, depois prefixo
+    # do id e type=email. Uma chamada só (digitar_robusto tenta as partes em ordem e
+    # para na 1ª presente — a estável casa na hora, sem os 15s à toa).
     if email:
-        preenchido = False
-        for sel in ("#ifl-InputFormField-ihl", "input[type='email']",
-                    "input[name='__email']", "input[id*='email']",
-                    "input[autocomplete='username']", "input[name='email']"):
-            try:
-                if await digitar_robusto(sel, email):
-                    print("[INDEED] E-mail preenchido no login")
-                    preenchido = True
-                    break
-            except Exception:
-                continue
-        if not preenchido:
+        sel_email = (
+            "input[name='__email'], input[id^='ifl-InputFormField'], "
+            "input[type='email'], input[autocomplete='email'], "
+            "input[id*='email'], input[autocomplete='username'], input[name='email']"
+        )
+        if await digitar_robusto(sel_email, email):
+            print("[INDEED] E-mail preenchido no login")
+        else:
             print("[INDEED] Campo de e-mail não encontrado — seguindo para manual")
             return
 
@@ -481,27 +543,44 @@ async def _login_email_codigo(driver) -> None:
         return
     await asyncio.sleep(3)
 
-    # Bloqueio pode aparecer entre passos.
-    try:
-        cur = await _run_in_thread(lambda: driver.current_url)
-        ttl = await get_title()
-        html = await _run_in_thread(lambda: driver.page_source)
-    except Exception:
-        cur, ttl, html = "", "", ""
-    if _pagina_bloqueada(cur, ttl, html):
-        return  # deixa a intervenção manual assumir
-
-    # 3. Acessar com um código.
+    # 3. "Acessar com um código".
+    # Depois do e-mail Gmail, o Indeed mostra a tela "É bom ver você de novo" que
+    # FORÇA o Google SSO ("Continuar com o Google") e põe o link de código como
+    # fallback NO RODAPÉ (id ESTÁVEL `auth-page-google-otp-fallback`, um <a>). Esse
+    # link renderiza DEPOIS do widget do Google, então o clique único logo após o
+    # Continuar não pegava — daí "não clica no acessar com um código". Fix: casa pelo
+    # id estável primeiro e faz POLL (~10s) até o link aparecer. NUNCA clica no botão
+    # do Google (não está nos seletores).
     _CODIGO = [
-        'button:has-text("Acessar com um código")',
-        'button:has-text("Entrar com um código")',
-        'button:has-text("Enviar um código")',
+        '#auth-page-google-otp-fallback',
+        'a#auth-page-google-otp-fallback',
+        '[data-tn-element="auth-page-google-password-fallback"]',
+        '[data-tn-element="auth-page-otp-fallback"]',
         'a:has-text("Acessar com um código")',
-        'button:has-text("Sign in with a login code")',
-        'button:has-text("login code")',
+        'button:has-text("Acessar com um código")',
+        'a:has-text("Entrar com um código")',
+        'button:has-text("Entrar com um código")',
+        'a:has-text("Enviar um código")',
+        'a:has-text("Sign in with a login code")',
+        'a:has-text("login code")',
         '[data-testid*="passwordless"]',
     ]
-    _, clicou_cod = await _clicar_botao_smartapply(driver, _CODIGO)
+    await _aceitar_cookies(driver)  # banner pode reaparecer sobre o link nesta tela
+    clicou_cod = False
+    for _tent in range(12):  # ~10s: o link OTP renderiza depois do widget do Google
+        _, clicou_cod = await _clicar_botao_smartapply(driver, _CODIGO)
+        if clicou_cod:
+            break
+        # Bloqueio (Cloudflare/verificação) pode surgir no meio → cai no manual.
+        try:
+            cur = await _run_in_thread(lambda: driver.current_url)
+            ttl = await get_title()
+            html = await _run_in_thread(lambda: driver.page_source)
+        except Exception:
+            cur, ttl, html = "", "", ""
+        if _pagina_bloqueada(cur, ttl, html):
+            return  # deixa a intervenção manual assumir
+        await asyncio.sleep(0.8)
     if clicou_cod:
         print("[INDEED] Clicou 'Acessar com um código' — aguardando código do e-mail")
         await asyncio.sleep(2)
@@ -532,6 +611,9 @@ async def _garantir_login() -> bool:
         html = await _run_in_thread(lambda: driver.page_source)
     except Exception:
         cur, ttl, html = "", "", ""
+
+    # Dispensa o banner de cookies (perfil novo) — cobre rodapé/botões e atrapalha.
+    await _aceitar_cookies(driver)
 
     # Dispensa a tela de passkey ("Sign in faster on this device" → botão Continue)
     # ANTES de decidir login/bloqueio. CRÍTICO p/ não travar: essa tela SÓ aparece
@@ -576,13 +658,28 @@ async def _garantir_login() -> bool:
     # Fluxo escolhido: continuar pelo e-mail e acessar com um código.
     await _login_email_codigo(driver)
 
-    # O código chega no e-mail e é digitado à mão: pausa em intervenção manual.
+    # O código chega no e-mail e é digitado à mão: pausa em intervenção manual — MAS
+    # com auto-retomada: assim que o login concluir (cair em settings/account / página
+    # logada), a automação SEGUE SOZINHA pra busca, sem exigir clique no dashboard.
+    # Era isso que faltava: parava em settings/account e "não fazia nada".
+    async def _login_ja_concluido() -> bool:
+        try:
+            c = await _run_in_thread(lambda: driver.current_url)
+            t = await get_title()
+            h = await _run_in_thread(lambda: driver.page_source)
+        except Exception:
+            return False
+        # Só considera concluído quando SAIU da tela de login/código (/auth,
+        # /account/login) e a página é claramente de sessão ativa.
+        return (not _pagina_bloqueada(c, t, h)) and _esta_logado(c, t, h)
+
     await notify_browser_step(
         "indeed_login", "codigo",
-        "📧 Enviamos/solicitamos um código de acesso. Digite o código do seu e-mail "
-        "no browser e clique ▶️ Continuar no dashboard."
+        "📧 Digite o código do seu e-mail no navegador. Assim que o login concluir, "
+        "eu sigo sozinho pra busca (não precisa clicar em nada)."
     )
-    resolvido = await _aguardar_resolucao_manual(driver, "código de acesso do Indeed")
+    resolvido = await _aguardar_resolucao_manual(
+        driver, "código de acesso do Indeed", auto_ok=_login_ja_concluido)
     if not resolvido:
         return False
 
@@ -753,8 +850,9 @@ async def extrair_vagas_da_busca(perfil: dict, max_vagas: int = 20, query: str =
             _ilog(f"deep-link não caiu em /jobs (='{(cur or '')[:50]}') — tentando via home")
             await _buscar_via_home(driver, query)
 
-    # A passkey pode reaparecer no caminho até a lista (ela intercepta a navegação
-    # para /jobs). Dispensa antes de extrair, senão cobre os cards → 0 vagas.
+    # Antes de extrair: dispensa cookies (banner OneTrust cobre o rodapé dos cards em
+    # perfil novo) e a passkey (intercepta a navegação para /jobs). Sem isso → 0 vagas.
+    await _aceitar_cookies(driver)
     await _passar_passkey(driver)
     await notify_browser_step("indeed_extracao", "iniciando", "Extraindo vagas do Indeed")
     cards = await _extrair_cards_vaga(max_vagas)
@@ -837,7 +935,17 @@ async def _extrair_cards_vaga(max_vagas: int = 20) -> list[dict]:
                 except Exception:
                     pass
 
-                if not url and vaga_id:
+                # PREFERE a URL canônica viewjob?jk= — a href do card é um link de
+                # RASTREIO /rc/clk?jk=...&bb=...&xkcb=... que, navegado DIRETO, cai no
+                # "Security Check" do Indeed (os tokens bb/xkcb são de clique único na
+                # lista). Era ISSO que quebrava o "card por card": aplicar() abria o
+                # /rc/clk, batia no Security Check e nunca achava o botão de aplicar.
+                # (Validado ao vivo: /rc/clk → "Security Check"; /viewjob?jk= → vaga OK.)
+                if not vaga_id and url:
+                    m = re.search(r"[?&]jk=([0-9A-Za-z]+)", url)
+                    if m:
+                        vaga_id = m.group(1)
+                if vaga_id:
                     url = f"{_BASE}/viewjob?jk={vaga_id}"
                 if not url or url in seen:
                     continue
@@ -849,12 +957,16 @@ async def _extrair_cards_vaga(max_vagas: int = 20) -> list[dict]:
                 except Exception:
                     empresa = ""
 
-                # Elegibilidade Indeed Apply: label "Candidatura simplificada"/"Easily apply".
+                # Elegibilidade Indeed Apply. O rótulo PT-BR atual no card é
+                # "Candidate-se facilmente" (não "Candidatura simplificada") — sem ele
+                # TODA vaga vinha easy_apply=False e só o fallback (elegiveis=todas)
+                # salvava. Casa todas as variantes conhecidas.
                 easy = False
                 try:
                     card_html = (card.get_attribute("innerHTML") or "").lower()
                     easy = ("indeedapply" in card_html or "candidatura simplificada" in card_html
-                            or "easily apply" in card_html or "ialbl" in card_html)
+                            or "candidate-se facilmente" in card_html or "candidatar-se facilmente" in card_html
+                            or "easily apply" in card_html or "eas:apply" in card_html or "ialbl" in card_html)
                 except Exception:
                     easy = False
 
@@ -1518,6 +1630,130 @@ async def _botao_presente(driver, seletores: list) -> bool:
         return False
 
 
+async def _tentar_recaptcha_checkbox(driver, timeout: float = 8.0) -> str:
+    """Tenta resolver o reCAPTCHA v2 do envio clicando SÓ o checkbox 'não sou um
+    robô'. Em ambiente confiável (Chrome stealth, navigator.webdriver=false, IP
+    residencial, perfil persistente) ele costuma passar sem a grade de imagens — que
+    o bot NÃO resolve (aí volta pro humano). NÃO usa solver externo/pydoll (pydoll
+    também não resolve v2-imagem). Retorna:
+      'sem_captcha' — nenhum reCAPTCHA v2 na tela → pode enviar direto
+      'resolvido'   — checkbox marcado/validado → pode enviar
+      'desafio'     — subiu a grade de imagens → precisa do humano
+      'indefinido'  — clicou mas não confirmou → trata como precisa do humano
+    """
+    import time as _time
+
+    def _anchor_iframe():
+        # iframe do checkbox (api2/anchor ou enterprise/anchor; title='reCAPTCHA').
+        for fr in driver.find_elements(By.CSS_SELECTOR, "iframe"):
+            try:
+                src = (fr.get_attribute("src") or "").lower()
+                title = (fr.get_attribute("title") or "").lower()
+            except Exception:
+                continue
+            if ("recaptcha" in src and "anchor" in src) or title == "recaptcha":
+                return fr
+        return None
+
+    def _checked():
+        fr = _anchor_iframe()
+        if not fr:
+            return False
+        try:
+            driver.switch_to.frame(fr)
+            return bool(driver.find_elements(
+                By.CSS_SELECTOR,
+                "#recaptcha-anchor[aria-checked='true'], .recaptcha-checkbox-checked"))
+        except Exception:
+            return False
+        finally:
+            try:
+                driver.switch_to.default_content()
+            except Exception:
+                pass
+
+    def _click_checkbox():
+        fr = _anchor_iframe()
+        if not fr:
+            return False
+        try:
+            driver.switch_to.frame(fr)
+            alvo = None
+            for sel in ("#recaptcha-anchor", ".recaptcha-checkbox-border",
+                        "div.recaptcha-checkbox"):
+                els = driver.find_elements(By.CSS_SELECTOR, sel)
+                if els:
+                    alvo = els[0]
+                    break
+            if not alvo:
+                return False
+            try:
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", alvo)
+                alvo.click()
+            except Exception:
+                try:
+                    driver.execute_script("arguments[0].click();", alvo)
+                except Exception:
+                    return False
+            return True
+        except Exception:
+            return False
+        finally:
+            try:
+                driver.switch_to.default_content()
+            except Exception:
+                pass
+
+    def _desafio_visivel():
+        # iframe da grade de imagens (bframe) visível = escalou pro desafio.
+        for fr in driver.find_elements(By.CSS_SELECTOR, "iframe"):
+            try:
+                src = (fr.get_attribute("src") or "").lower()
+                if "recaptcha" in src and "bframe" in src:
+                    if fr.is_displayed() and (fr.size or {}).get("height", 0) > 100:
+                        return True
+            except Exception:
+                continue
+        return False
+
+    # 1) Há reCAPTCHA v2 na tela? Dá uma janela curta pro widget renderizar.
+    achou = False
+    for _ in range(5):  # ~2s
+        try:
+            if await _run_in_thread(lambda: _anchor_iframe() is not None):
+                achou = True
+                break
+        except Exception:
+            pass
+        await asyncio.sleep(0.4)
+    if not achou:
+        return "sem_captcha"
+
+    # 2) Já validado? (ex.: passou num step anterior.)
+    try:
+        if await _run_in_thread(_checked):
+            return "resolvido"
+    except Exception:
+        pass
+
+    # 3) Clica o checkbox e observa o desfecho.
+    await _run_in_thread(_click_checkbox)
+    inicio = _time.monotonic()
+    while _time.monotonic() - inicio < timeout:
+        await asyncio.sleep(0.6)
+        try:
+            if await _run_in_thread(_checked):
+                _ilog("recaptcha v2: checkbox passou (sem desafio de imagem)")
+                return "resolvido"
+            if await _run_in_thread(_desafio_visivel):
+                _ilog("recaptcha v2: subiu desafio de IMAGEM → humano")
+                return "desafio"
+        except Exception:
+            pass
+    _ilog("recaptcha v2: checkbox clicado mas sem confirmação → humano")
+    return "indefinido"
+
+
 async def _processar_formulario_smartapply(driver, perfil: dict, curriculo_path: str,
                                            vaga_url: str, resumo_curriculo: str,
                                            idioma: str = "pt", vaga_titulo: str = "") -> dict:
@@ -1610,27 +1846,33 @@ async def _processar_formulario_smartapply(driver, perfil: dict, curriculo_path:
             sig_antes = ""
 
         # Enviar > Revisar > Continuar.
-        # Se estamos na tela de revisão/preview (botão de envio presente) e a pausa
-        # antes do envio está ligada, damos o controle ao usuário para resolver o
-        # reCAPTCHA — só depois clicamos "Enviar sua candidatura".
+        # Na tela de revisão/preview (botão de envio presente): antes de pausar pro
+        # humano, TENTA resolver o reCAPTCHA v2 clicando só o checkbox (no Chrome
+        # stealth costuma passar sem a grade de imagens). Se passar — ou não houver
+        # captcha — envia automaticamente; se subir o desafio de IMAGEM (que o bot
+        # não resolve), aí sim entrega o controle ao humano.
         if _pausar_antes_envio() and await _botao_presente(driver, _SUBMIT_DETECTAR):
-            await notify_browser_step(
-                f"indeed_step_{step}", "manual",
-                "🔒 Revise a candidatura e resolva o reCAPTCHA no browser, depois clique "
-                "🔄 Retomar Auto no dashboard para eu enviar."
-            )
-            if not await _aguardar_resolucao_manual(driver, "reCAPTCHA antes do envio"):
-                b64 = await screenshot_base64()
-                return {"sucesso": False, "motivo_falha": "captcha",
-                        "mensagem": f"Envio não confirmado. Aplique manualmente: {vaga_url}",
-                        "screenshot": b64[:100] if b64 else ""}
-            # Usuário pode ter enviado manualmente durante a pausa.
-            if await _candidatura_enviada(driver):
-                b64 = await screenshot_base64()
-                await notify_browser_step(f"indeed_step_{step}", "sucesso", "Candidatura enviada!")
-                return {"sucesso": True, "perguntas_respondidas": perguntas_feitas,
-                        "mensagem": "Candidatura enviada com sucesso via Indeed!",
-                        "screenshot": b64[:100] if b64 else ""}
+            estado_captcha = await _tentar_recaptcha_checkbox(driver)
+            if estado_captcha not in ("resolvido", "sem_captcha"):
+                await notify_browser_step(
+                    f"indeed_step_{step}", "manual",
+                    "🔒 reCAPTCHA pediu desafio de imagem — resolva no browser e clique "
+                    "🔄 Retomar Auto no dashboard para eu enviar."
+                )
+                if not await _aguardar_resolucao_manual(driver, "reCAPTCHA (desafio de imagem) antes do envio"):
+                    b64 = await screenshot_base64()
+                    return {"sucesso": False, "motivo_falha": "captcha",
+                            "mensagem": f"Envio não confirmado. Aplique manualmente: {vaga_url}",
+                            "screenshot": b64[:100] if b64 else ""}
+                # Usuário pode ter enviado manualmente durante a pausa.
+                if await _candidatura_enviada(driver):
+                    b64 = await screenshot_base64()
+                    await notify_browser_step(f"indeed_step_{step}", "sucesso", "Candidatura enviada!")
+                    return {"sucesso": True, "perguntas_respondidas": perguntas_feitas,
+                            "mensagem": "Candidatura enviada com sucesso via Indeed!",
+                            "screenshot": b64[:100] if b64 else ""}
+            else:
+                _ilog(f"recaptcha antes do envio: {estado_captcha} → enviando automaticamente")
 
         btn_text, clicou = await _clicar_botao_smartapply(driver, _BTN_ENVIAR)
         is_submit = clicou
@@ -1735,8 +1977,9 @@ async def aplicar(vaga_url: str, perfil: dict, curriculo_path: str = "", user_id
         await notify_browser_step("selenium_indeed", "navegando", "Abrindo vaga")
         await navegar(vaga_url)
         await asyncio.sleep(3)
-        # Intersticial de passkey pode interceptar a abertura da vaga também.
+        # Passkey e banner de cookies podem interceptar/cobrir o botão de aplicar.
         await _passar_passkey(driver)
+        await _aceitar_cookies(driver)
 
         cur = await _run_in_thread(lambda: driver.current_url)
         ttl = await get_title()
