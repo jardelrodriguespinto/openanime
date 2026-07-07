@@ -1,5 +1,6 @@
 """
-Wrapper Selenium para automacao de browsers — funciona com Firefox snap.
+Wrapper Selenium para automacao de browsers — Chrome por padrão (BROWSER=chrome),
+Firefox snap como hedge (BROWSER=firefox).
 API async para compatibilidade com o codigo existente.
 """
 
@@ -62,6 +63,33 @@ FIREFOX_UNDETECTED_DIR = os.getenv(
     "FIREFOX_UNDETECTED_DIR",
     str(Path(__file__).parent.parent / "data" / "firefox_undetected"),
 )
+
+# ── Seleção de browser ────────────────────────────────────────────────────────
+# Projeto MIGRADO PARA CHROME (default). O Firefox continua alcançável como hedge:
+# BROWSER=firefox reativa o caminho antigo (com o patch undetected do libxul). O
+# Chrome NÃO precisa da máquina "undetected": navigator.webdriver=false via flags de
+# stealth já passa o Cloudflare Turnstile do Indeed (validado — a busca renderiza os
+# cards sem desafio). É, inclusive, menos detectável que o Firefox+geckodriver.
+BROWSER = os.getenv("BROWSER", "chrome").strip().lower()
+
+# Chrome/Chromium: binário e chromedriver. CHROMEDRIVER_PATH vazio → o Selenium
+# Manager (selenium>=4.6) baixa/casa o chromedriver da versão instalada (testado com
+# Chrome 150, sem binário no repo). CHROME_BINARY vazio → Selenium acha o padrão.
+CHROME_BINARY = os.getenv("CHROME_BINARY", "") or (
+    shutil.which("google-chrome") or shutil.which("google-chrome-stable")
+    or shutil.which("chromium") or shutil.which("chromium-browser") or ""
+)
+CHROMEDRIVER_PATH = os.getenv("CHROMEDRIVER_PATH", "")
+CHROME_PROFILE_DIR = os.getenv(
+    "CHROME_PROFILE_DIR",
+    str(Path(__file__).parent.parent / "data" / "chrome_profile"),
+)
+
+# Persistência de perfil (cookies/sessão entre runs) — vale p/ Chrome e Firefox.
+# Aceita PERSIST_PROFILE e cai em FIREFOX_PERSIST_PROFILE (compat com .env antigo).
+PERSIST_PROFILE = os.getenv(
+    "PERSIST_PROFILE", os.getenv("FIREFOX_PERSIST_PROFILE", "true")
+).strip().lower() == "true"
 
 _patch_lock = threading.Lock()
 _patched_binary_cache: str | None = None
@@ -149,12 +177,13 @@ def _matar_orfaos_do_perfil(profile_dir: str) -> None:
     status 0' (perfil em uso) — o clássico "abre e fecha". Reiniciar o
     bot.dashboard deixa o Firefox lançado pelo Selenium órfão, segurando o perfil.
 
-    Casa pelo CAMINHO do perfil no cmdline (ex.: 'firefox_profile/indeed'), que é
-    único por plataforma → NUNCA mata o Firefox pessoal do usuário (que não usa
-    '-profile data/firefox_profile/*') nem o de outra plataforma."""
+    Casa pelo CAMINHO do perfil no cmdline (Chrome: '--user-data-dir=.../chrome_profile/indeed';
+    Firefox: '-profile .../firefox_profile/indeed'), único por plataforma → NUNCA mata
+    o browser pessoal do usuário (que usa ~/.config/... e não este caminho)."""
     import signal
     import subprocess
-    alvo = f"firefox_profile/{Path(profile_dir).name}"
+    subdir = "chrome_profile" if BROWSER == "chrome" else "firefox_profile"
+    alvo = f"{subdir}/{Path(profile_dir).name}"
     try:
         out = subprocess.run(["pgrep", "-f", alvo], capture_output=True, text=True, timeout=5)
     except Exception as e:
@@ -169,7 +198,7 @@ def _matar_orfaos_do_perfil(profile_dir: str) -> None:
             continue
         try:
             os.kill(pid, signal.SIGKILL)
-            logger.info("selenium_browser: matou Firefox órfão pid=%s do perfil '%s'", pid, alvo)
+            logger.info("selenium_browser: matou navegador órfão pid=%s do perfil '%s'", pid, alvo)
         except ProcessLookupError:
             pass
         except Exception as e:
@@ -180,15 +209,19 @@ def _preparar_profile_dir() -> str | None:
     """Garante o diretório do perfil (SEPARADO por plataforma — dois Firefox não
     podem compartilhar o mesmo perfil), mata Firefox órfãos que ainda segurem esse
     perfil e remove locks órfãos de um crash anterior. Só mexe na PRÓPRIA plataforma."""
-    if not FIREFOX_PERSIST_PROFILE:
+    if not PERSIST_PROFILE:
         return None
     try:
-        p = Path(FIREFOX_PROFILE_DIR) / get_platform()
+        base = CHROME_PROFILE_DIR if BROWSER == "chrome" else FIREFOX_PROFILE_DIR
+        p = Path(base) / get_platform()
         p.mkdir(parents=True, exist_ok=True)
-        # 1) Mata órfãos que seguram este perfil (senão o launch sai status 0).
+        # 1) Mata órfãos que seguram este perfil (senão o launch sai status 0 /
+        #    Chrome reclama "profile appears to be in use").
         _matar_orfaos_do_perfil(str(p))
-        # 2) Remove locks remanescentes.
-        for lock in ("lock", ".parentlock", "parent.lock"):
+        # 2) Remove locks remanescentes (nomes diferem por browser).
+        locks = (("SingletonLock", "SingletonSocket", "SingletonCookie")
+                 if BROWSER == "chrome" else ("lock", ".parentlock", "parent.lock"))
+        for lock in locks:
             f = p / lock
             try:
                 if f.exists() or f.is_symlink():
@@ -202,6 +235,70 @@ def _preparar_profile_dir() -> str | None:
 
 
 def _get_driver():
+    """Cria a instância do browser conforme BROWSER (chrome por padrão; firefox como
+    hedge, BROWSER=firefox). Perfil persistente por plataforma nos dois casos."""
+    if BROWSER == "firefox":
+        return _get_driver_firefox()
+    return _get_driver_chrome()
+
+
+def _get_driver_chrome():
+    """Chrome + Selenium, com stealth e perfil persistente. O chromedriver vem do
+    Selenium Manager (CHROMEDRIVER_PATH força um caminho). Stealth
+    (navigator.webdriver=false via --disable-blink-features=AutomationControlled +
+    excludeSwitches) passa o Cloudflare Turnstile do Indeed SEM a máquina 'undetected'
+    de libxul que o Firefox exigia — validado (busca renderiza os cards, sem desafio)."""
+    from selenium.webdriver.chrome.service import Service as ChromeService
+    from selenium.webdriver.chrome.options import Options as ChromeOptions
+
+    options = ChromeOptions()
+    if CHROME_BINARY:
+        options.binary_location = CHROME_BINARY
+    # Stealth (espelha automation/browser.py::_STEALTH_ARGS) — o essencial p/
+    # navigator.webdriver=false e p/ sumir o banner "controlado por software".
+    for arg in (
+        "--disable-blink-features=AutomationControlled",
+        "--disable-infobars", "--disable-popup-blocking",
+        "--no-first-run", "--no-default-browser-check", "--lang=pt-BR,pt",
+    ):
+        options.add_argument(arg)
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+
+    if PLAYWRIGHT_HEADLESS:
+        for arg in ("--headless=new", "--no-sandbox", "--disable-dev-shm-usage",
+                    "--disable-gpu", "--window-size=1920,1080"):
+            options.add_argument(arg)
+    else:
+        options.add_argument("--start-maximized")
+
+    profile_dir = _preparar_profile_dir()
+    if profile_dir:
+        # user-data-dir persiste cookies/sessão (o usuário loga uma vez).
+        options.add_argument(f"--user-data-dir={profile_dir}")
+        logger.info("selenium_browser: usando perfil persistente Chrome %s", profile_dir)
+
+    service = ChromeService(CHROMEDRIVER_PATH) if CHROMEDRIVER_PATH else ChromeService()
+    driver = webdriver.Chrome(service=service, options=options)
+    # Reforço de stealth aplicado a TODA navegação nova (getter de navigator.webdriver).
+    try:
+        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+            "source": "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});",
+        })
+    except Exception:
+        pass
+    try:
+        if PLAYWRIGHT_HEADLESS:
+            driver.set_window_size(1920, 1080)
+        else:
+            driver.maximize_window()
+    except Exception:
+        pass
+    logger.info("selenium_browser: Chrome iniciado (headless=%s)", PLAYWRIGHT_HEADLESS)
+    return driver
+
+
+def _get_driver_firefox():
     """Cria instancia do Firefox com Selenium (perfil persistente por padrão)."""
     options = Options()
     binario = FIREFOX_BINARY
@@ -289,7 +386,7 @@ async def _driver_session_valida() -> bool:
         return False
 
 
-async def nova_pagina(url: str = "about:blank", reutilizar: bool = False) -> webdriver.Firefox:
+async def nova_pagina(url: str = "about:blank", reutilizar: bool = False) -> "webdriver.remote.webdriver.WebDriver":
     """Abre uma nova aba/guia no Firefox e navega para a URL.
     Se reutilizar=True e já existe um driver com sessão ativa, apenas navega para a URL na mesma aba.
     """
@@ -329,7 +426,7 @@ async def nova_pagina(url: str = "about:blank", reutilizar: bool = False) -> web
     return driver
 
 
-async def get_driver() -> webdriver.Firefox | None:
+async def get_driver() -> "webdriver.remote.webdriver.WebDriver | None":
     """Retorna o driver da plataforma atual (run_context) ou None."""
     return _drivers.get(get_platform())
 
@@ -664,7 +761,7 @@ async def fechar():
         except (InvalidSessionIdException, Exception):
             pass
         _drivers.pop(get_platform(), None)
-        logger.info("selenium_browser: Firefox fechado (%s)", get_platform())
+        logger.info("selenium_browser: navegador fechado (%s)", get_platform())
 
 
 async def _ensure_driver_alive():

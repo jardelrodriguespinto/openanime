@@ -3,7 +3,7 @@ Contexto de execução por PLATAFORMA (contextvar).
 
 Permite que LinkedIn e Indeed rodem em paralelo sem se atropelar: cada task de
 automação define sua plataforma no topo da corrotina, e todo o estado por
-plataforma (driver Selenium, perfil Firefox, pausa/intervenção, step) é resolvido
+plataforma (driver Selenium, perfil do navegador, pausa/intervenção, step) é resolvido
 por esta variável de contexto — que o asyncio propaga automaticamente para tudo
 que a task aguarda.
 

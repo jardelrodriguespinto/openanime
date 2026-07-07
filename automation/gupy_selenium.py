@@ -1,5 +1,5 @@
 """
-Automação de candidatura no Gupy (portal.gupy.io) via Selenium/Firefox.
+Automação de candidatura no Gupy (portal.gupy.io) via Selenium/Chrome.
 
 Criada nos moldes do GeekHunter (ver automation/geekhunter_selenium.py): login por
 e-mail+senha do .env, busca por palavra-chave do dashboard, e aplica card a card —

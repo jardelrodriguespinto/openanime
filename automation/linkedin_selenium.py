@@ -1,5 +1,5 @@
 """
-Candidatura via LinkedIn Easy Apply usando Selenium + Firefox visível.
+Candidatura via LinkedIn Easy Apply usando Selenium + Chrome visível.
 Substitui Playwright que não funciona no Ubuntu 26.04.
 """
 
@@ -101,7 +101,7 @@ async def _aguardar_resolucao_captcha(driver, origem: str = "login") -> bool:
     await set_intervention_state("intervention_type", "manual")
     await notify_browser_step(
         "selenium_linkedin", "captcha",
-        f"⚠️ CAPTCHA/verificação detectado ({origem})! Resolva no browser Firefox e clique ▶️ Continuar no dashboard."
+        f"⚠️ CAPTCHA/verificação detectado ({origem})! Resolva no navegador (Chrome) e clique ▶️ Continuar no dashboard."
     )
     print(f"[LINKEDIN] CAPTCHA detectado em '{origem}' — aguardando resolução manual...")
 

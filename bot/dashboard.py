@@ -788,8 +788,8 @@ VUE_DASHBOARD = """
             },
             async iniciarTodas() {
                 // Dispara as 3 plataformas em paralelo. Cada endpoint agenda uma task
-                // de fundo (background) no backend e retorna na hora — os 3 Firefox
-                // sobem juntos, cada um no seu perfil (firefox_profile/<plataforma>).
+                // de fundo (background) no backend e retorna na hora — os 3 navegadores
+                // sobem juntos, cada um no seu perfil (chrome_profile/<plataforma>).
                 this.showNotif('🚀 Iniciando LinkedIn + Indeed + GeekHunter em paralelo...', 'info');
                 await Promise.allSettled([
                     this.aplicarVagasVisiveisLinkedin(),
@@ -2101,7 +2101,7 @@ async def get_browser_screenshot(platform: str = ""):
     """Retorna screenshot base64 do browser da plataforma selecionada (Selenium) ou
     da pagina Playwright ativa."""
     # Seleciona o driver da plataforma pedida (contextvar) — cada plataforma tem
-    # seu próprio Firefox no registro de drivers.
+    # seu próprio navegador no registro de drivers.
     try:
         from automation.run_context import set_platform
         set_platform(platform or "linkedin")

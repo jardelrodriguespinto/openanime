@@ -1,5 +1,5 @@
 """
-Candidatura via Indeed usando Selenium + Firefox visível.
+Candidatura via Indeed usando Selenium + Chrome visível.
 
 Nos mesmos moldes da automação do LinkedIn (automation/linkedin_selenium.py),
 mas adaptada para o Indeed:
@@ -253,7 +253,7 @@ async def _aguardar_resolucao_manual(driver, origem: str = "login") -> bool:
     await set_intervention_state("intervention_type", "manual")
     await notify_browser_step(
         "selenium_indeed", "manual",
-        f"⚠️ Ação manual necessária ({origem})! Resolva no browser Firefox "
+        f"⚠️ Ação manual necessária ({origem})! Resolva no navegador (Chrome) "
         f"(login / verificação) e clique ▶️ Continuar no dashboard."
     )
     print(f"[INDEED] Intervenção manual em '{origem}' — aguardando resolução...")

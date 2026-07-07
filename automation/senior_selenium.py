@@ -1,6 +1,6 @@
 """
 Automação de candidatura no Portal de Talentos da Senior
-(https://www.portaldetalentos.senior.com.br) via Selenium/Firefox.
+(https://www.portaldetalentos.senior.com.br) via Selenium/Chrome.
 
 Criada nos moldes do Gupy (ver automation/gupy_selenium.py): login por e-mail+senha
 do .env, busca por palavra-chave do dashboard e aplica card a card, rodando o WIZARD

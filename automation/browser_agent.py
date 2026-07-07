@@ -398,11 +398,13 @@ async def aplicar_vaga_browser_use(vaga_url: str, perfil: dict) -> dict:
         import subprocess
         import shutil
 
-        firefox_bin = shutil.which("firefox") or "/snap/firefox/8568/usr/lib/firefox/firefox"
-        print(f"[BROWSER_AGENT] Abrindo browser manual: {firefox_bin} -> {vaga_url}")
+        browser_bin = (shutil.which("google-chrome") or shutil.which("google-chrome-stable")
+                       or shutil.which("chromium") or shutil.which("chromium-browser")
+                       or shutil.which("firefox") or "/usr/bin/google-chrome")
+        print(f"[BROWSER_AGENT] Abrindo browser manual: {browser_bin} -> {vaga_url}")
         try:
             subprocess.Popen(
-                [firefox_bin, "--new-window", vaga_url],
+                [browser_bin, "--new-window", vaga_url],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 env={**os.environ, 'DISPLAY': os.environ.get('DISPLAY', ':0')}

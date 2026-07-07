@@ -156,21 +156,17 @@ async def get_browser():
                            PLAYWRIGHT_HEADLESS, bool(chrome_path), bool(firefox_path))
                 print(f"[BROWSER] PLAYWRIGHT_HEADLESS={PLAYWRIGHT_HEADLESS}, chrome={chrome_path}, firefox={firefox_path}")
                 
-                if firefox_path:
-                    logger.info(f"Usando Firefox do sistema: {firefox_path}")
-                    print(f"[BROWSER] Lancando Firefox: {firefox_path}")
-                    _browser = await _playwright_instance.firefox.launch(
-                        headless=PLAYWRIGHT_HEADLESS,
-                        executable_path=firefox_path,
-                    )
-                    logger.info("browser: Firefox lancado com sucesso!")
-                    print("[BROWSER] Firefox lancado com sucesso!")
-                elif chrome_path:
+                # Projeto migrado para Chrome: prefere Chrome/Chromium; Firefox só
+                # como hedge (BROWSER=firefox força o Firefox, se existir).
+                _pref = os.getenv("BROWSER", "chrome").strip().lower()
+                usar_firefox = _pref == "firefox" and bool(firefox_path)
+                if chrome_path and not usar_firefox:
                     logger.info(f"Usando Chrome do sistema: {chrome_path}")
+                    print(f"[BROWSER] Lancando Chrome: {chrome_path}")
                     chrome_args = [
-                        "--start-maximized",
                         "--no-first-run",
                         "--no-default-browser-check",
+                        "--disable-blink-features=AutomationControlled",
                     ]
                     if not PLAYWRIGHT_HEADLESS:
                         chrome_args.append("--start-maximized")
@@ -181,6 +177,15 @@ async def get_browser():
                     )
                     logger.info("browser: Chrome lancado com sucesso!")
                     print("[BROWSER] Chrome lancado com sucesso!")
+                elif firefox_path:
+                    logger.info(f"Usando Firefox do sistema: {firefox_path}")
+                    print(f"[BROWSER] Lancando Firefox: {firefox_path}")
+                    _browser = await _playwright_instance.firefox.launch(
+                        headless=PLAYWRIGHT_HEADLESS,
+                        executable_path=firefox_path,
+                    )
+                    logger.info("browser: Firefox lancado com sucesso!")
+                    print("[BROWSER] Firefox lancado com sucesso!")
                 else:
                     print("[BROWSER] Nenhum navegador do sistema encontrado!")
                     logger.error("browser: Nenhum navegador do sistema encontrado")

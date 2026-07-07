@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Runner: loga no LinkedIn, abre a página Easy Apply e aplica automaticamente
-nas vagas que aparecem, usando Selenium + Firefox (visible).
+nas vagas que aparecem, usando Selenium + Chrome (visible).
 
 Uso:
     python3 -m automation.linkedin_easy_apply_runner --max 10
@@ -65,7 +65,7 @@ async def main():
     from automation.linkedin_selenium import aplicar_vagas_visiveis_na_pagina
 
     print(f"\n[RUNNER] Iniciando auto-apply LinkedIn Easy Apply (até {args.max} vagas)")
-    print("[RUNNER] O browser Firefox vai abrir. NÃO mova o mouse ou use o teclado durante a automação.\n")
+    print("[RUNNER] O navegador (Chrome) vai abrir. NÃO mova o mouse ou use o teclado durante a automação.\n")
 
     resultado = await aplicar_vagas_visiveis_na_pagina(perfil, max_vagas=args.max)
 
