@@ -197,6 +197,7 @@
     // pergunta booleana com label → IA decide (não marca se responder "não").
     for (const cb of container.querySelectorAll("input[type='checkbox']")) await wrap(async () => {
       if (cb.checked) return;
+      if (cb.dataset.oaGupyMui) return; // opção de pergunta MUI do Gupy: tratada em gupy.js (grupo por h3, escolhe UMA) — mexer aqui marcaria opção errada/toggle
       const label = OA.labelFor(cb) || (cb.closest("label, .mat-checkbox, .chakra-checkbox, div")?.innerText || "").split("\n")[0] || "";
       const obrig = cb.required || cb.getAttribute("aria-required") === "true";
       if (ehConsent(label) || obrig || label.trim().length < 3) {
@@ -220,6 +221,7 @@
         || /\*|obrigat/i.test((cb.closest("fieldset, [role='group'], .form-group, li, div")?.innerText || "").slice(0, 140));
       const grupos = new Map();
       for (const cb of container.querySelectorAll("input[type='checkbox']")) {
+        if (cb.dataset.oaGupyMui) continue; // opção de pergunta MUI do Gupy → tratada em gupy.js
         if (ehConsent(OA.labelFor(cb) || "")) continue; // consentimento já tratado em (4)
         if (!obrigCb(cb)) continue;
         // agrupa por name; sem name, por fieldset/[role=group]; solto → grupo próprio

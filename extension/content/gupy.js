@@ -62,6 +62,52 @@
         if (opts.length) OA.click(opts[0]); else document.body.click();
       } catch (_) { try { document.body.click(); } catch (_) {} }
     }
+    // 3) "Perguntas criadas pela empresa": as opções são CHECKBOX MUI (input oculto dentro
+    //    de <label>), agrupadas por <h3> — inclusive Sim/Não. O preenchedor genérico trata
+    //    cada opção como um booleano isolado → marca opção errada/várias OU re-clica e
+    //    DESMARCA (toggle) → o grupo obrigatório fica vazio e o "Salvar e continuar" trava.
+    await responderPerguntasMui(root);
+  }
+
+  // Responde os grupos de opção (checkbox MUI) das perguntas da empresa: agrupa por <h3>,
+  // PULA os já respondidos (evita o toggle que destrava→trava), e escolhe UMA opção via IA.
+  // Marca todo input do grupo com data-oa-gupy-mui pra o forms.js NÃO tocar nessas opções.
+  async function responderPerguntasMui(root) {
+    let atual = null;
+    const grupos = [];
+    for (const el of root.querySelectorAll("h3, label")) {
+      const tag = el.tagName.toLowerCase();
+      if (tag === "h3") {
+        const texto = (el.innerText || "").trim().replace(/^\d+[\.\)]\s*/, "").replace(/\s*\*\s*$/, "").trim();
+        atual = texto ? { pergunta: texto, opcoes: [] } : null;
+        if (atual) grupos.push(atual);
+        continue;
+      }
+      if (!atual) continue;
+      const inp = el.querySelector("input[type='checkbox']");
+      const txt = (el.innerText || "").trim();
+      if (inp && txt && OA.isVisible(el)) atual.opcoes.push({ el, inp, txt });
+    }
+    for (const g of grupos) {
+      if (!g.opcoes.length) continue;
+      for (const o of g.opcoes) o.inp.dataset.oaGupyMui = "1"; // forms.js pula essas
+      if (g.opcoes.some((o) => o.inp.checked)) continue;        // já respondida
+      const opcoesTxt = g.opcoes.map((o) => o.txt);
+      let escolha = "";
+      try {
+        const r = await OA.bg({ type: "brain.answer", payload: { pergunta: g.pergunta, tipo: "SELECT", opcoes: opcoesTxt, idioma: "pt" } });
+        escolha = (r?.resposta || "").trim();
+      } catch (_) {}
+      const e = escolha.toLowerCase();
+      const alvo = g.opcoes.find((o) => o.txt.toLowerCase() === e)
+        || (e && g.opcoes.find((o) => o.txt.toLowerCase().includes(e) || e.includes(o.txt.toLowerCase())))
+        || g.opcoes[0];
+      // Clica o <label> (input oculto). Só age se ainda não marcado → nunca faz toggle.
+      if (!alvo.inp.checked) {
+        OA.click(alvo.el); await OA.sleep(200);
+        if (!alvo.inp.checked) { try { OA.setChecked(alvo.inp, true, root); } catch (_) {} }
+      }
+    }
   }
 
   // Reconhece que JÁ estamos DENTRO do fluxo de candidatura (não é a página inicial da
