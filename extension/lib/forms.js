@@ -238,7 +238,11 @@
     // "between 0 and 99" como max=99; fora do range é RECUSADO → descartaria a vaga).
     // Campo de moeda com default "R$ 0,00" conta como VAZIO (senão o salário nunca entra).
     const jaTem = (v) => v && v.trim() && !(/r\$/i.test(v) && /^[r$\s]*0([.,]0+)?$/i.test(v));
-    for (const inp of container.querySelectorAll("input[type='text'], input[type='number'], input:not([type]), textarea")) await wrap(async () => {
+    // Inclui DATA (date/month/datetime-local): o Gupy usa datas nas "Perguntas criadas
+    // pela empresa" (ex.: disponibilidade de início) e, sem cobrir esse tipo aqui, o
+    // campo obrigatório ficava VAZIO → "Salvar e continuar" nunca habilitava (o
+    // camposVazios do wizard JÁ contava esses inputs, mas o preenchedor os ignorava).
+    for (const inp of container.querySelectorAll("input[type='text'], input[type='number'], input[type='date'], input[type='month'], input[type='datetime-local'], input:not([type]), textarea")) await wrap(async () => {
       if (!naoOculto(inp) || jaTem(inp.value) || inp.readOnly) return;
       if (inp.getAttribute("role") === "combobox") return; // já tratado em (2)
       const label = OA.labelFor(inp) || "";
@@ -266,9 +270,18 @@
       // Sem rótulo MAS obrigatório → responde mesmo assim (a etapa de perguntas do Gupy às
       // vezes não expõe rótulo detectável e o campo é obrigatório).
       if (!label && !obrig) return;
-      const tipo = inp.type === "number" || /quantos|anos|years|how many|qtd/i.test(label) ? "NUMERO" : "TEXT";
+      const ehData = /^(date|month|datetime-local)$/.test(inp.type);
+      const tipo = ehData ? "DATA"
+        : (inp.type === "number" || /quantos|anos|years|how many|qtd/i.test(label) ? "NUMERO" : "TEXT");
       let resp = await responder(label || "Pergunta obrigatória da empresa", tipo, [], ctx);
       if (tipo === "NUMERO") resp = clampNum(inp, resp);
+      else if (ehData) {
+        // opcional sem resposta da IA → não força (não inventa data em campo opcional)
+        if (!obrig && !String(resp).trim()) return;
+        // <input type=date> RECUSA valor fora do formato ISO → ficaria vazio e travaria o
+        // botão. Normaliza (dd/mm/aaaa→aaaa-mm-dd; "imediata"/inválido → hoje).
+        resp = dataISO(inp, resp);
+      }
       // IA devolveu vazio (timeout/recusa) num campo obrigatório → fallback seguro (nunca trava).
       if (obrig && !String(resp).trim()) resp = tipo === "NUMERO" ? "0" : "Tenho interesse e disponibilidade para a vaga.";
       if (!String(resp).trim()) return; // opcional sem resposta → não força
@@ -284,6 +297,24 @@
     if (isFinite(mn) && n < mn) n = mn;
     if (isFinite(mx) && n > mx) n = mx;
     return String(Number.isInteger(n) ? n : Math.round(n));
+  }
+
+  // Normaliza a resposta da IA para o formato que o <input type=date/month/datetime-local>
+  // exige (senão o valor é RECUSADO e o campo fica vazio). Aceita ISO e dd/mm/aaaa;
+  // "imediata"/vazio/inválido → hoje (campo obrigatório nunca pode ficar em branco).
+  function dataISO(inp, resp) {
+    const pad = (n) => String(n).padStart(2, "0");
+    const s = String(resp || "").trim();
+    let d = null, m;
+    if ((m = s.match(/(\d{4})-(\d{1,2})-(\d{1,2})/))) d = new Date(+m[1], +m[2] - 1, +m[3]);
+    else if ((m = s.match(/(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})/))) {
+      let y = +m[3]; if (y < 100) y += 2000; d = new Date(y, +m[2] - 1, +m[1]);
+    }
+    if (!d || isNaN(d.getTime())) d = new Date(); // "imediata"/inválido → hoje
+    const ymd = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    if (inp.type === "month") return ymd.slice(0, 7);
+    if (inp.type === "datetime-local") return `${ymd}T09:00`;
+    return ymd;
   }
 
   OA.preencherCampos = preencherCampos;

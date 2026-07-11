@@ -68,11 +68,34 @@ export async function avaliarMatch(cfg, { descricao, titulo = "", empresa = "" }
 
 const ASSEMBLY_ENDPOINT = "https://api.assemblyai.com/v2";
 
-export async function transcreverAudio(cfg, { audioUrl }) {
+// base64 → Uint8Array (o content script baixa o áudio same-origem e manda os bytes em b64)
+function b64ParaBytes(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+export async function transcreverAudio(cfg, { audioUrl, audioB64 } = {}) {
   const apiKey = cfg?.assemblyia?.apiKey;
   if (!apiKey) return { erro: "AssemblyAI API key não configurada." };
-  if (!audioUrl) return { erro: "URL do áudio não fornecida." };
+  if (!audioUrl && !audioB64) return { erro: "Áudio não fornecido." };
   try {
+    // Se veio o áudio em bytes (baixado no frame do reCAPTCHA), faz UPLOAD na AssemblyAI e
+    // usa a upload_url resultante — igual ao assemblyia.js do Selenium. A URL enterprise/
+    // payload nem sempre é buscável remotamente pela AssemblyAI; o upload é o caminho robusto.
+    let fonteAudio = audioUrl;
+    if (audioB64) {
+      const up = await fetch(`${ASSEMBLY_ENDPOINT}/upload`, {
+        method: "POST",
+        headers: { Authorization: apiKey, "Content-Type": "application/octet-stream" },
+        body: b64ParaBytes(audioB64),
+      });
+      if (!up.ok) throw new Error(`Erro no upload do áudio: ${await up.text()}`);
+      const upJson = await up.json();
+      if (!upJson.upload_url) throw new Error("AssemblyAI não retornou upload_url");
+      fonteAudio = upJson.upload_url;
+    }
     const response = await fetch(`${ASSEMBLY_ENDPOINT}/transcript`, {
       method: "POST",
       headers: {
@@ -80,7 +103,7 @@ export async function transcreverAudio(cfg, { audioUrl }) {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        audio_url: audioUrl,
+        audio_url: fonteAudio,
         language_code: "pt",
         punctuate: true,
         format_text: true,
