@@ -27,20 +27,39 @@
     const assinatura = () => location.href + "|" + document.querySelectorAll("input,select,textarea,button").length + "|" + (document.body.innerText || "").length;
 
     // Diagnóstico: quais campos obrigatórios estão VAZIOS (é o que desabilita o botão).
+    // Espelha a heurística de "obrigatório" do forms.js: [required]/[aria-required] OU
+    // "*" no rótulo/wrapper — o Gupy marca as "Perguntas criadas pela empresa" só com "*"
+    // num <span>/<h3>, SEM atributo. Sem cobrir esse caso, o campo travava o botão mas NÃO
+    // aparecia aqui, e a mensagem "Falta preencher…" saía vazia (sem apontar o culpado).
+    // NEUTRO: só alimenta log/status, não altera preenchimento.
+    const marcadoObrig = (el) => el.required || el.getAttribute("aria-required") === "true"
+      || /\*/.test(OA.labelFor(el) || "")
+      || /\*|obrigat/i.test((el.closest("[class*='FormControl'], .form-group, li, fieldset, div")?.innerText || "").slice(0, 120));
+    const nomeCampo = (el) => (OA.headingLabel(el) || OA.labelFor(el) || el.name || el.tagName.toLowerCase()).slice(0, 45);
+    const vazioTexto = (el) => el.tagName.toLowerCase() === "select"
+      ? (!el.value || /selecione|escolha|^--/i.test(el.options?.[el.selectedIndex]?.text || ""))
+      : !(el.value || "").trim();
     const camposVazios = (container) => {
       const out = [];
-      for (const el of container.querySelectorAll("input[required],textarea[required],select[required],[aria-required='true']")) {
-        const tag = el.tagName.toLowerCase();
-        let vazio = false;
-        if (tag === "fieldset") vazio = ![...el.querySelectorAll("input[type='radio']")].some((r) => r.checked);
-        else if (tag === "select") vazio = !el.value || /selecione|escolha|^--/i.test(el.options?.[el.selectedIndex]?.text || "");
-        else if (tag === "input" || tag === "textarea") vazio = !(el.value || "").trim();
-        if (vazio) out.push((OA.labelFor(el) || el.name || tag).slice(0, 45));
+      // (a/b) text/number/textarea/select obrigatórios (por atributo OU por "*") vazios
+      for (const el of container.querySelectorAll("input:not([type='radio']):not([type='checkbox']):not([type='hidden']):not([type='file']):not([type='submit']):not([type='button']), textarea, select")) {
+        try { if (getComputedStyle(el).display === "none") continue; } catch (_) {}
+        if (marcadoObrig(el) && vazioTexto(el)) out.push(nomeCampo(el));
       }
-      // grupos de radio MUI (obrigatório via "*" no h3, sem [required]) sem nada marcado
-      const grp = new Map();
-      for (const r of container.querySelectorAll("input[type='radio']")) { const k = r.name || "?"; (grp.get(k) || grp.set(k, []).get(k)).push(r); }
-      for (const [, radios] of grp) if (!radios.some((r) => r.checked)) out.push((OA.headingLabel(radios[0]) || OA.labelFor(radios[0]) || "pergunta").slice(0, 45));
+      // (c) grupos de radio (obrigatório via "*" no h3, sem [required]) sem nada marcado
+      const rg = new Map();
+      for (const r of container.querySelectorAll("input[type='radio']")) { const k = r.name || "?"; (rg.get(k) || rg.set(k, []).get(k)).push(r); }
+      for (const [, radios] of rg) if (!radios.some((r) => r.checked)) out.push(nomeCampo(radios[0]));
+      // (d) grupos de checkbox OBRIGATÓRIOS ("selecione ao menos uma") sem nada marcado —
+      // o forms.js avalia cada checkbox isolado (IA sim/não) e pode não marcar NENHUM,
+      // deixando um grupo obrigatório insatisfeito → botão travado sem campo "vazio" óbvio.
+      const cg = new Map();
+      for (const c of container.querySelectorAll("input[type='checkbox']")) {
+        if (!marcadoObrig(c)) continue;
+        const k = c.name || (c.closest("fieldset, [role='group']")?.className || "cbgrp");
+        (cg.get(k) || cg.set(k, []).get(k)).push(c);
+      }
+      for (const [, cbs] of cg) if (!cbs.some((c) => c.checked)) out.push(nomeCampo(cbs[0]));
       return [...new Set(out)];
     };
     let travado = 0;
@@ -58,47 +77,13 @@
       await OA.sleep(400);
       const sigAntes = assinatura();
 
-      // FINALIZAR (envio). Seletor CSS (ex.: #dialog-give-up-personalization-step do
-      // Gupy = envio) ou texto — busca no documento INTEIRO (NÃO escopar num "dialog":
-      // `[id*='dialog']` casava o próprio botão give-up do Gupy e escondia o "Continuar").
-      const finalCss = finalizarSel.map((s) => document.querySelector(s)).find((b) => b && OA.isVisible(b));
-      const btnFinal = finalCss || OA.findByText(finalizar);
-      if (btnFinal && OA.isVisible(btnFinal) && habil(btnFinal)) {
-        if (pausarAntesEnvio) { onStatus("🔒 Revise e finalize/envie você mesmo (pausa antes do envio)."); return "pausa"; }
-        const forte = !!finalCss; // seletor CSS específico (ex.: give-up dialog) = envio real
-        log("step", step, "FINALIZAR:", (btnFinal.innerText || "").trim().slice(0, 30), "forte:", forte);
-        OA.click(btnFinal); await OA.sleep(1800);
-        // botão sc-* do Gupy ("Finalizar candidatura") ignora o .click() simples → se não
-        // mudou nada, reforça com clique FORTE (sequência pointer/mouse completa).
-        if (assinatura() === sigAntes) { log("step", step, "finalizar: clique normal não mudou → clique FORTE"); OA.clickForte(btnFinal); await OA.sleep(1600); }
-        for (const s of finalizarSel) { const d = document.querySelector(s); if (d && OA.isVisible(d)) { OA.click(d); await OA.sleep(600); OA.clickForte(d); await OA.sleep(1400); break; } }
-        // VERIFICA o envio (senão marca falso-sucesso e ENVENENA o dedup — lição do
-        // Selenium). Botão forte (CSS) OU frase de sucesso na página = enviado; senão
-        // "incerto" (NÃO conta como aplicada → pode tentar de novo depois).
-        await OA.sleep(1000);
-        const txt = (document.body.innerText || "").toLowerCase();
-        const confirmado = sucessoFrases.some((f) => txt.includes(f));
-        if (forte || confirmado || !sucessoFrases.length) { log("ENVIADO (forte/confirmado)"); return "enviado"; }
-        log("finalizar clicado mas SEM frase de sucesso → INCERTO (não conta)");
-        return "incerto";
-      }
-
-      // AVANÇAR. O botão "Continuar" fica DESABILITADO até a validação (React) do campo
-      // rodar — que é ASSÍNCRONA. Então: acha o botão e ESPERA ele habilitar (re-buscando)
-      // por ~4s antes de decidir. Se habilitar → CLICA. Se seguir desabilitado → re-preenche.
-      // Resolução do botão (mesma usada no re-teste abaixo): (1) avancarSel EXATO — só
-      // quando CASA (ex.: Gupy "Dados adicionais" tem name='saveAndContinueButton'); (2)
-      // preferUltimo — clica o ÚLTIMO visível/habilitado (CTA primário, não o sticky);
-      // (3) findByText. O avancarSel NUNCA bloqueia: se não casar (ex.: tela de perguntas
-      // do Gupy cujo "Salvar e continuar" NÃO tem name), cai no texto (senão trava em
-      // "continuar").
-      // Retorna TODOS os candidatos a avançar (em ordem de prioridade), não só um. O
-      // Gupy repete o botão na MESMA tela — ex.: DOIS "Continuar", um sticky no topo e o
-      // do rodapé — e só UM avança de verdade. Então, em vez de apostar num só, tentamos
-      // cada um até a página mudar. (1) avancarSel EXATO primeiro (ex.: "Dados adicionais"
-      // tem name='saveAndContinueButton'); (2) o texto de MAIOR prioridade que tenha botão
-      // visível ("salvar e continuar"/"responder agora" antes do "continuar" genérico),
-      // todos os botões daquele texto — preferUltimo põe o do rodapé na frente.
+      // CANDIDATOS A AVANÇAR — definido ANTES do finalizar (a ordem importa). Retorna
+      // TODOS os botões de avançar VISÍVEIS, por prioridade. O Gupy repete o botão na
+      // MESMA tela (ex.: DOIS "Continuar", sticky + rodapé) e só UM avança → tentamos cada
+      // um. (1) avancarSel EXATO (ex.: "Dados adicionais" tem name='saveAndContinueButton');
+      // (2) o texto de MAIOR prioridade com botão visível ("salvar e continuar"/"responder
+      // agora" antes do "continuar"), preferUltimo põe o do rodapé na frente. O avancarSel
+      // NUNCA bloqueia: se não casar (ex.: "Salvar e continuar" sem name/id), cai no texto.
       const candidatosAvancar = () => {
         const out = [];
         if (avancarSel && avancarSel.length) {
@@ -114,6 +99,34 @@
         return out;
       };
       let cands = candidatosAvancar();
+
+      // FINALIZAR (envio) — SÓ quando NÃO há botão de AVANÇAR visível. Ordem crítica p/ o
+      // Gupy: na tela de perguntas o "Salvar e continuar" coexiste com o give-up "Finalizar
+      // candidatura"; se finalizasse primeiro, clicava o give-up e o "Salvar e continuar"
+      // NUNCA era clicado. Só finaliza quando o avanço acabou — ex.: o diálogo final
+      // "Personalizar candidatura" | "Finalizar candidatura" (#dialog-give-up-...), que não
+      // tem botão de avançar. Seletor CSS ou texto, no documento INTEIRO.
+      if (!cands.length) {
+        const finalCss = finalizarSel.map((s) => document.querySelector(s)).find((b) => b && OA.isVisible(b));
+        const btnFinal = finalCss || OA.findByText(finalizar);
+        if (btnFinal && OA.isVisible(btnFinal) && habil(btnFinal)) {
+          if (pausarAntesEnvio) { onStatus("🔒 Revise e finalize/envie você mesmo (pausa antes do envio)."); return "pausa"; }
+          const forte = !!finalCss; // seletor CSS específico (ex.: give-up dialog) = envio real
+          log("step", step, "FINALIZAR:", (btnFinal.innerText || "").trim().slice(0, 30), "forte:", forte);
+          OA.click(btnFinal); await OA.sleep(1800);
+          // botão sc-* do Gupy ignora o .click() simples → se nada mudou, clique FORTE.
+          if (assinatura() === sigAntes) { log("step", step, "finalizar: clique normal não mudou → clique FORTE"); OA.clickForte(btnFinal); await OA.sleep(1600); }
+          for (const s of finalizarSel) { const d = document.querySelector(s); if (d && OA.isVisible(d)) { OA.click(d); await OA.sleep(600); OA.clickForte(d); await OA.sleep(1400); break; } }
+          // VERIFICA o envio (senão marca falso-sucesso e ENVENENA o dedup). Botão forte
+          // (CSS) OU frase de sucesso = enviado; senão "incerto" (não conta).
+          await OA.sleep(1000);
+          const txt = (document.body.innerText || "").toLowerCase();
+          const confirmado = sucessoFrases.some((f) => txt.includes(f));
+          if (forte || confirmado || !sucessoFrases.length) { log("ENVIADO (forte/confirmado)"); return "enviado"; }
+          log("finalizar clicado mas SEM frase de sucesso → INCERTO (não conta)");
+          return "incerto";
+        }
+      }
       if (cands.length) {
         // ESPERA algum habilitar (a validação React do campo é ASSÍNCRONA) por ~4s.
         for (let w = 0; w < 8 && !cands.some((b) => habil(b)); w++) { await OA.sleep(500); cands = candidatosAvancar(); }
