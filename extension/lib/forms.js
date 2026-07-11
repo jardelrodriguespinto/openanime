@@ -207,6 +207,33 @@
       }
     });
 
+    // 4.5) REDE DE SEGURANÇA p/ grupo de checkbox OBRIGATÓRIO vazio — SÓ quando a
+    // plataforma pede (ctx.destravarGrupoCheckbox; ex.: Gupy "Perguntas criadas pela
+    // empresa"). O loop (4) avalia cada checkbox ISOLADO (IA sim/não) e pode não marcar
+    // NENHUM; se o grupo é "selecione ao menos uma" (obrigatório), isso deixa o grupo
+    // insatisfeito e TRAVA o "Salvar e continuar" desabilitado. Roda DEPOIS de (4) (a IA
+    // tem prioridade); só marca a 1ª opção do grupo que ficou 100% vazio. OFF por padrão
+    // (LinkedIn/Indeed/etc. NÃO entram — evita marcar opt-in/consent indevido).
+    if (ctx.destravarGrupoCheckbox) {
+      const obrigCb = (cb) => cb.required || cb.getAttribute("aria-required") === "true"
+        || /\*/.test(OA.labelFor(cb) || "")
+        || /\*|obrigat/i.test((cb.closest("fieldset, [role='group'], .form-group, li, div")?.innerText || "").slice(0, 140));
+      const grupos = new Map();
+      for (const cb of container.querySelectorAll("input[type='checkbox']")) {
+        if (ehConsent(OA.labelFor(cb) || "")) continue; // consentimento já tratado em (4)
+        if (!obrigCb(cb)) continue;
+        // agrupa por name; sem name, por fieldset/[role=group]; solto → grupo próprio
+        const k = cb.name || cb.closest("fieldset, [role='group']") || cb;
+        if (!grupos.has(k)) grupos.set(k, []);
+        grupos.get(k).push(cb);
+      }
+      for (const [, cbs] of grupos) await wrap(async () => {
+        if (cbs.some((c) => c.checked)) return; // grupo já satisfeito (IA marcou algo)
+        OA.setChecked(cbs[0], true, container);
+        log("checkbox-grupo obrig destravado:", (OA.headingLabel(cbs[0]) || OA.labelFor(cbs[0]) || "grupo").slice(0, 40));
+      });
+    }
+
     // 5) text / number / textarea. NUMERO: CLAMP no min/max do input (o LinkedIn expõe
     // "between 0 and 99" como max=99; fora do range é RECUSADO → descartaria a vaga).
     // Campo de moeda com default "R$ 0,00" conta como VAZIO (senão o salário nunca entra).

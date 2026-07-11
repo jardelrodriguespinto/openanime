@@ -3,7 +3,7 @@
 // O loop por-vaga mora no content script.
 
 import { getConfig, setConfig, getState, setState, contador, registrarCandidatura, jaAplicou, getResume } from "../lib/store.js";
-import { avaliarMatch, responderPergunta, avaliarHabilidades } from "../lib/openrouter.js";
+import { avaliarMatch, transcreverAudio, responderPergunta, avaliarHabilidades } from "../lib/openrouter.js";
 
 const PLATAFORMAS = {
   linkedin: { search: (q) => `https://www.linkedin.com/jobs/search/?keywords=${encodeURIComponent(q)}&f_AL=true` },
@@ -28,7 +28,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         case "config.set":
           await setConfig(msg.config);
           return sendResponse({ ok: true });
-
+        case "assemblyia.match": {
+          const cfg = await getConfig();
+          const r = await transcreverAudio(cfg, msg.payload || {});
+          return sendResponse({ ok: true, ...r });
+        }
         case "brain.match": {
           const cfg = await getConfig();
           const r = await avaliarMatch(cfg, msg.payload || {});

@@ -278,5 +278,27 @@
     return out;
   }
 
-  window.OA = { sleep, isVisible, waitFor, click, clickForte, findByText, findButtonsByText, melhorContainer, setNativeValue, fillInput, selectOption, labelFor, headingLabel, bg, setChecked, uploadArquivo };
+  // Detecta um CAPTCHA "não sou um robô" (reCAPTCHA v2 / hCaptcha / Turnstile) VISÍVEL na
+  // página. NÃO resolve nada — serve pra PAUSAR e deixar o HUMANO resolver
+  // (human-in-the-loop). O widget renderiza num iframe cross-origin, mas o container e o
+  // <textarea> de resposta ficam no documento principal, então dá pra detectar por aqui.
+  function captchaPresente() {
+    const sels = [
+      ".g-recaptcha", "#g-recaptcha", ".recaptcha-checkbox",
+      "iframe[src*='recaptcha/api2/anchor']", "iframe[src*='recaptcha/api2/bframe']", "iframe[title*='reCAPTCHA' i]",
+      ".h-captcha", "iframe[src*='hcaptcha.com']", "iframe[title*='hcaptcha' i]",
+      ".cf-turnstile", "iframe[src*='challenges.cloudflare.com']",
+    ];
+    for (const s of sels) { const el = document.querySelector(s); if (el && isVisible(el)) return true; }
+    return false;
+  }
+
+  // reCAPTCHA v2 preenche <textarea#g-recaptcha-response> (no documento PRINCIPAL, legível)
+  // com um token ao ser resolvido; hCaptcha/Turnstile idem. Token não-vazio = resolvido.
+  function captchaResolvido() {
+    const t = document.querySelector("#g-recaptcha-response, textarea[name='g-recaptcha-response'], textarea[name='h-captcha-response'], textarea[name='cf-turnstile-response']");
+    return !!(t && (t.value || "").trim());
+  }
+
+  window.OA = { sleep, isVisible, waitFor, click, clickForte, findByText, findButtonsByText, melhorContainer, setNativeValue, fillInput, selectOption, labelFor, headingLabel, bg, setChecked, uploadArquivo, captchaPresente, captchaResolvido };
 })();

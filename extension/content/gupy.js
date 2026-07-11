@@ -82,7 +82,7 @@
       finalizar: ["finalizar candidatura", "finalizar", "concluir"],
       finalizarSel: ["#dialog-give-up-personalization-step"],
       sucessoFrases: ["candidatura realizada", "candidatura foi realizada", "inscrição realizada", "você se candidatou", "sua candidatura foi enviada", "recebemos sua candidatura", "application submitted", "you have applied"],
-      ctx: { idioma: idioma || "pt" },
+      ctx: { idioma: idioma || "pt", destravarGrupoCheckbox: true }, // perguntas da empresa com checkbox obrigatório
       preencher: preencherGupy,
       preferUltimo: true, // Gupy repete o botão (sticky + rodapé): clica o do rodapé
       pausarAntesEnvio: false, isRunning: running, onStatus: (s) => status(s),

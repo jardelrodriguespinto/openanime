@@ -63,6 +63,22 @@ export async function avaliarMatch(cfg, { descricao, titulo = "", empresa = "" }
   }
 }
 
+import { transcreverRecaptcha } from "../lib/assemblyia.js";
+
+// ── Transcrição de áudio (assinatura/estilo igual a avaliarMatch) ──────────────
+// Delega AssemblyAI para assemblyia.js, retornando objeto estruturado em vez de propagar throw.
+
+export async function transcreverAudio(cfg, payload = {}) {
+  const apiKey = cfg?.assemblyia?.apiKey;
+  if (!apiKey) return { erro: "AssemblyAI API key não configurada." };
+  try {
+    const texto = await transcreverRecaptcha(payload.driver || cfg.driver, apiKey);
+    return { texto };
+  } catch (e) {
+    return { erro: e.message };
+  }
+}
+
 // ── Respostas de formulário ───────────────────────────────────────────────────
 // Suporta tipos: TEXT, NUMERO, SELECT/RADIO (com opções). Salário NUNCA vem da IA.
 

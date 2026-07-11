@@ -16,6 +16,9 @@ export const DEFAULT_CONFIG = {
     // Modelo opcional separado p/ classificar/《match》 (vazio = usa o `model`).
     modelMatch: "",
   },
+  assemblyia: {
+    apiKey: ""
+  },
   // Perfil usado para preencher formulários e gerar respostas.
   perfil: {
     nome: "",

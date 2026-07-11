@@ -33,6 +33,7 @@ async function load() {
   $("or_key").value = cfg.openrouter.apiKey || "";
   $("or_model").value = cfg.openrouter.model || "";
   $("or_model_match").value = cfg.openrouter.modelMatch || "";
+  $("ai_key").value = cfg.assemblyia?.apiKey || "";
   const p = cfg.perfil;
   $("p_nome").value = p.nome || "";
   $("p_email").value = p.email || "";
@@ -68,6 +69,8 @@ async function salvar() {
   cfg.openrouter.apiKey = $("or_key").value.trim();
   cfg.openrouter.model = $("or_model").value.trim() || DEFAULT_CONFIG.openrouter.model;
   cfg.openrouter.modelMatch = $("or_model_match").value.trim();
+  cfg.assemblyia = cfg.assemblyia || {};
+  cfg.assemblyia.apiKey = $("ai_key").value.trim();
   Object.assign(cfg.perfil, {
     nome: $("p_nome").value.trim(),
     email: $("p_email").value.trim(),
