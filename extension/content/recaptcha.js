@@ -27,10 +27,21 @@
     );
     if (!ehDesafio) return;
 
-    // 1) troca pro áudio (o padrão é o desafio de imagem)
-    if (!document.querySelector("#audio-response")) {
-      const audioBtn = await OA.waitFor("#recaptcha-audio-button", { timeout: 8000 });
-      if (audioBtn) { OA.click(audioBtn); await OA.sleep(1500); }
+    // 1) troca pro áudio (o padrão é o desafio de imagem). O botão é um ícone
+    // (<button id="recaptcha-audio-button" class="rc-button-audio" title="Receber um
+    // desafio de áudio">) e às vezes ignora o .click() simples do reCAPTCHA — usa clique
+    // FORTE (sequência de ponteiro) e confirma que o desafio de áudio realmente abriu.
+    if (!document.querySelector("#audio-source, #audio-response")) {
+      const audioBtn = await OA.waitFor(
+        "#recaptcha-audio-button, .rc-button-audio, button[title*='áudio' i], button[title*='audio' i]",
+        { timeout: 8000 }
+      );
+      if (audioBtn) {
+        OA.clickForte(audioBtn);
+        if (!(await OA.waitFor("#audio-source, #audio-response", { timeout: 4000, visible: false }))) {
+          OA.click(audioBtn); await OA.sleep(1500); // 2ª tentativa (fallback)
+        }
+      }
     }
 
     // 2) pega a URL do áudio (tag <audio id="audio-source"> ou link de download)
