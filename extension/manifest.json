@@ -12,7 +12,8 @@
     "https://*.geekhunter.com.br/*",
     "https://*.senior.com.br/*",
     "https://*.solides.com.br/*",
-    "https://openrouter.ai/*"
+    "https://openrouter.ai/*",
+    "https://api.assemblyai.com/*"
   ],
   "background": {
     "service_worker": "background/service-worker.js",

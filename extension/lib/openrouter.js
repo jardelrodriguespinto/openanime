@@ -63,17 +63,58 @@ export async function avaliarMatch(cfg, { descricao, titulo = "", empresa = "" }
   }
 }
 
-import { transcreverRecaptcha } from "../lib/assemblyia.js";
-
 // ── Transcrição de áudio (assinatura/estilo igual a avaliarMatch) ──────────────
-// Delega AssemblyAI para assemblyia.js, retornando objeto estruturado em vez de propagar throw.
+// Implementação standalone para o browser. NÃO importa assemblyia.js Node/Selenium.
 
-export async function transcreverAudio(cfg, payload = {}) {
+const ASSEMBLY_ENDPOINT = "https://api.assemblyai.com/v2";
+
+export async function transcreverAudio(cfg, { audioUrl }) {
   const apiKey = cfg?.assemblyia?.apiKey;
   if (!apiKey) return { erro: "AssemblyAI API key não configurada." };
+  if (!audioUrl) return { erro: "URL do áudio não fornecida." };
   try {
-    const texto = await transcreverRecaptcha(payload.driver || cfg.driver, apiKey);
-    return { texto };
+    const response = await fetch(`${ASSEMBLY_ENDPOINT}/transcript`, {
+      method: "POST",
+      headers: {
+        Authorization: apiKey,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        audio_url: audioUrl,
+        language_code: "pt",
+        punctuate: true,
+        format_text: true,
+      }),
+    });
+    if (!response.ok) {
+      const erro = await response.text();
+      throw new Error(`Erro ao enviar áudio: ${erro}`);
+    }
+    const data = await response.json();
+    if (!data.id) throw new Error("AssemblyAI não retornou ID da transcrição");
+    const id = data.id;
+    let tentativas = 0;
+    const limiteTentativas = 100;
+    while (tentativas < limiteTentativas) {
+      const result = await fetch(
+        `${ASSEMBLY_ENDPOINT}/transcript/${encodeURIComponent(id)}`,
+        { headers: { Authorization: apiKey } }
+      );
+      if (!result.ok) {
+        const erro = await result.text();
+        throw new Error(`Erro consultando transcrição: ${erro}`);
+      }
+      const json = await result.json();
+      if (json.status === "completed") {
+        return { texto: json.text };
+      }
+      if (json.status === "error") {
+        throw new Error(`Erro AssemblyAI: ${json.error}`);
+      }
+      tentativas++;
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+    }
+    throw new Error("Tempo limite excedido aguardando transcrição");
   } catch (e) {
     return { erro: e.message };
   }

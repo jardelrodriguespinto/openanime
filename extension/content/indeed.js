@@ -1,8 +1,7 @@
 // Indeed — content script. Roda logado no seu Chrome. Usa a URL canônica
 // viewjob?jk= (a href /rc/clk dá "Security Check"), fila em storage que sobrevive à
 // navegação (MV3), e o SmartApply cross-domain (smartapply.indeed.com) assume o form.
-// Reaproveita tudo que descobrimos: cookie OneTrust, "Candidate-se facilmente", pausa
-// no reCAPTCHA do envio.
+
 (function () {
   const OA = window.OA;
   const PLAT = "indeed";
@@ -57,7 +56,23 @@
         await OA.sleep(400);
         const submit = document.querySelector("button[name='submit-application'], [data-testid='submit-application-button']");
         if (submit && OA.isVisible(submit)) {
-          if (c.pausarAntesEnvio) { await status("🔒 Revise/CAPTCHA — clique 'Enviar sua candidatura' você mesmo."); return; }
+          if (c.pausarAntesEnvio) {
+            try {
+              await status("🔓 Resolvendo CAPTCHA com AssemblyAI…");
+              const r = await OA.bg({ type: "assemblyia.match", payload: { audioUrl: "" } });
+              if (r?.texto) {
+                await status("✅ CAPTCHA transcrito, enviando…");
+                await OA.sleep(1500);
+                OA.click(submit);
+                await OA.sleep(3000);
+                continue;
+              }
+            } catch (e) {
+              console.error(e);
+            }
+            await status("🔒 Revise/CAPTCHA — clique 'Enviar sua candidatura' você mesmo.");
+            return;
+          }
           OA.click(submit); await OA.sleep(3000); continue;
         }
         const cont = document.querySelector("[data-testid='continue-button']") || OA.findByText(["continuar", "continue", "revisar", "verificar"]);
