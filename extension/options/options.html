@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="options.css" />
+    <title>AutoApply — Dashboard</title>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>AutoApply — Dashboard</h1>
+      <p class="sub">Tudo que estava no <code>.env</code> se configura aqui. Sem senhas das plataformas: você já está logado no seu navegador.</p>
+
+      <section>
+        <h2>OpenRouter (IA)</h2>
+        <label>API Key
+          <input id="or_key" type="password" placeholder="sk-or-..." autocomplete="off" />
+        </label>
+        <div class="grid2">
+          <label>Modelo (match + respostas)
+            <input id="or_model" type="text" placeholder="x-ai/grok-4.20" />
+          </label>
+          <label>Modelo p/ match (opcional)
+            <input id="or_model_match" type="text" placeholder="vazio = usa o de cima" />
+          </label>
+        </div>
+        <button id="testar" class="ghost small">Testar chave</button>
+        <span id="teste_res" class="muted"></span>
+      </section>
+
+      <section>
+        <h2>Seu perfil (preenche formulários + gera respostas)</h2>
+        <div class="grid2">
+          <label>Nome completo <input id="p_nome" type="text" /></label>
+          <label>E-mail <input id="p_email" type="text" /></label>
+          <label>Telefone / Celular (com DDD) <input id="p_telefone" type="text" placeholder="+55 11 91234-5678" /></label>
+          <label>LinkedIn (URL) <input id="p_linkedin" type="text" placeholder="https://www.linkedin.com/in/seu-perfil" /></label>
+          <label>Localização <input id="p_localizacao" type="text" /></label>
+          <label>Cargo atual <input id="p_cargo" type="text" /></label>
+          <label>Senioridade <input id="p_senioridade" type="text" placeholder="júnior/pleno/sênior" /></label>
+        </div>
+        <label>Resumo do currículo (base das respostas e do match)
+          <textarea id="p_cv" rows="7" placeholder="Cole aqui um resumo do seu currículo…"></textarea>
+        </label>
+      </section>
+
+      <section>
+        <h2>Currículo (arquivo) <span class="muted">— para upload automático (ex.: GeekHunter)</span></h2>
+        <input id="cv_file" type="file" accept=".pdf,.doc,.docx" />
+        <p class="muted" id="cv_atual">nenhum currículo salvo</p>
+        <p class="muted">Guardado só no seu navegador. Injetado no campo de upload quando a vaga pedir arquivo. Se o site usar um seletor de arquivo próprio (não um input padrão), pode não funcionar — aí a extensão pausa e você anexa.</p>
+      </section>
+
+      <section>
+        <h2>Remuneração <span class="muted">— nunca gerada por IA</span></h2>
+        <div class="grid2">
+          <label>CLT (R$) <input id="p_clt" type="text" placeholder="ex: 8000" /></label>
+          <label>PJ (R$) <input id="p_pj" type="text" placeholder="ex: 12000" /></label>
+          <label>Dólar (USD) <input id="p_usd" type="text" placeholder="ex: 4000" /></label>
+          <label>Pretensão (fallback) <input id="p_pretensao" type="text" /></label>
+        </div>
+      </section>
+
+      <section>
+        <h2>Filtros</h2>
+        <div class="grid2">
+          <label>Modalidades aceitas (vírgula) <input id="p_modalidades" type="text" placeholder="remoto, híbrido, presencial" /></label>
+          <label>Regiões p/ presencial/híbrido (vírgula) <input id="p_regioes" type="text" placeholder="SP, RJ" /></label>
+        </div>
+        <label class="check"><input id="pausar" type="checkbox" /> Pausar no envio do <b>Indeed</b> (reCAPTCHA — você confirma). LinkedIn/Gupy/GeekHunter/Senior enviam sozinhos.</label>
+      </section>
+
+      <section>
+        <h2>Plataformas</h2>
+        <table>
+          <thead><tr><th>Ativa</th><th>Plataforma</th><th>Palavra-chave</th><th>Nota mín. (0-100)</th><th>Teto/dia</th></tr></thead>
+          <tbody id="plats"></tbody>
+        </table>
+        <p class="muted">Todas as plataformas têm content script. LinkedIn é o mais maduro; Indeed/Gupy/GeekHunter/Senior são 1ª versão e os seletores podem precisar de ajuste no 1º run real.</p>
+      </section>
+
+      <div class="actions">
+        <button id="salvar" class="primary">Salvar</button>
+        <span id="salvo" class="muted"></span>
+      </div>
+    </div>
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

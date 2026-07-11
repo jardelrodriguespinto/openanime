@@ -1,0 +1,61 @@
+{
+  "manifest_version": 3,
+  "name": "AutoApply — Candidaturas automáticas",
+  "version": "0.1.0",
+  "description": "Aplica em vagas (LinkedIn, Indeed, Gupy, GeekHunter, Senior) no seu próprio navegador logado. Dashboard e config (OpenRouter + preferências) dentro da extensão.",
+  "permissions": ["storage", "unlimitedStorage", "tabs", "scripting", "activeTab", "notifications"],
+  "host_permissions": [
+    "https://*.linkedin.com/*",
+    "https://*.indeed.com/*",
+    "https://*.gupy.io/*",
+    "https://*.geekhunter.com/*",
+    "https://*.geekhunter.com.br/*",
+    "https://*.senior.com.br/*",
+    "https://*.solides.com.br/*",
+    "https://openrouter.ai/*"
+  ],
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "AutoApply",
+    "default_popup": "popup/popup.html"
+  },
+  "options_ui": {
+    "page": "options/options.html",
+    "open_in_tab": true
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://*.linkedin.com/jobs/*"],
+      "js": ["lib/dom.js", "lib/localizacao.js", "lib/forms.js", "content/linkedin.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://*.indeed.com/*"],
+      "js": ["lib/dom.js", "lib/localizacao.js", "lib/forms.js", "content/indeed.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://*.gupy.io/*"],
+      "js": ["lib/dom.js", "lib/localizacao.js", "lib/forms.js", "lib/wizard.js", "content/gupy.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://*.geekhunter.com/*", "https://*.geekhunter.com.br/*"],
+      "js": ["lib/dom.js", "lib/localizacao.js", "lib/forms.js", "lib/wizard.js", "content/geekhunter.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://*.senior.com.br/*"],
+      "js": ["lib/dom.js", "lib/localizacao.js", "lib/forms.js", "lib/wizard.js", "content/senior.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://*.solides.com.br/*"],
+      "js": ["lib/dom.js", "lib/localizacao.js", "lib/forms.js", "lib/wizard.js", "content/solides.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

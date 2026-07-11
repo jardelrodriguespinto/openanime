@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="popup.css" />
+    <title>AutoApply</title>
+  </head>
+  <body>
+    <header>
+      <h1>AutoApply</h1>
+      <button id="cfg" class="link" title="Configurações">⚙️ Dashboard</button>
+    </header>
+
+    <div id="warn" class="warn hidden">⚠️ Configure a <b>OpenRouter API key</b> na dashboard.</div>
+
+    <label class="field">
+      <span>Plataforma</span>
+      <select id="plataforma">
+        <option value="linkedin">LinkedIn (Easy Apply)</option>
+        <option value="indeed">Indeed</option>
+        <option value="gupy">Gupy</option>
+        <option value="geekhunter">GeekHunter</option>
+        <option value="senior">Senior</option>
+        <option value="solides">Solides</option>
+      </select>
+    </label>
+
+    <div class="row">
+      <button id="start" class="primary">▶️ Iniciar</button>
+      <button id="stop" class="ghost">⏹️ Parar</button>
+    </div>
+
+    <div class="status">
+      <div class="dot" id="dot"></div>
+      <div id="status">parado</div>
+    </div>
+    <div class="count" id="count"></div>
+
+    <footer>Roda no seu navegador logado. Nada de senha aqui.</footer>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

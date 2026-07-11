@@ -1,0 +1,263 @@
+// Preenchedor GENÉRICO de formulários — reusado por LinkedIn/Indeed/Gupy/GeekHunter/
+// Senior. Cobre text/number/textarea/select/radio/checkbox + COMBOBOX (MUI Autocomplete,
+// ARIA combobox, mat-select — opções em portal/overlay). Perguntas vão pro cérebro;
+// contato/consentimento são locais. DEFENSIVO: cada campo em try/catch, um campo ruim
+// NUNCA aborta o preenchimento inteiro (era o que fazia o LinkedIn "não aplicar mais").
+(function () {
+  const OA = window.OA;
+  if (!OA || OA.preencherCampos) return;
+
+  const CONTATO = ["nome", "name", "sobrenome", "last name", "first name", "email", "e-mail", "telefone", "phone", "celular", "cidade", "city", "país", "pais", "country", "endereço", "address", "cep", "linkedin", "cpf"];
+  const CONSENT = ["aceito", "concordo", "consinto", "li e", "termos", "privacidade", "autorizo", "declaro", "agree", "consent", "terms"];
+  const ehContato = (l) => { l = (l || "").toLowerCase(); return l.length < 45 && CONTATO.some((c) => l.includes(c)); };
+  const ehConsent = (l) => { l = (l || "").toLowerCase(); return CONSENT.some((c) => l.includes(c)); };
+
+  async function responder(pergunta, tipo, opcoes, ctx) {
+    // TIMEOUT: o service worker MV3 pode ser suspenso durante o fetch da OpenRouter →
+    // a resposta nunca volta e o preenchimento CONGELA. Corre com um timeout: se não
+    // responder em 30s, segue com "" (selects caem na 1ª opção; texto fica vazio).
+    const call = OA.bg({ type: "brain.answer", payload: { pergunta, tipo, opcoes, vagaTitulo: ctx.vagaTitulo || "", vagaEmpresa: ctx.vagaEmpresa || "", idioma: ctx.idioma || "pt" } });
+    const to = new Promise((res) => setTimeout(() => res({ resposta: "", _timeout: true }), 30000));
+    const r = await Promise.race([call, to]);
+    if (r?._timeout) { try { console.log("[AutoApply] brain.answer TIMEOUT:", pergunta.slice(0, 40)); } catch (_) {} }
+    return r?.resposta || "";
+  }
+
+  // opções de um dropdown custom (mat-option / [role=option] / MUI / li) em QUALQUER
+  // lugar do documento (renderizam em portal/overlay fora do container).
+  function opcoesAbertas() {
+    return [...document.querySelectorAll(
+      "mat-option, .cdk-overlay-container [role='option'], [role='listbox'] [role='option'], [role='option'], " +
+      ".MuiAutocomplete-popper [role='option'], .MuiPopover-root [role='option'], ul[role='listbox'] li, " +
+      ".chakra-menu__menuitem, .basic-typeahead__selectable, .artdeco-typeahead__result, " +
+      "[data-test-text-selectable-option], .artdeco-dropdown__item"
+    )].filter((o) => OA.isVisible(o) && (o.innerText || "").trim());
+  }
+
+  async function preencherCampos(container, ctx = {}) {
+    if (!container) return;
+    const wrap = async (fn) => { try { await fn(); } catch (_) { /* campo ruim não aborta o resto */ } };
+
+    // 0) CURRÍCULO: injeta o arquivo salvo em qualquer <input type=file> vazio
+    // (GeekHunter/LinkedIn/etc.). No Selenium era send_keys(path); aqui é DataTransfer.
+    for (const fi of container.querySelectorAll("input[type='file']")) await wrap(async () => {
+      if (fi.files && fi.files.length) return;
+      const r = await OA.bg({ type: "resume.get" });
+      if (r?.resume?.dataUrl) {
+        const ok = await OA.uploadArquivo(fi, r.resume);
+        if (ok && ctx.onStatus) ctx.onStatus("📎 Currículo anexado.");
+      } else if (ctx.onStatus) {
+        ctx.onStatus("⚠️ Sem currículo salvo — anexe o PDF na dashboard da extensão.");
+      }
+    });
+
+    const log = (...a) => { try { console.log("[AutoApply]", ...a); } catch (_) {} };
+    // NÃO usar isVisible (checa opacity) p/ controles de form: o LinkedIn estiliza o
+    // <select> nativo com opacity:0 → seria pulado. Pula só o que está display:none.
+    const naoOculto = (el) => { try { return getComputedStyle(el).display !== "none" && !el.disabled; } catch (_) { return true; } };
+
+    // 0.5) CONTATO: nome/email/confirmar-email/celular/LinkedIn/cidade. Antes eu PULAVA
+    // esses (achando que a plataforma pré-preenche) — mas GeekHunter/etc. NÃO preenchem
+    // → form obrigatório ficava vazio ("não preenche nada"). Agora preenche DO PERFIL.
+    const perfil = (((await OA.bg({ type: "config.get" })).config) || {}).perfil || {};
+    // Devolve SEMPRE o número NACIONAL (DDD+número), tirando o código do país "+55"/"55"
+    // se o config o incluir. O site já tem o "+55" fixo (widget internacional) → preencher
+    // COM o +55 vira "+55 +55…"/"número inválido". Antes eu só tirava quando o campo já
+    // mostrava "+55"; se o input.value vinha vazio, escapava e enviava o +55 junto — o bug.
+    const telefoneNacional = (tel) => {
+      tel = (tel || "").trim();
+      if (!tel) return "";
+      const dig = tel.replace(/\D/g, "");
+      // tira o "55" de país só quando claramente presente (+55… ou 12-13 dígitos: 55+DDD+nº)
+      if (/^\+55/.test(tel.replace(/\s/g, "")) || dig.length >= 12) return tel.replace(/^\s*\+?55[\s.\-]?/, "").trim() || tel;
+      return tel;
+    };
+    const valorContato = (label, inp) => {
+      const l = (label || "").toLowerCase();
+      const type = (inp.type || "").toLowerCase();
+      const auto = (inp.getAttribute("autocomplete") || "").toLowerCase();
+      // pista extra p/ telefone: máscara/prefixo no placeholder ou valor (ex.: GeekHunter
+      // mostra "+55" e o rótulo "Celular com DDD" às vezes não é detectável no input).
+      const hint = ((inp.getAttribute("placeholder") || "") + " " + (inp.value || "")).toLowerCase();
+      if (/linkedin/.test(l) || /linkedin/.test(auto)) return perfil.linkedin || "";
+      if (/(e-mail|email)/.test(l) || type === "email" || auto.includes("email")) return perfil.email || "";
+      if (/(celular|telefone|phone|whatsapp|\bddd\b)/.test(l) || type === "tel" || auto === "tel" || /\+55|\bddd\b|\(\d{2}\)/.test(hint)) return telefoneNacional(perfil.telefone);
+      if (/(nome completo|nome|name|full name)/.test(l) && !/(empresa|company|usu[aá]rio|user|arquivo)/.test(l)) return perfil.nome || "";
+      if (/(cidade|city|localiza|location)/.test(l)) return perfil.localizacao || "";
+      return "";
+    };
+    for (const inp of container.querySelectorAll("input[type='text'], input[type='email'], input[type='tel'], input[type='url'], input:not([type])")) await wrap(async () => {
+      if (!naoOculto(inp) || inp.readOnly || inp.getAttribute("role") === "combobox") return;
+      const label = OA.labelFor(inp);
+      const v = valorContato(label, inp);
+      if (!v) return;
+      // "já preenchido?" — MAS "Celular com DDD" vem com "+55" (só o prefixo) e conta
+      // como VAZIO (senão fica "campo obrigatório").
+      const cur = (inp.value || "").trim();
+      const ehTel = inp.type === "tel" || /(celular|telefone|phone|whatsapp|\bddd\b)/i.test(label);
+      const jaPreenchido = cur && !(ehTel && cur.replace(/\D/g, "").length <= 3);
+      if (jaPreenchido) return;
+      OA.fillInput(inp, v);
+      log("contato:", (label || "").slice(0, 30), "→", String(v).slice(0, 25));
+    });
+    log("preencherCampos: selects=", container.querySelectorAll("select").length,
+      "combos=", container.querySelectorAll("mat-select, [role='combobox'], [aria-haspopup='listbox']").length,
+      "radios=", container.querySelectorAll("input[type='radio']").length,
+      "checks=", container.querySelectorAll("input[type='checkbox']").length,
+      "texts=", container.querySelectorAll("input[type='text'],input[type='number'],textarea").length);
+
+    // 1) selects nativos (React-controlados → selectOption usa native setter)
+    for (const sel of container.querySelectorAll("select")) await wrap(async () => {
+      if (!naoOculto(sel)) return;
+      const cur = sel.options[sel.selectedIndex]?.text || "";
+      if (sel.value && !/selecione|selecionar|select|choose|escolha|--/i.test(cur)) return; // já respondido
+      const label = OA.labelFor(sel) || "pergunta";
+      if (ehContato(label)) return;
+      const opcoes = [...sel.options].map((o) => o.text).filter((t) => t && !/selecione|selecionar|select|choose|escolha|--/i.test(t));
+      const resp = await responder(label, "SELECT", opcoes, ctx);
+      const ok = OA.selectOption(sel, resp);
+      log("select:", label.slice(0, 40), "| opções:", opcoes.length, "| resp:", resp, "| ok:", ok, "| ficou:", sel.options[sel.selectedIndex]?.text);
+    });
+
+    // 2) COMBOBOX. (a) input[role=combobox] TYPEAHEAD (ex.: cidade do LinkedIn): pega a
+    // resposta → DIGITA → espera as sugestões → clica a 1ª (ou Tab pra comprometer). (b)
+    // mat-select/MUI/dropdown custom: abre → escolhe no overlay (opções em portal).
+    const combos = container.querySelectorAll("mat-select, input[role='combobox'], [role='combobox'], .MuiAutocomplete-root input, [aria-haspopup='listbox'], button[aria-haspopup='true']");
+    for (const cb of combos) await wrap(async () => {
+      if (!naoOculto(cb) || cb.getAttribute("aria-disabled") === "true") return;
+      if (cb.value && cb.value.trim() && cb.getAttribute("aria-invalid") !== "true") return; // já preenchido
+      if (cb.querySelector?.(".mat-select-value-text, .mat-mdc-select-value-text")?.innerText.trim()) return;
+      const label = OA.labelFor(cb) || cb.closest("mat-form-field, .MuiFormControl-root, .form-group")?.querySelector("mat-label, label")?.innerText || "pergunta";
+      if (ehContato(label)) return;
+
+      if (cb.tagName === "INPUT") {
+        // TYPEAHEAD: resposta da IA → digita → clica a sugestão.
+        const resp = (await responder(label, "TEXT", [], ctx)).trim();
+        if (!resp) return;
+        try { cb.focus(); } catch (_) {}
+        OA.setNativeValue(cb, resp);
+        await OA.sleep(1300);
+        const opts = opcoesAbertas();
+        if (opts.length) {
+          OA.click(opts.find((o) => o.innerText.trim().toLowerCase().includes(resp.toLowerCase())) || opts[0]);
+        } else {
+          cb.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", keyCode: 9, bubbles: true }));
+          try { cb.blur(); } catch (_) {}
+        }
+        log("combobox-typeahead:", label.slice(0, 40), "| resp:", resp, "| sugestões:", opts.length);
+        await OA.sleep(350);
+      } else {
+        // mat-select / dropdown custom (div/button): abre e escolhe. No Angular MDC
+        // clicar o <mat-select> às vezes não abre → clica o trigger interno; espera mais.
+        const trigger = cb.querySelector(".mat-mdc-select-trigger, .mat-select-trigger, [aria-haspopup]") || cb;
+        OA.click(trigger); await OA.sleep(700);
+        let opts = opcoesAbertas();
+        if (!opts.length) { OA.click(cb); await OA.sleep(700); opts = opcoesAbertas(); }
+        log("combobox-dropdown:", label.slice(0, 40), "| opções abertas:", opts.length);
+        if (!opts.length) { try { document.body.click(); } catch (_) {} return; }
+        const opcoes = opts.map((o) => o.innerText.trim()).filter(Boolean);
+        const resp = await responder(label, "SELECT", opcoes, ctx);
+        OA.click(opts.find((o) => o.innerText.trim().toLowerCase().includes((resp || "").toLowerCase())) || opts[0]);
+        await OA.sleep(400);
+      }
+    });
+
+    // 3) grupos de radio. O MUI (Gupy/GeekHunter) ESCONDE o <input type=radio> com
+    // CSS opacity:0 (o controle visível é o <label> MuiFormControlLabel-root) → o
+    // OA.isVisible() (que barra opacity:0) os PULAVA e as perguntas NUNCA eram
+    // respondidas. Usa naoOculto (só display:none/visibility:hidden) pra incluí-los.
+    const grupos = new Map();
+    for (const r of container.querySelectorAll("input[type='radio']")) {
+      if (!naoOculto(r)) continue;
+      if (r.id && /^skill-option/.test(r.id)) continue; // Solides: skills eliminatórias → content/solides.js
+      const key = r.name || "g" + [...container.querySelectorAll("input[type='radio']")].indexOf(r);
+      if (!grupos.has(key)) grupos.set(key, []);
+      grupos.get(key).push(r);
+    }
+    for (const [, radios] of grupos) await wrap(async () => {
+      if (radios.some((r) => r.checked)) return;
+      const grp = radios[0].closest("fieldset, [role='radiogroup'], .form-group, li, div");
+      // Prefere legend (radio nativo) > heading <h3> (MUI/Gupy: enunciado é h3 irmão do
+      // grupo, não há fieldset) > label/p (texto da opção) > labelFor. Sem isso a IA
+      // recebia o TEXTO DA OPÇÃO como "pergunta" e escolhia errado.
+      const label = (grp && grp.querySelector("legend")?.innerText) || OA.headingLabel(radios[0])
+        || (grp && grp.querySelector("label, p")?.innerText) || OA.labelFor(radios[0]) || "";
+      if (!label) return;
+      const opcoes = radios.map((r) => OA.labelFor(r) || r.value || "").filter(Boolean);
+      let escolha;
+      if (ehConsent(label)) escolha = radios.find((r) => /sim|yes|aceito|concordo/i.test(OA.labelFor(r) || r.value)) || radios[0];
+      else if (ehContato(label)) return;
+      else { const resp = await responder(label, "RADIO", opcoes, ctx); escolha = radios.find((r) => (OA.labelFor(r) || r.value || "").toLowerCase().includes((resp || "").toLowerCase())) || radios[0]; }
+      OA.setChecked(escolha, true, container); // radio React-controlado → label-click + native setter
+    });
+
+    // 4) checkboxes — NÃO pular por visibilidade: o LinkedIn ESCONDE o input com CSS
+    // (is_displayed=false) e é React-controlado. OA.setChecked faz label-click + native
+    // setter (igual ao Selenium). Consentimento/obrigatório/label-curto → marca;
+    // pergunta booleana com label → IA decide (não marca se responder "não").
+    for (const cb of container.querySelectorAll("input[type='checkbox']")) await wrap(async () => {
+      if (cb.checked) return;
+      const label = OA.labelFor(cb) || (cb.closest("label, .mat-checkbox, .chakra-checkbox, div")?.innerText || "").split("\n")[0] || "";
+      const obrig = cb.required || cb.getAttribute("aria-required") === "true";
+      if (ehConsent(label) || obrig || label.trim().length < 3) {
+        OA.setChecked(cb, true, container);
+      } else if (label) {
+        const resp = await responder(label, "CHECKBOX", ["sim", "não"], ctx);
+        if (!/^\s*(n[ãa]o|no|false|0)\s*$/i.test(resp)) OA.setChecked(cb, true, container);
+      }
+    });
+
+    // 5) text / number / textarea. NUMERO: CLAMP no min/max do input (o LinkedIn expõe
+    // "between 0 and 99" como max=99; fora do range é RECUSADO → descartaria a vaga).
+    // Campo de moeda com default "R$ 0,00" conta como VAZIO (senão o salário nunca entra).
+    const jaTem = (v) => v && v.trim() && !(/r\$/i.test(v) && /^[r$\s]*0([.,]0+)?$/i.test(v));
+    for (const inp of container.querySelectorAll("input[type='text'], input[type='number'], input:not([type]), textarea")) await wrap(async () => {
+      if (!naoOculto(inp) || jaTem(inp.value) || inp.readOnly) return;
+      if (inp.getAttribute("role") === "combobox") return; // já tratado em (2)
+      const label = OA.labelFor(inp) || "";
+      if (ehContato(label)) return;
+      // SALÁRIO/MOEDA: vem do CONFIG verbatim (nunca IA, nunca number-coerce). Isso evita
+      // o "R$ 0,00 preenchido com NaN": o clampNum de um valor não-numérico virava NaN no
+      // input mascarado. Sem valor no config → NÃO preenche (deixa o default do site).
+      const ehMoeda = /r\$/i.test(inp.value || "") || /r\$/i.test(inp.getAttribute("placeholder") || "") || /(remunera|sal[aá]ri|pretens)/i.test(label);
+      if (ehMoeda) {
+        const val = /(pj|pessoa jur|cnpj|jur[ií]dic)/i.test(label) ? perfil.remuneracao_pj
+                  : /(d[oó]lar|usd|dollar)/i.test(label) ? perfil.remuneracao_dolar
+                  : /clt/i.test(label) ? perfil.remuneracao_clt
+                  : (perfil.remuneracao_clt || perfil.pretensao_salarial);
+        const limpo = String(val || perfil.pretensao_salarial || "").trim();
+        if (limpo) { OA.fillInput(inp, limpo); log("salário:", label.slice(0, 30), "→", limpo); }
+        else log("salário SEM valor no config (não preenchi p/ não virar NaN):", label.slice(0, 30));
+        return;
+      }
+      // Obrigatório? (input required/aria-required OU * no rótulo/wrapper — o Gupy marca
+      // "*" num <span> ao lado). Um campo obrigatório NÃO pode ficar vazio, senão o
+      // "Salvar e continuar" trava — é o caso das "Perguntas criadas pela empresa".
+      const wrapTxt = (inp.closest("[class*='FormControl'], .form-group, li, fieldset, div")?.innerText || "").slice(0, 120);
+      const obrig = inp.required || inp.getAttribute("aria-required") === "true" || /\*/.test(label) || /\*|obrigat/i.test(wrapTxt);
+      // Sem rótulo E opcional → deixa quieto (não enche campo opcional com lixo, ex.: LinkedIn).
+      // Sem rótulo MAS obrigatório → responde mesmo assim (a etapa de perguntas do Gupy às
+      // vezes não expõe rótulo detectável e o campo é obrigatório).
+      if (!label && !obrig) return;
+      const tipo = inp.type === "number" || /quantos|anos|years|how many|qtd/i.test(label) ? "NUMERO" : "TEXT";
+      let resp = await responder(label || "Pergunta obrigatória da empresa", tipo, [], ctx);
+      if (tipo === "NUMERO") resp = clampNum(inp, resp);
+      // IA devolveu vazio (timeout/recusa) num campo obrigatório → fallback seguro (nunca trava).
+      if (obrig && !String(resp).trim()) resp = tipo === "NUMERO" ? "0" : "Tenho interesse e disponibilidade para a vaga.";
+      if (!String(resp).trim()) return; // opcional sem resposta → não força
+      OA.fillInput(inp, resp);
+      log("texto:", (label || "(sem rótulo)").slice(0, 40), "| tipo:", tipo, "| obrig:", obrig, "| resp:", String(resp).slice(0, 30));
+    });
+  }
+
+  function clampNum(inp, resp) {
+    let n = parseFloat(String(resp).replace(/[^\d.-]/g, ""));
+    if (!isFinite(n)) n = 0;
+    const mn = parseFloat(inp.getAttribute("min")), mx = parseFloat(inp.getAttribute("max"));
+    if (isFinite(mn) && n < mn) n = mn;
+    if (isFinite(mx) && n > mx) n = mx;
+    return String(Number.isInteger(n) ? n : Math.round(n));
+  }
+
+  OA.preencherCampos = preencherCampos;
+})();

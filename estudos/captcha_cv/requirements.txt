@@ -1,0 +1,6 @@
+# Estudo de CV/ML — reconhecimento de texto em imagem (dataset gerado localmente).
+captcha>=0.5.0        # gera CAPTCHAs de texto locais (a fonte dos dados de estudo)
+opencv-python>=4.8    # pré-processamento de imagem
+numpy>=1.24
+pillow>=10.0
+torch>=2.0            # modelo — troque por tensorflow/keras se preferir aprender nele
