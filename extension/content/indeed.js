@@ -56,23 +56,23 @@
         await OA.sleep(400);
         const submit = document.querySelector("button[name='submit-application'], [data-testid='submit-application-button']");
         if (submit && OA.isVisible(submit)) {
-          if (c.pausarAntesEnvio) {
-            try {
-              await status("🔓 Resolvendo CAPTCHA com AssemblyAI…");
-              const r = await OA.bg({ type: "assemblyia.match", payload: { audioUrl: "" } });
-              if (r?.texto) {
-                await status("✅ CAPTCHA transcrito, enviando…");
-                await OA.sleep(1500);
-                OA.click(submit);
-                await OA.sleep(3000);
-                continue;
-              }
-            } catch (e) {
-              console.error(e);
+          // Indeed pode exigir reCAPTCHA no envio. O desafio abre num iframe cross-origin
+          // (google.com/recaptcha/bframe): o áudio e o #audio-response ficam LÁ e são
+          // preenchidos por content/recaptcha.js, injetado NESSE frame. Daqui só dá pra
+          // ler o token no doc principal (#g-recaptcha-response) — esperamos ele aparecer
+          // (= desafio resolvido) e então enviamos.
+          if (OA.captchaPresente() && !OA.captchaResolvido()) {
+            await status("🔓 Resolvendo CAPTCHA (áudio) com AssemblyAI…");
+            let ok = false;
+            for (let w = 0; w < 24 && !(ok = OA.captchaResolvido()); w++) {
+              if (!(await running())) return;
+              await OA.sleep(1500); // ~36s aguardando o solver do iframe
             }
-            await status("🔒 Revise/CAPTCHA — clique 'Enviar sua candidatura' você mesmo.");
-            return;
+            if (!ok) { await status("🔒 CAPTCHA — resolva você mesmo e clique 'Enviar sua candidatura'."); return; }
+            await status("✅ CAPTCHA resolvido, enviando…");
+            await OA.sleep(600);
           }
+          if (c.pausarAntesEnvio) { await status("⏸️ Revise e clique 'Enviar sua candidatura' você mesmo."); return; }
           OA.click(submit); await OA.sleep(3000); continue;
         }
         const cont = document.querySelector("[data-testid='continue-button']") || OA.findByText(["continuar", "continue", "revisar", "verificar"]);
