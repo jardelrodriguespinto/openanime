@@ -17,12 +17,22 @@
   const setQueue = (q) => chrome.storage.local.set({ [QK]: q });
   const cookies = () => { const b = document.querySelector("#onetrust-accept-btn-handler"); if (b) b.click(); };
 
+  // Delays HUMANOS: sleeps randômicos p/ as ações não saírem em cadência de robô e as
+  // candidaturas ficarem ESPAÇADAS (anti-bloqueio). rint = inteiro aleatório em [a,b].
+  const rint = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
+  const rsleep = (a, b) => OA.sleep(rint(a, b));
+
   const SK = "oaIndeedStart";
   async function proximo() {
     if (!(await running())) { status("parado."); return; }
     const q = await getQueue();
     const next = q.shift();
     await setQueue(q);
+    // Espaçamento HUMANO entre vagas: pausa randômica (~6–16s) antes de abrir a próxima —
+    // é o principal freio anti-bloqueio (não dispara uma candidatura logo atrás da outra).
+    await status("Aguardando um pouco antes da próxima vaga…");
+    await rsleep(6000, 16000);
+    if (!(await running())) { status("parado."); return; }
     if (next) { location.href = next; return; }
     // fila vazia → PRÓXIMA PÁGINA de resultados (como o Selenium paginava)
     let start = (await chrome.storage.local.get(SK))[SK] || 0;
@@ -42,7 +52,7 @@
       const c = await cfg();
       for (let step = 0; step < 14; step++) {
         if (!(await running())) return;
-        await OA.sleep(1200);
+        await rsleep(1100, 2600);
         if (document.querySelector("#returnToSearchButton, .ia-PostApply-ContinueFooter-button") ||
             /candidatura (enviada|foi enviada)|application submitted/i.test(document.body.innerText)) {
           const job = (await chrome.storage.local.get(JK))[JK] || {};
@@ -53,7 +63,7 @@
         const container = document.querySelector(".ia-Questions, [class*='apply-questions'], main") || document.body;
         const job0 = (await chrome.storage.local.get(JK))[JK] || {};
         await OA.preencherCampos(container, { idioma: job0.idioma || "pt" });
-        await OA.sleep(400);
+        await rsleep(600, 1700);
         const submit = document.querySelector("button[name='submit-application'], [data-testid='submit-application-button']");
         if (submit && OA.isVisible(submit)) {
           // Indeed pode exigir reCAPTCHA no envio. O desafio abre num iframe cross-origin
@@ -77,12 +87,13 @@
           // o captcha ainda não apareceu → clica, o desafio abre, o loop reavalia e reenvia.
           // Reforça com clique FORTE se o botão mosaic (styled-components) ignorar o .click().
           await status("Enviando candidatura…");
-          OA.click(submit); await OA.sleep(2500);
-          if (OA.isVisible(submit) && !OA.captchaPresente()) { OA.clickForte(submit); await OA.sleep(2500); }
+          await rsleep(900, 2400); // "revisão humana" antes de enviar
+          OA.click(submit); await rsleep(2400, 4200);
+          if (OA.isVisible(submit) && !OA.captchaPresente()) { OA.clickForte(submit); await rsleep(2200, 3600); }
           continue;
         }
         const cont = document.querySelector("[data-testid='continue-button']") || OA.findByText(["continuar", "continue", "revisar", "verificar"]);
-        if (cont && OA.isVisible(cont)) { OA.click(cont); await OA.sleep(1500); continue; }
+        if (cont && OA.isVisible(cont)) { await rsleep(700, 2000); OA.click(cont); await rsleep(1300, 2800); continue; }
         await status("Passo do SmartApply não reconhecido — finalize à mão."); return;
       }
     })();
@@ -93,7 +104,7 @@
   if (path.startsWith("/viewjob")) {
     (async () => {
       if (!(await running())) return;
-      await OA.sleep(1500); cookies();
+      await rsleep(1400, 3400); cookies();
       const c = await cfg();
       const jk = new URLSearchParams(location.search).get("jk") || "";
       if (jk) { const dup = await OA.bg({ type: "stats.isApplied", platform: PLAT, jobId: jk }); if (dup?.aplicou) return proximo(); }
@@ -110,12 +121,16 @@
       const apply = document.querySelector("#indeedApplyButton, .jobsearch-IndeedApplyButton-newDesign") ||
         OA.findByText(["candidatar-se com o indeed", "candidatura simplificada", "candidate-se facilmente"]);
       if (!apply) { await status(`sem candidatura simplificada: ${titulo}`); return proximo(); }
+      // "lê a vaga" antes de clicar (rolagem leve + pausa) — parece humano, não robô instantâneo.
+      await status(`Lendo a vaga: ${titulo}`.slice(0, 80));
+      try { window.scrollTo(0, rint(200, 700)); } catch (_) {}
+      await rsleep(1800, 5000);
       await status(`Aplicando: ${titulo}`);
       OA.click(apply);
-      await OA.sleep(5000);
+      await rsleep(4000, 7000);
       // Se a aplicação abriu em NOVA aba (viewjob continua aqui), segue a fila; a aba
       // do SmartApply cuida do form em paralelo.
-      if (location.pathname.startsWith("/viewjob")) { await OA.sleep(1500); return proximo(); }
+      if (location.pathname.startsWith("/viewjob")) { await rsleep(1200, 2600); return proximo(); }
       // senão navegou pro SmartApply (mesma aba) → o handler de smartapply assume.
     })();
     return;
@@ -124,10 +139,10 @@
   // ── Busca (/jobs) ──────────────────────────────────────────────────────────
   async function iniciar() {
     if (!(await running())) return;
-    await OA.sleep(1500); cookies();
+    await rsleep(1400, 3200); cookies();
     if (!(await cfg()).openrouter.apiKey) { status("⚠️ Configure a OpenRouter key na dashboard."); return; }
     await status("Lendo vagas…");
-    for (let i = 0; i < 4; i++) { window.scrollTo(0, document.body.scrollHeight); await OA.sleep(900); } window.scrollTo(0, 0);
+    for (let i = 0; i < 4; i++) { window.scrollTo(0, document.body.scrollHeight); await rsleep(700, 1600); } window.scrollTo(0, 0);
     const cards = [...document.querySelectorAll("div.job_seen_beacon, .jobsearch-ResultsList > li, [data-jk]")];
     const jks = [];
     for (const c of cards) {

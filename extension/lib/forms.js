@@ -60,18 +60,6 @@
     // esses (achando que a plataforma pré-preenche) — mas GeekHunter/etc. NÃO preenchem
     // → form obrigatório ficava vazio ("não preenche nada"). Agora preenche DO PERFIL.
     const perfil = (((await OA.bg({ type: "config.get" })).config) || {}).perfil || {};
-    // Devolve SEMPRE o número NACIONAL (DDD+número), tirando o código do país "+55"/"55"
-    // se o config o incluir. O site já tem o "+55" fixo (widget internacional) → preencher
-    // COM o +55 vira "+55 +55…"/"número inválido". Antes eu só tirava quando o campo já
-    // mostrava "+55"; se o input.value vinha vazio, escapava e enviava o +55 junto — o bug.
-    const telefoneNacional = (tel) => {
-      tel = (tel || "").trim();
-      if (!tel) return "";
-      const dig = tel.replace(/\D/g, "");
-      // tira o "55" de país só quando claramente presente (+55… ou 12-13 dígitos: 55+DDD+nº)
-      if (/^\+55/.test(tel.replace(/\s/g, "")) || dig.length >= 12) return tel.replace(/^\s*\+?55[\s.\-]?/, "").trim() || tel;
-      return tel;
-    };
     const valorContato = (label, inp) => {
       const l = (label || "").toLowerCase();
       const type = (inp.type || "").toLowerCase();
@@ -81,7 +69,7 @@
       const hint = ((inp.getAttribute("placeholder") || "") + " " + (inp.value || "")).toLowerCase();
       if (/linkedin/.test(l) || /linkedin/.test(auto)) return perfil.linkedin || "";
       if (/(e-mail|email)/.test(l) || type === "email" || auto.includes("email")) return perfil.email || "";
-      if (/(celular|telefone|phone|whatsapp|\bddd\b)/.test(l) || type === "tel" || auto === "tel" || /\+55|\bddd\b|\(\d{2}\)/.test(hint)) return telefoneNacional(perfil.telefone);
+      if (/(celular|telefone|phone|whatsapp|\bddd\b)/.test(l) || type === "tel" || auto === "tel" || /\+55|\bddd\b|\(\d{2}\)/.test(hint)) return perfil.telefone || ""; // VERBATIM do dashboard (não mexe em +55)
       if (/(nome completo|nome|name|full name)/.test(l) && !/(empresa|company|usu[aá]rio|user|arquivo)/.test(l)) return perfil.nome || "";
       if (/(cidade|city|localiza|location)/.test(l)) return perfil.localizacao || "";
       return "";
@@ -95,10 +83,12 @@
       // como VAZIO (senão fica "campo obrigatório").
       const cur = (inp.value || "").trim();
       const ehTel = inp.type === "tel" || /(celular|telefone|phone|whatsapp|\bddd\b)/i.test(label);
+      // "Celular com DDD" vem com só o "+55" (prefixo do widget) e conta como VAZIO (senão
+      // fica "campo obrigatório"). Preenche o número EXATAMENTE como está no dashboard.
       const jaPreenchido = cur && !(ehTel && cur.replace(/\D/g, "").length <= 3);
       if (jaPreenchido) return;
       OA.fillInput(inp, v);
-      log("contato:", (label || "").slice(0, 30), "→", String(v).slice(0, 25));
+      log("contato:", (label || "").slice(0, 30), "→", String(v).slice(0, 25), "| ficou:", (inp.value || "").slice(0, 20));
     });
     log("preencherCampos: selects=", container.querySelectorAll("select").length,
       "combos=", container.querySelectorAll("mat-select, [role='combobox'], [aria-haspopup='listbox']").length,
