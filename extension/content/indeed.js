@@ -72,8 +72,14 @@
             await status("✅ CAPTCHA resolvido, enviando…");
             await OA.sleep(600);
           }
-          if (c.pausarAntesEnvio) { await status("⏸️ Revise e clique 'Enviar sua candidatura' você mesmo."); return; }
-          OA.click(submit); await OA.sleep(3000); continue;
+          // Envio AUTOMÁTICO no Indeed (a pedido): clica 'Enviar sua candidatura' mesmo com
+          // "pausar antes do envio" LIGADO — o captcha já foi resolvido acima. Na 1ª passada
+          // o captcha ainda não apareceu → clica, o desafio abre, o loop reavalia e reenvia.
+          // Reforça com clique FORTE se o botão mosaic (styled-components) ignorar o .click().
+          await status("Enviando candidatura…");
+          OA.click(submit); await OA.sleep(2500);
+          if (OA.isVisible(submit) && !OA.captchaPresente()) { OA.clickForte(submit); await OA.sleep(2500); }
+          continue;
         }
         const cont = document.querySelector("[data-testid='continue-button']") || OA.findByText(["continuar", "continue", "revisar", "verificar"]);
         if (cont && OA.isVisible(cont)) { OA.click(cont); await OA.sleep(1500); continue; }

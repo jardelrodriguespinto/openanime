@@ -56,7 +56,11 @@
       const cg = new Map();
       for (const c of container.querySelectorAll("input[type='checkbox']")) {
         if (!marcadoObrig(c)) continue;
-        const k = c.name || (c.closest("fieldset, [role='group']")?.className || "cbgrp");
+        // Opções de pergunta MUI do Gupy: cada uma tem name ÚNICO (checkbox-<idQ>-<i>) → agrupar
+        // por name marcaria CADA opção não marcada como "vazia". Agrupa pelo índice da pergunta
+        // (data-oa-gupy-mui) → conta a pergunta UMA vez, só se NENHUMA opção dela foi marcada.
+        const k = c.dataset.oaGupyMui != null ? "muiq:" + c.dataset.oaGupyMui
+          : (c.name || (c.closest("fieldset, [role='group']")?.className || "cbgrp"));
         (cg.get(k) || cg.set(k, []).get(k)).push(c);
       }
       for (const [, cbs] of cg) if (!cbs.some((c) => c.checked)) out.push(nomeCampo(cbs[0]));

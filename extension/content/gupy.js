@@ -73,25 +73,28 @@
   // PULA os já respondidos (evita o toggle que destrava→trava), e escolhe UMA opção via IA.
   // Marca todo input do grupo com data-oa-gupy-mui pra o forms.js NÃO tocar nessas opções.
   async function responderPerguntasMui(root) {
+    // Varre <h3> (enunciado) + os CHECKBOX em ordem de documento e atribui cada checkbox ao
+    // h3 mais recente. Pega o input direto (o MUI esconde o input: opacity 0) — mais robusto
+    // que depender da classe do <label>. Clicável = <label> que envolve/aponta o input.
     let atual = null;
     const grupos = [];
-    for (const el of root.querySelectorAll("h3, label")) {
-      const tag = el.tagName.toLowerCase();
-      if (tag === "h3") {
+    for (const el of root.querySelectorAll("h3, input[type='checkbox']")) {
+      if (el.tagName.toLowerCase() === "h3") {
         const texto = (el.innerText || "").trim().replace(/^\d+[\.\)]\s*/, "").replace(/\s*\*\s*$/, "").trim();
         atual = texto ? { pergunta: texto, opcoes: [] } : null;
         if (atual) grupos.push(atual);
         continue;
       }
-      if (!atual) continue;
-      const inp = el.querySelector("input[type='checkbox']");
-      const txt = (el.innerText || "").trim();
-      if (inp && txt && OA.isVisible(el)) atual.opcoes.push({ el, inp, txt });
+      if (!atual) continue; // checkbox antes de qualquer <h3> não é pergunta da empresa
+      const lbl = el.closest("label") || (el.id && root.querySelector(`label[for="${CSS.escape(el.id)}"]`)) || null;
+      const txt = ((lbl && lbl.innerText) || el.getAttribute("aria-label") || OA.labelFor(el) || "").trim();
+      if (txt) atual.opcoes.push({ inp: el, click: lbl || el, txt });
     }
+    // marca cada opção com o ÍNDICE da pergunta → forms.js agrupa/pula por pergunta (e o
+    // diagnóstico "Falta preencher" nomeia a PERGUNTA, não cada opção não marcada).
+    grupos.forEach((g, gi) => g.opcoes.forEach((o) => { o.inp.dataset.oaGupyMui = String(gi); }));
     for (const g of grupos) {
-      if (!g.opcoes.length) continue;
-      for (const o of g.opcoes) o.inp.dataset.oaGupyMui = "1"; // forms.js pula essas
-      if (g.opcoes.some((o) => o.inp.checked)) continue;        // já respondida
+      if (!g.opcoes.length || g.opcoes.some((o) => o.inp.checked)) continue; // vazia responde; marcada pula (sem toggle)
       const opcoesTxt = g.opcoes.map((o) => o.txt);
       let escolha = "";
       try {
@@ -102,9 +105,9 @@
       const alvo = g.opcoes.find((o) => o.txt.toLowerCase() === e)
         || (e && g.opcoes.find((o) => o.txt.toLowerCase().includes(e) || e.includes(o.txt.toLowerCase())))
         || g.opcoes[0];
-      // Clica o <label> (input oculto). Só age se ainda não marcado → nunca faz toggle.
+      // Clica só se ainda não marcado → nunca faz toggle (re-clique desmarcaria e travaria).
       if (!alvo.inp.checked) {
-        OA.click(alvo.el); await OA.sleep(200);
+        OA.click(alvo.click); await OA.sleep(200);
         if (!alvo.inp.checked) { try { OA.setChecked(alvo.inp, true, root); } catch (_) {} }
       }
     }
