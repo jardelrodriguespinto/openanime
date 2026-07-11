@@ -45,58 +45,62 @@
     location.href = `https://br.indeed.com/jobs?q=${qn}&l=&from=searchOnHP&start=${start}`;
   }
 
-  // ── SmartApply (cross-domain) ──────────────────────────────────────────────
-  if (host.includes("smartapply")) {
-    (async () => {
+  // Fluxo de envio do SmartApply (loop de passos: completou? → registra+próxima; senão
+  // preenche, resolve captcha e clica "Enviar sua candidatura"/"Continuar"). Reutilizado em
+  // DOIS contextos: (a) aba/página do smartapply.indeed.com; (b) INLINE na própria vaga
+  // (viewjob), quando o Indeed Apply renderiza o preview + envio na MESMA página (mesma origem).
+  async function fluxoSmartApply() {
+    for (let step = 0; step < 14; step++) {
       if (!(await running())) return;
-      const c = await cfg();
-      for (let step = 0; step < 14; step++) {
-        if (!(await running())) return;
-        await rsleep(1100, 2600);
-        if (document.querySelector("#returnToSearchButton, .ia-PostApply-ContinueFooter-button") ||
-            /candidatura (enviada|foi enviada)|application submitted/i.test(document.body.innerText)) {
-          const job = (await chrome.storage.local.get(JK))[JK] || {};
-          await OA.bg({ type: "stats.applied", platform: PLAT, jobId: job.jobId, titulo: job.titulo });
-          await status("✅ enviada. Próxima…", "candidatou");
-          return proximo();
-        }
-        const container = document.querySelector(".ia-Questions, [class*='apply-questions'], main") || document.body;
-        const job0 = (await chrome.storage.local.get(JK))[JK] || {};
-        await OA.preencherCampos(container, { idioma: job0.idioma || "pt" });
-        await rsleep(600, 1700);
-        const submit = document.querySelector("button[name='submit-application'], [data-testid='submit-application-button']");
-        if (submit && OA.isVisible(submit)) {
-          // Indeed pode exigir reCAPTCHA no envio. O desafio abre num iframe cross-origin
-          // (google.com/recaptcha/bframe): o áudio e o #audio-response ficam LÁ e são
-          // preenchidos por content/recaptcha.js, injetado NESSE frame. Daqui só dá pra
-          // ler o token no doc principal (#g-recaptcha-response) — esperamos ele aparecer
-          // (= desafio resolvido) e então enviamos.
-          if (OA.captchaPresente() && !OA.captchaResolvido()) {
-            await status("🔓 Resolvendo CAPTCHA (áudio) com AssemblyAI…");
-            let ok = false;
-            for (let w = 0; w < 24 && !(ok = OA.captchaResolvido()); w++) {
-              if (!(await running())) return;
-              await OA.sleep(1500); // ~36s aguardando o solver do iframe
-            }
-            if (!ok) { await status("🔒 CAPTCHA — resolva você mesmo e clique 'Enviar sua candidatura'."); return; }
-            await status("✅ CAPTCHA resolvido, enviando…");
-            await OA.sleep(600);
-          }
-          // Envio AUTOMÁTICO no Indeed (a pedido): clica 'Enviar sua candidatura' mesmo com
-          // "pausar antes do envio" LIGADO — o captcha já foi resolvido acima. Na 1ª passada
-          // o captcha ainda não apareceu → clica, o desafio abre, o loop reavalia e reenvia.
-          // Reforça com clique FORTE se o botão mosaic (styled-components) ignorar o .click().
-          await status("Enviando candidatura…");
-          await rsleep(900, 2400); // "revisão humana" antes de enviar
-          OA.click(submit); await rsleep(2400, 4200);
-          if (OA.isVisible(submit) && !OA.captchaPresente()) { OA.clickForte(submit); await rsleep(2200, 3600); }
-          continue;
-        }
-        const cont = document.querySelector("[data-testid='continue-button']") || OA.findByText(["continuar", "continue", "revisar", "verificar"]);
-        if (cont && OA.isVisible(cont)) { await rsleep(700, 2000); OA.click(cont); await rsleep(1300, 2800); continue; }
-        await status("Passo do SmartApply não reconhecido — finalize à mão."); return;
+      await rsleep(1100, 2600);
+      if (document.querySelector("#returnToSearchButton, .ia-PostApply-ContinueFooter-button") ||
+          /candidatura (enviada|foi enviada)|application submitted/i.test(document.body.innerText)) {
+        const job = (await chrome.storage.local.get(JK))[JK] || {};
+        await OA.bg({ type: "stats.applied", platform: PLAT, jobId: job.jobId, titulo: job.titulo });
+        await status("✅ enviada. Próxima…", "candidatou");
+        return proximo();
       }
-    })();
+      const container = document.querySelector(".ia-Questions, [class*='apply-questions'], main") || document.body;
+      const job0 = (await chrome.storage.local.get(JK))[JK] || {};
+      await OA.preencherCampos(container, { idioma: job0.idioma || "pt" });
+      await rsleep(600, 1700);
+      const submit = document.querySelector("button[name='submit-application'], [data-testid='submit-application-button']");
+      if (submit && OA.isVisible(submit)) {
+        // Indeed pode exigir reCAPTCHA no envio. O desafio abre num iframe cross-origin
+        // (google.com/recaptcha/bframe): o áudio e o #audio-response ficam LÁ e são
+        // preenchidos por content/recaptcha.js, injetado NESSE frame. Daqui só dá pra
+        // ler o token no doc principal (#g-recaptcha-response) — esperamos ele aparecer
+        // (= desafio resolvido) e então enviamos.
+        if (OA.captchaPresente() && !OA.captchaResolvido()) {
+          await status("🔓 Resolvendo CAPTCHA (áudio) com AssemblyAI…");
+          let ok = false;
+          for (let w = 0; w < 24 && !(ok = OA.captchaResolvido()); w++) {
+            if (!(await running())) return;
+            await OA.sleep(1500); // ~36s aguardando o solver do iframe
+          }
+          if (!ok) { await status("🔒 CAPTCHA — resolva você mesmo e clique 'Enviar sua candidatura'."); return; }
+          await status("✅ CAPTCHA resolvido, enviando…");
+          await OA.sleep(600);
+        }
+        // Envio AUTOMÁTICO no Indeed (a pedido): clica 'Enviar sua candidatura' mesmo com
+        // "pausar antes do envio" LIGADO — o captcha já foi resolvido acima. Na 1ª passada
+        // o captcha ainda não apareceu → clica, o desafio abre, o loop reavalia e reenvia.
+        // Reforça com clique FORTE se o botão mosaic (styled-components) ignorar o .click().
+        await status("Enviando candidatura…");
+        await rsleep(900, 2400); // "revisão humana" antes de enviar
+        OA.click(submit); await rsleep(2400, 4200);
+        if (OA.isVisible(submit) && !OA.captchaPresente()) { OA.clickForte(submit); await rsleep(2200, 3600); }
+        continue;
+      }
+      const cont = document.querySelector("[data-testid='continue-button']") || OA.findByText(["continuar", "continue", "revisar", "verificar"]);
+      if (cont && OA.isVisible(cont)) { await rsleep(700, 2000); OA.click(cont); await rsleep(1300, 2800); continue; }
+      await status("Passo do SmartApply não reconhecido — finalize à mão."); return;
+    }
+  }
+
+  // ── SmartApply em aba/página própria (smartapply.indeed.com) ────────────────
+  if (host.includes("smartapply")) {
+    (async () => { if (!(await running())) return; await fluxoSmartApply(); })();
     return;
   }
 
@@ -128,9 +132,17 @@
       await status(`Aplicando: ${titulo}`);
       OA.click(apply);
       await rsleep(4000, 7000);
-      // Se a aplicação abriu em NOVA aba (viewjob continua aqui), segue a fila; a aba
-      // do SmartApply cuida do form em paralelo.
-      if (location.pathname.startsWith("/viewjob")) { await rsleep(1200, 2600); return proximo(); }
+      // Ainda em /viewjob depois de clicar Aplicar → DOIS casos:
+      // (a) INLINE (mesma origem): o Indeed Apply renderiza o preview + "Enviar sua
+      //     candidatura" NESTA página (módulo mosaic-provider-apply-preview), sem navegar nem
+      //     abrir aba. Se o botão de envio/continuar aparecer no doc, roda o fluxo AQUI mesmo.
+      // (b) Abriu em NOVA ABA → aqui não há esse botão no doc → segue a fila (a aba do
+      //     smartapply cuida do envio e registra a candidatura).
+      if (location.pathname.startsWith("/viewjob")) {
+        const inline = await OA.waitFor("button[name='submit-application'], [data-testid='submit-application-button'], [data-testid='continue-button']", { timeout: 6000 });
+        if (inline) { await status(`Aplicando (na própria vaga): ${titulo}`.slice(0, 80)); return fluxoSmartApply(); }
+        await rsleep(1200, 2600); return proximo();
+      }
       // senão navegou pro SmartApply (mesma aba) → o handler de smartapply assume.
     })();
     return;
