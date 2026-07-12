@@ -51,6 +51,8 @@ export const DEFAULT_CONFIG = {
   },
   // Pausa antes de enviar (revisão/CAPTCHA) — o humano confirma. Recomendado true.
   pausarAntesEnvio: true,
+  // Interface (dashboard/popup). idioma: "pt" | "en" | "es" | "" (auto = navegador).
+  ui: { idioma: "" },
 };
 
 function deepMerge(base, extra) {

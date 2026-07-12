@@ -9,97 +9,108 @@
   <body>
     <div class="wrap">
       <h1>AutoApply — Dashboard</h1>
-      <p class="sub">Tudo que estava no <code>.env</code> se configura aqui. Sem senhas das plataformas: você já está logado no seu navegador.</p>
+      <p class="sub" data-i18n="sub">Tudo que estava no <code>.env</code> se configura aqui. Sem senhas das plataformas: você já está logado no seu navegador.</p>
 
       <section>
-        <h2>OpenRouter (IA)</h2>
-        <label>API Key
+        <h2 data-i18n="sec_idioma">🌐 Idioma da interface</h2>
+        <label>
+          <select id="ui_idioma">
+            <option value="pt">Português</option>
+            <option value="en">English</option>
+            <option value="es">Español</option>
+          </select>
+        </label>
+      </section>
+
+      <section>
+        <h2 data-i18n="sec_or">OpenRouter (IA)</h2>
+        <label><span data-i18n="api_key">API Key</span>
           <input id="or_key" type="password" placeholder="sk-or-..." autocomplete="off" />
         </label>
         <div class="grid2">
-          <label>Modelo (match + respostas)
+          <label><span data-i18n="or_model">Modelo (match + respostas)</span>
             <input id="or_model" type="text" placeholder="x-ai/grok-4.20" />
           </label>
-          <label>Modelo p/ match (opcional)
-            <input id="or_model_match" type="text" placeholder="vazio = usa o de cima" />
+          <label><span data-i18n="or_model_match">Modelo p/ match (opcional)</span>
+            <input id="or_model_match" type="text" data-i18n-ph="or_model_match_ph" placeholder="vazio = usa o de cima" />
           </label>
         </div>
-        <button id="testar" class="ghost small">Testar chave</button>
+        <button id="testar" class="ghost small" data-i18n="testar">Testar chave</button>
         <span id="teste_res" class="muted"></span>
       </section>
 
       <section>
-        <h2>AssemblyAI (IA)</h2>
-        <label>API Key
+        <h2 data-i18n="sec_ai">AssemblyAI (IA)</h2>
+        <label><span data-i18n="api_key">API Key</span>
           <input id="ai_key" type="password" placeholder="98sdf6..." autocomplete="off" />
         </label>
       </section>
 
       <section>
-        <h2>Seu perfil (preenche formulários + gera respostas)</h2>
+        <h2 data-i18n="sec_perfil">Seu perfil (preenche formulários + gera respostas)</h2>
         <div class="grid2">
-          <label>Nome completo <input id="p_nome" type="text" /></label>
-          <label>E-mail <input id="p_email" type="text" /></label>
-          <label>Telefone / Celular (com DDD) <input id="p_telefone" type="text" placeholder="+55 11 91234-5678" /></label>
-          <label>LinkedIn (URL) <input id="p_linkedin" type="text" placeholder="https://www.linkedin.com/in/seu-perfil" /></label>
-          <label>Localização <input id="p_localizacao" type="text" /></label>
-          <label>Cargo atual <input id="p_cargo" type="text" /></label>
-          <label>Senioridade <input id="p_senioridade" type="text" placeholder="júnior/pleno/sênior" /></label>
+          <label><span data-i18n="p_nome">Nome completo</span> <input id="p_nome" type="text" /></label>
+          <label><span data-i18n="p_email">E-mail</span> <input id="p_email" type="text" /></label>
+          <label><span data-i18n="p_telefone">Telefone / Celular (com DDD)</span> <input id="p_telefone" type="text" placeholder="+55 11 91234-5678" /></label>
+          <label><span data-i18n="p_linkedin">LinkedIn (URL)</span> <input id="p_linkedin" type="text" placeholder="https://www.linkedin.com/in/seu-perfil" /></label>
+          <label><span data-i18n="p_localizacao">Localização</span> <input id="p_localizacao" type="text" /></label>
+          <label><span data-i18n="p_cargo">Cargo atual</span> <input id="p_cargo" type="text" /></label>
+          <label><span data-i18n="p_senioridade">Senioridade</span> <input id="p_senioridade" type="text" data-i18n-ph="p_senioridade_ph" placeholder="júnior/pleno/sênior" /></label>
         </div>
-        <label>Resumo do currículo (base das respostas e do match)
-          <textarea id="p_cv" rows="7" placeholder="Cole aqui um resumo do seu currículo…"></textarea>
+        <label><span data-i18n="p_cv_label">Resumo do currículo (base das respostas e do match)</span>
+          <textarea id="p_cv" rows="7" data-i18n-ph="p_cv_ph" placeholder="Cole aqui um resumo do seu currículo…"></textarea>
         </label>
       </section>
 
       <section>
-        <h2>Currículo (arquivo) <span class="muted">— para upload automático (ex.: GeekHunter)</span></h2>
+        <h2><span data-i18n="sec_cv">Currículo (arquivo)</span> <span class="muted" data-i18n="sec_cv_mut">— para upload automático (ex.: GeekHunter)</span></h2>
         <input id="cv_file" type="file" accept=".pdf,.doc,.docx" />
         <p class="muted" id="cv_atual">nenhum currículo salvo</p>
-        <p class="muted">Guardado só no seu navegador. Injetado no campo de upload quando a vaga pedir arquivo. Se o site usar um seletor de arquivo próprio (não um input padrão), pode não funcionar — aí a extensão pausa e você anexa.</p>
+        <p class="muted" data-i18n="cv_nota">Guardado só no seu navegador. Injetado no campo de upload quando a vaga pedir arquivo. Se o site usar um seletor de arquivo próprio (não um input padrão), pode não funcionar — aí a extensão pausa e você anexa.</p>
       </section>
 
       <section>
-        <h2>Remuneração <span class="muted">— nunca gerada por IA</span></h2>
+        <h2><span data-i18n="sec_rem">Remuneração</span> <span class="muted" data-i18n="sec_rem_mut">— nunca gerada por IA</span></h2>
         <div class="grid2">
-          <label>CLT (R$) <input id="p_clt" type="text" placeholder="ex: 8000" /></label>
-          <label>PJ (R$) <input id="p_pj" type="text" placeholder="ex: 12000" /></label>
-          <label>Dólar (USD) <input id="p_usd" type="text" placeholder="ex: 4000" /></label>
-          <label>Pretensão (fallback) <input id="p_pretensao" type="text" /></label>
+          <label><span data-i18n="p_clt">CLT (R$)</span> <input id="p_clt" type="text" placeholder="ex: 8000" /></label>
+          <label><span data-i18n="p_pj">PJ (R$)</span> <input id="p_pj" type="text" placeholder="ex: 12000" /></label>
+          <label><span data-i18n="p_usd">Dólar (USD)</span> <input id="p_usd" type="text" placeholder="ex: 4000" /></label>
+          <label><span data-i18n="p_pretensao">Pretensão (fallback)</span> <input id="p_pretensao" type="text" /></label>
         </div>
       </section>
 
       <section>
-        <h2>Filtros</h2>
+        <h2 data-i18n="sec_filtros">Filtros</h2>
         <div class="grid2">
-          <label>Modalidades aceitas (vírgula) <input id="p_modalidades" type="text" placeholder="remoto, híbrido, presencial" /></label>
-          <label>Regiões p/ presencial/híbrido (vírgula) <input id="p_regioes" type="text" placeholder="SP, RJ" /></label>
+          <label><span data-i18n="p_modalidades">Modalidades aceitas (vírgula)</span> <input id="p_modalidades" type="text" data-i18n-ph="p_modalidades_ph" placeholder="remoto, híbrido, presencial" /></label>
+          <label><span data-i18n="p_regioes">Regiões p/ presencial/híbrido (vírgula)</span> <input id="p_regioes" type="text" data-i18n-ph="p_regioes_ph" placeholder="SP, RJ" /></label>
         </div>
-        <label class="check"><input id="pausar" type="checkbox" /> Pausar no envio do <b>Indeed</b> (reCAPTCHA — você confirma). LinkedIn/Gupy/GeekHunter/Senior enviam sozinhos.</label>
+        <label class="check"><input id="pausar" type="checkbox" /> <span data-i18n-html="pausar_html">Pausar no envio do <b>Indeed</b> (reCAPTCHA — você confirma). LinkedIn/Gupy/GeekHunter/Senior enviam sozinhos.</span></label>
       </section>
 
       <section>
-        <h2>Plataformas</h2>
+        <h2 data-i18n="sec_plats">Plataformas</h2>
         <table>
-          <thead><tr><th>Ativa</th><th>Plataforma</th><th>Palavra-chave</th><th>Nota mín. (0-100)</th><th>Teto/dia</th></tr></thead>
+          <thead><tr><th data-i18n="th_ativa">Ativa</th><th data-i18n="th_plat">Plataforma</th><th data-i18n="th_query">Palavra-chave</th><th data-i18n="th_nota">Nota mín. (0-100)</th><th data-i18n="th_teto">Teto/dia</th></tr></thead>
           <tbody id="plats"></tbody>
         </table>
-        <p class="muted">Todas as plataformas têm content script. LinkedIn é o mais maduro; Indeed/Gupy/GeekHunter/Senior são 1ª versão e os seletores podem precisar de ajuste no 1º run real.</p>
+        <p class="muted" data-i18n="plats_nota">Todas as plataformas têm content script. LinkedIn é o mais maduro; Indeed/Gupy/GeekHunter/Senior são 1ª versão e os seletores podem precisar de ajuste no 1º run real.</p>
       </section>
 
       <section>
-        <h2>Diagnóstico</h2>
-        <p class="muted">Quando a automação trava num formulário, ela grava aqui o passo + os campos (nome, tipo, rótulo, obrigatório, valor) e os botões. <b>Baixe o .txt e me mande</b> — é assim que eu vejo o que travou (a extensão não tem console p/ você copiar).</p>
+        <h2 data-i18n="sec_diag">Diagnóstico</h2>
+        <p class="muted" data-i18n-html="diag_nota_html">Quando a automação trava num formulário, ela grava aqui o passo + os campos (nome, tipo, rótulo, obrigatório, valor) e os botões. <b>Baixe o .txt e me mande</b> — é assim que eu vejo o que travou (a extensão não tem console p/ você copiar).</p>
         <div class="actions">
-          <button id="diagAtualizar">Atualizar</button>
-          <button id="diagCopiar">Copiar</button>
-          <button id="diagBaixar" class="primary">Baixar .txt</button>
-          <button id="diagLimpar" class="ghost">Limpar</button>
+          <button id="diagAtualizar" data-i18n="diag_atualizar">Atualizar</button>
+          <button id="diagCopiar" data-i18n="diag_copiar">Copiar</button>
+          <button id="diagBaixar" class="primary" data-i18n="diag_baixar">Baixar .txt</button>
+          <button id="diagLimpar" class="ghost" data-i18n="diag_limpar">Limpar</button>
         </div>
         <textarea id="diagOut" rows="14" readonly style="width:100%;font-family:monospace;font-size:12px;white-space:pre;overflow:auto"></textarea>
       </section>
 
       <div class="actions">
-        <button id="salvar" class="primary">Salvar</button>
+        <button id="salvar" class="primary" data-i18n="salvar">Salvar</button>
         <span id="salvo" class="muted"></span>
       </div>
     </div>

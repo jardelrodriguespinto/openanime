@@ -1,7 +1,9 @@
 import { getConfig, setConfig, DEFAULT_CONFIG, getResume, setResume } from "../lib/store.js";
+import { t, aplicarI18n, idiomaUi } from "../lib/i18n.js";
 
 const $ = (id) => document.getElementById(id);
 const csv = (s) => (s || "").split(",").map((x) => x.trim()).filter(Boolean);
+let LANG = "pt"; // idioma efetivo da interface (setado no load / no seletor)
 
 const PLAT_LABEL = {
   linkedin: "LinkedIn",
@@ -30,6 +32,9 @@ function renderPlats(cfg) {
 
 async function load() {
   const cfg = await getConfig();
+  LANG = idiomaUi(cfg);
+  $("ui_idioma").value = LANG;
+  aplicarI18n(LANG);
   $("or_key").value = cfg.openrouter.apiKey || "";
   $("or_model").value = cfg.openrouter.model || "";
   $("or_model_match").value = cfg.openrouter.modelMatch || "";
@@ -52,16 +57,30 @@ async function load() {
   $("pausar").checked = cfg.pausarAntesEnvio !== false;
   renderPlats(cfg);
   const res = await getResume();
-  $("cv_atual").textContent = res ? `✅ salvo: ${res.name}` : "nenhum currículo salvo";
+  $("cv_atual").textContent = res ? `${t(LANG, "cv_salvo")} ${res.name}` : t(LANG, "cv_none");
 }
+
+// Troca de idioma: salva NA HORA (independe do botão Salvar) e re-traduz a página,
+// inclusive as strings dinâmicas (currículo salvo + diagnóstico vazio).
+$("ui_idioma").addEventListener("change", async () => {
+  LANG = $("ui_idioma").value;
+  const cfg = await getConfig();
+  cfg.ui = cfg.ui || {};
+  cfg.ui.idioma = LANG;
+  await setConfig(cfg);
+  aplicarI18n(LANG);
+  const res = await getResume();
+  $("cv_atual").textContent = res ? `${t(LANG, "cv_salvo")} ${res.name}` : t(LANG, "cv_none");
+  carregarDiag();
+});
 
 $("cv_file").addEventListener("change", async (e) => {
   const f = e.target.files[0];
   if (!f) return;
-  if (f.size > 8 * 1024 * 1024) { $("cv_atual").textContent = "❌ arquivo muito grande (máx 8 MB)"; return; }
+  if (f.size > 8 * 1024 * 1024) { $("cv_atual").textContent = t(LANG, "cv_grande"); return; }
   const dataUrl = await new Promise((resolve) => { const r = new FileReader(); r.onload = () => resolve(r.result); r.readAsDataURL(f); });
   await setResume({ dataUrl, name: f.name, type: f.type });
-  $("cv_atual").textContent = `✅ salvo: ${f.name}`;
+  $("cv_atual").textContent = `${t(LANG, "cv_salvo")} ${f.name}`;
 });
 
 async function salvar() {
@@ -88,28 +107,30 @@ async function salvar() {
     regioes_relocacao: csv($("p_regioes").value),
   });
   cfg.pausarAntesEnvio = $("pausar").checked;
+  cfg.ui = cfg.ui || {};
+  cfg.ui.idioma = $("ui_idioma").value;
   for (const inp of document.querySelectorAll("#plats input")) {
     const p = inp.dataset.p, k = inp.dataset.k;
     cfg.plataformas[p] = cfg.plataformas[p] || {};
     cfg.plataformas[p][k] = inp.type === "checkbox" ? inp.checked : (inp.type === "number" ? Number(inp.value) : inp.value.trim());
   }
   await setConfig(cfg);
-  $("salvo").textContent = "✅ salvo";
+  $("salvo").textContent = t(LANG, "salvo_ok");
   setTimeout(() => ($("salvo").textContent = ""), 2000);
 }
 
 async function testar() {
-  $("teste_res").textContent = "testando…";
+  $("teste_res").textContent = t(LANG, "testando");
   const key = $("or_key").value.trim();
   const model = $("or_model").value.trim() || DEFAULT_CONFIG.openrouter.model;
-  if (!key) { $("teste_res").textContent = "informe a chave"; return; }
+  if (!key) { $("teste_res").textContent = t(LANG, "informe_chave"); return; }
   try {
     const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
       body: JSON.stringify({ model, max_tokens: 5, messages: [{ role: "user", content: "ok" }] }),
     });
-    $("teste_res").textContent = resp.ok ? "✅ chave/modelo OK" : `❌ ${resp.status}`;
+    $("teste_res").textContent = resp.ok ? t(LANG, "chave_ok") : `❌ ${resp.status}`;
   } catch (e) {
     $("teste_res").textContent = "❌ " + e.message;
   }
@@ -117,7 +138,9 @@ async function testar() {
 
 // ── Diagnóstico (log baixável — a extensão não tem console p/ o usuário copiar) ──
 function fmtDiag(log) {
-  if (!log || !log.length) return "(sem diagnóstico ainda — rode a automação até travar num formulário)";
+  // o CONTEÚDO do diagnóstico fica em pt (é lido pelo desenvolvedor); só a
+  // mensagem de vazio segue o idioma da interface.
+  if (!log || !log.length) return t(LANG, "diag_vazio");
   return log.map((e) => {
     const d = e.data || {};
     const campos = (d.campos || []).map((c) => `    ${c.req ? "*" : " "} ${c.tag}/${c.type} name=${c.name || "-"} label="${c.label}" val=[${c.val}]`).join("\n");
