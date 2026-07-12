@@ -98,10 +98,11 @@
     return true;
   }
 
-  // "Habilidades para a vaga" — radios SEM name (id="skill-option-…", value 0..3, um
-  // grupo por skill). Agrupa por fronteira de value==="0"; o nome da skill é um <label>
-  // SEM [for] (as opções têm for="skill-option-…"). Nível vem do cérebro (1 chamada,
-  // avaliado pelo CV); fallback honesto = "Básico".
+  // "Habilidades para a vaga" — DOM REAL confirmado: cada skill é um
+  //   div.gap-2 > label.font-semibold (nome, SEM [for]) + linha com 4 radios
+  //   id="skill-option-<rand>" value 0..3 (Nenhum/Básico/Intermediário/Avançado),
+  // radios SEM name. Agrupa por fronteira de value==="0" (ordem 0→3 confirmada).
+  // Nível vem do cérebro (1 chamada, avaliado pelo CV); fallback honesto = "Básico".
   function gruposHabilidades(root) {
     const radios = [...root.querySelectorAll("input[type='radio'][id^='skill-option'], input[type='radio'][id*='skill-option']")];
     if (!radios.length) return [];
@@ -112,9 +113,9 @@
       atual.radios.push(r);
     }
     for (const g of grupos) {
-      // o <label> do NOME da skill (sem [for]) fica ~6 níveis acima do <input>
-      // (input → label[for] → .group → .flex-row → .flex-col → .border → .items-start).
-      // Sobe até 8 e PARA no 1º label sem [for] (= o do grupo daquela skill).
+      // o <label> do NOME da skill (sem [for]) fica 6 níveis acima do <input>
+      // (input → label[for] → .group → .flex-row → .flex-col → .border → .gap-2)
+      // — confirmado no DOM real. Sobe até 8 e PARA no 1º label sem [for].
       let node = g.radios[0];
       for (let i = 0; i < 8 && node; i++, node = node.parentElement) {
         const lab = [...(node.querySelectorAll?.("label") || [])].find((l) => !l.getAttribute("for") && (l.innerText || "").trim());
@@ -149,17 +150,39 @@
     return n;
   }
 
-  // Estamos DENTRO do fluxo de candidatura (recarregou no meio)?
+  // Estamos DENTRO do fluxo de candidatura (recarregou/navegou no meio)? Frases REAIS
+  // (DOM confirmado): a revisão do currículo tem o footer "Salvar currículo | Cancelar |
+  // Avançar" e a tela de skills diz "Essas habilidades são exigidas pela vaga e são
+  // eliminatórias". As frases antigas eram CHUTES que não existem nessas telas — um
+  // Avançar que navegava de verdade reiniciava o content script, o fluxo não era
+  // reconhecido, caía no ramo da LISTA (0 cards) e dava run.stop = "automação parada".
   function ehFluxoCandidatura() {
     const t = (document.body.innerText || "").toLowerCase();
-    return /possui indica|habilidades para a vaga|efetuar candidatura|finalizar candidatura|deseja revisar seu currículo|candidatura realizada/.test(t) ||
+    return /possui indica|habilidades para a vaga|habilidades s[aã]o exigidas|s[aã]o eliminat[oó]rias|salvar curr[ií]culo|efetuar candidatura|finalizar candidatura|deseja revisar seu curr[ií]culo|candidatura realizada/.test(t) ||
       !!document.querySelector("input[type='radio'][id^='skill-option']");
+  }
+
+  // Diagnóstico quando o passo não anda (o usuário não tem console): grava URL +
+  // botões visíveis (com disabled/type) + campos → o dashboard baixa o .txt.
+  async function dumpTravado(tag, alvo) {
+    try {
+      const botoes = [...document.querySelectorAll("button, a, [role='button']")]
+        .filter((b) => OA.isVisible(b)).slice(0, 30)
+        .map((b) => ({ txt: (b.innerText || b.getAttribute("aria-label") || "").trim().slice(0, 40), off: !!(b.disabled || b.getAttribute("aria-disabled") === "true"), type: b.type || "" }));
+      const campos = [...document.querySelectorAll("input, select, textarea")].slice(0, 80).map((el) => ({
+        tag: el.tagName.toLowerCase(), type: (el.type || "").slice(0, 12), name: (el.getAttribute("name") || "").slice(0, 40),
+        label: (OA.labelFor(el) || "").slice(0, 60), req: !!(el.required || el.getAttribute("aria-required") === "true"),
+        val: (el.type === "checkbox" || el.type === "radio") ? (el.checked ? "MARCADO" : "-") : (el.value || "").slice(0, 25),
+      }));
+      await OA.bg({ type: "debug.push", tag, data: { url: location.href, alvo: (alvo?.innerText || "").trim().slice(0, 40), botoes, campos } });
+    } catch (_) {}
   }
 
   // Loop do fluxo (custom — NÃO usa rodarWizard: a Solides tem envio em 2 fases —
   // "Efetuar candidatura" pode abrir o diálogo de currículo/habilidades e só depois
   // envia de fato). Re-consulta o DOM a cada passo (cobre modal e rota SPA).
   async function fluxoCandidatura(pausar) {
+    let travas = 0; // passos seguidos em que a página NÃO mudou após clique normal+FORTE
     // 20 passos: diálogo "revisar currículo?" + os VÁRIOS "Avançar" da revisão do
     // currículo + envio em 2 fases (14 ficava curto e encerrava "incerto" no meio).
     for (let step = 0; step < 20; step++) {
@@ -182,12 +205,27 @@
       await OA.sleep(400);
       const sig = assinatura();
 
-      // 1) botão INTERMEDIÁRIO (avançar/continuar) → clica e segue.
-      const inter = OA.findByText(INTERMED, { sel: "button, a, [role='button']" });
+      // 1) botão INTERMEDIÁRIO (avançar/continuar) → clica e segue. DOM real: o wizard
+      // usa um <footer fixed> "Salvar currículo | Cancelar | Avançar" — procura PRIMEIRO
+      // no footer (evita clicar num "continuar" qualquer no meio da página) e só depois
+      // no documento (diálogos renderizam fora do footer).
+      const footer = [...document.querySelectorAll("footer")].find((f) => OA.isVisible(f));
+      const inter = (footer && OA.findByText(INTERMED, { root: footer, sel: "button, a, [role='button']" }))
+        || OA.findByText(INTERMED, { sel: "button, a, [role='button']" });
       if (inter && OA.isVisible(inter)) {
-        log("step", step, "intermediário:", (inter.innerText || "").trim().slice(0, 24));
+        // pode estar DESABILITADO até a validação React assentar → espera ~4s habilitar
+        const off = (b) => b.disabled || b.getAttribute("aria-disabled") === "true";
+        for (let w = 0; w < 8 && off(inter); w++) await OA.sleep(500);
+        log("step", step, "intermediário:", (inter.innerText || "").trim().slice(0, 24), off(inter) ? "(DESABILITADO)" : "");
         OA.click(inter); await OA.sleep(1400);
         if (assinatura() === sig) { OA.clickForte(inter); await OA.sleep(1400); }
+        // página não mudou nem com clique FORTE → conta; na 3ª grava diagnóstico e
+        // pula a vaga (antes moía os 20 passos em silêncio e parecia "parada").
+        if (assinatura() === sig) {
+          travas++;
+          log("step", step, "Avançar não mudou a página (", travas, "x)");
+          if (travas >= 3) { await dumpTravado("solides-avancar-travado", inter); await status("“Avançar” não reage — pulei a vaga (baixe o Diagnóstico no dashboard)."); return "incerto"; }
+        } else travas = 0;
         continue;
       }
       // 2) SUBMIT (efetuar/finalizar). Se houver "Revisar" ao lado = passo do referral
@@ -200,6 +238,10 @@
         log("step", step, "submit:", (submit.innerText || "").trim().slice(0, 24), "| terminal:", terminal);
         OA.click(submit); await OA.sleep(1700);
         if (assinatura() === sig) { OA.clickForte(submit); await OA.sleep(1700); }
+        if (assinatura() === sig) {
+          travas++;
+          if (travas >= 3) { await dumpTravado("solides-submit-travado", submit); await status("Envio não reage — pulei a vaga (baixe o Diagnóstico no dashboard)."); return "incerto"; }
+        } else travas = 0;
         continue;
       }
       // nada pra clicar → talvez já enviou
@@ -258,6 +300,11 @@
       if (r === "teto") return;
       return proximo();
     }
+    // Só é LISTA se a URL tem cara de lista (a busca é /vagas/todos/<query>). Página
+    // desconhecida no meio do run (rota da candidatura não reconhecida) caía aqui,
+    // clobberava a URL da lista e virava "0 cards" → run.stop matava a automação
+    // inteira. Fora do padrão → só segue a fila.
+    if (!/\/vagas\//.test(location.pathname)) { await status("Página fora do fluxo — seguindo a fila."); return proximo(); }
     // lista: guarda a URL (paginação), coleta os cards e enfileira. SPA carrega os
     // cards aos poucos → tenta algumas vezes (scroll + espera) antes de desistir.
     await chrome.storage.local.set({ [LK]: listaUrl() });

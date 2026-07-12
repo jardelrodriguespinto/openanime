@@ -16,6 +16,10 @@ async function chat(cfg, messages, { json = false, maxTokens = 400, temperature 
   };
   if (json) body.response_format = { type: "json_object" };
 
+  // TIMEOUT obrigatório: um fetch pendurado deixava o canal de resposta do SW aberto
+  // pra sempre → o OA.bg() do content script nunca resolvia → a automação "ficava
+  // parada" na aba (o guard _fluxo não solta e nem o cs.kick reentra). Com o abort,
+  // o erro propaga e os callers são fail-open (match aplica, resposta cai no fallback).
   const resp = await fetch(ENDPOINT, {
     method: "POST",
     headers: {
@@ -25,6 +29,7 @@ async function chat(cfg, messages, { json = false, maxTokens = 400, temperature 
       "X-Title": "AutoApply Extension",
     },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(60000),
   });
   if (!resp.ok) {
     const t = await resp.text().catch(() => "");

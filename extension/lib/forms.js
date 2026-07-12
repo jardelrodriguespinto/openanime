@@ -96,13 +96,12 @@
         if (ehTel && !(perfil.telefone || "").trim() && ctx.onStatus) ctx.onStatus("⚠️ Telefone VAZIO no perfil da extensão (Opções) — 'Celular com DDD' fica obrigatório.");
         return;
       }
-      // "já preenchido?" — MAS "Celular com DDD" vem com "+55" (só o prefixo) e conta
-      // como VAZIO (senão fica "campo obrigatório").
+      // "já preenchido?" — TELEFONE não decide aqui: o preencherTelefone decide sozinho
+      // (pula se já tem número real E o widget não marcou inválido; senão limpa e
+      // re-digita). Antes o valor QUEBRADO — ex.: "+55 (47) 992578109" com "informe um
+      // número de telefone válido" — contava como preenchido e nunca era corrigido.
       const cur = (inp.value || "").trim();
-      // "Celular com DDD" vem com só o "+55" (prefixo do widget) e conta como VAZIO (senão
-      // fica "campo obrigatório"). Preenche o número EXATAMENTE como está no dashboard.
-      const jaPreenchido = cur && !(ehTel && cur.replace(/\D/g, "").length <= 3);
-      if (jaPreenchido) return;
+      if (cur && !ehTel) return;
       if (ehTel) await preencherTelefone(inp, v); else OA.fillInput(inp, v);
       log("contato:", (label || "").slice(0, 30), "→", String(v).slice(0, 25), "| ficou:", (inp.value || "").slice(0, 20));
     });
@@ -131,6 +130,12 @@
     const combos = container.querySelectorAll("mat-select, input[role='combobox'], [role='combobox'], .MuiAutocomplete-root input, [aria-haspopup='listbox'], button[aria-haspopup='true']");
     for (const cb of combos) await wrap(async () => {
       if (!naoOculto(cb) || cb.getAttribute("aria-disabled") === "true") return;
+      // Seletor de PAÍS do react-phone-input-2 (GeekHunter: .selected-flag dentro de
+      // .flag-dropdown, com aria-haspopup=listbox) → NUNCA tocar: o default +55 (Brasil)
+      // já serve, e clicá-lo DEPOIS do número re-formata o valor e dispara "informe um
+      // número de telefone válido". (Se um dia precisar trocar o país, é ANTES de
+      // digitar o número — nunca depois.)
+      if (cb.closest(".flag-dropdown, .react-tel-input") || cb.classList?.contains("selected-flag")) return;
       if (cb.value && cb.value.trim() && cb.getAttribute("aria-invalid") !== "true") return; // já preenchido
       if (cb.querySelector?.(".mat-select-value-text, .mat-mdc-select-value-text")?.innerText.trim()) return;
       const label = OA.labelFor(cb) || cb.closest("mat-form-field, .MuiFormControl-root, .form-group")?.querySelector("mat-label, label")?.innerText || "pergunta";
@@ -312,7 +317,11 @@
     if (!dig) return;
     const digitos = () => (inp.value || "").replace(/\D/g, "");
     const ok = () => digitos().endsWith(dig);
-    if (digitos().length >= 10) return; // já tem um número real
+    // erro de validação do widget VISÍVEL (ex.: GeekHunter "Por favor, informe um número
+    // de telefone válido")? → o valor atual NÃO vale mesmo com 10+ dígitos: limpa e
+    // re-digita (o digitar() abaixo já limpa quando há mais que o DDI no campo).
+    const erroVisivel = () => { let n = inp.parentElement; for (let i = 0; i < 5 && n; i++, n = n.parentElement) { if (/n[uú]mero de telefone v[aá]lido|telefone inv[aá]lido/i.test(n.innerText || "")) return true; } return false; };
+    if (digitos().length >= 10 && !erroVisivel()) return; // já tem um número real e VÁLIDO
     const digitar = async (cadencia) => {
       try { inp.focus(); } catch (_) {}
       // sobrou valor parcial (mais que o DDI, menos que um número) → limpa antes

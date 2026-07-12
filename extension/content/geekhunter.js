@@ -26,13 +26,25 @@
     const c = await cfg();
     if (!c.openrouter.apiKey) return status("⚠️ Configure a OpenRouter key na dashboard.");
     for (let i = 0; i < 3; i++) { window.scrollTo(0, document.body.scrollHeight); await OA.sleep(900); } window.scrollTo(0, 0);
-    _vers = [...document.querySelectorAll("a, button, [role='button'], p")].filter((e) => OA.isVisible(e) && /visualizar vaga/i.test(e.innerText || ""));
+    // O clicável costuma ser <button|a><p>Visualizar vaga</p></…> → botão E <p> casavam
+    // no filtro e a MESMA vaga entrava 2x em _vers (abria o card duas vezes). Mantém só
+    // o elemento MAIS INTERNO de cada gatilho e pula os já clicados (data-oa-visto —
+    // cobre o re-scrape de "próxima página" que não paginou de verdade).
+    const els = [...document.querySelectorAll("a, button, [role='button'], p")]
+      .filter((e) => OA.isVisible(e) && /visualizar vaga/i.test(e.innerText || "") && !e.dataset.oaVisto);
+    _vers = els.filter((e) => !els.some((o) => o !== e && e.contains(o)));
     _idx = 0;
     if (!_vers.length) return status("Não achei 'Visualizar vaga'. Abra a lista do GeekHunter e clique ▶️.");
     await status(`${_vers.length} vaga(s). Abrindo 1 por vez…`);
     abrirAtual();
   }
+  let _abrindo = false; // reentrância: um cs.next duplicado não pode abrir 2 vagas (ou 2x a mesma)
   async function abrirAtual() {
+    if (_abrindo) return;
+    _abrindo = true;
+    try { await abrirAtualInterno(); } finally { _abrindo = false; }
+  }
+  async function abrirAtualInterno() {
     if (!(await running())) return;
     if (_idx >= _vers.length) {
       // acabou a página → tenta a PRÓXIMA (como o Selenium paginava)
@@ -47,11 +59,13 @@
     const can = await OA.bg({ type: "stats.canApply", platform: PLAT });
     if (can?.ok && !can.permitido) { await status(`Teto do dia (${can.teto}).`); return OA.bg({ type: "run.stop" }); }
     await status(`Abrindo vaga ${_idx + 1}/${_vers.length}…`);
-    await rsleep(4000, 10000); // espaçamento humano entre vagas
+    await rsleep(2000, 5000); // espaçamento humano entre vagas
     if (!(await running())) return;
-    OA.click(_vers[_idx]); // abre nova aba (o content script da vaga assume)
+    const el = _vers[_idx];
+    try { el.dataset.oaVisto = "1"; } catch (_) {} // marca ANTES do clique: nunca re-entra num re-scrape
+    OA.click(el); // abre nova aba (o content script da vaga assume)
   }
-  async function proxima() { _idx++; if (await running()) { await rsleep(2000, 5000); abrirAtual(); } }
+  async function proxima() { _idx++; if (await running()) { await rsleep(1000, 2500); abrirAtual(); } }
 
   // ── VAGA (nova aba): match → aplica ou fecha. SEMPRE fecha no fim (try/finally),
   // mesmo se der erro — era o bug "a aba não fechava". Fluxo REAL do GeekHunter:
@@ -74,25 +88,99 @@
     .find((m) => OA.isVisible(m) && m.querySelector("input, select, textarea")) || null;
   const containerVaga = () => { const m = modalPerguntas(); return (m && (m.querySelector("form") || m)) || OA.melhorContainer("[class*='chakra-modal'], form, [role='dialog'], [class*='modal'], main"); };
 
-  // Perguntas do modal: Chakra NumberInput (input type=text, role=spinbutton, name
-  // numérico ex.: "135499") SEM <label> — o enunciado é o <p class="chakra-text"> irmão
-  // do .chakra-numberinput → o labelFor() genérico não acha e mandaria TEXTO pro campo
-  // (pattern [0-9] recusa → "Finalizar candidatura" travava). Aqui: acha o enunciado,
-  // pergunta pro cérebro (NUMERO — responde pelo CV; tecnologia fora do CV → 0) e
-  // preenche. Salário/remuneração fica pro genérico (vem do CONFIG, nunca da IA).
+  // Enunciado de um campo do modal GeekHunter: o <p class="chakra-text"> (com o "*") é
+  // IRMÃO do wrapper do campo — sem <label for>, sem heading → labelFor()/headingLabel()
+  // não acham NADA (por isso textarea/dropdown/numberinput ficavam vazios). Sobe até 3
+  // ancestrais e pega o 1º <p>/<label> FILHO direto com texto (ignora o placeholder
+  // "Selecione uma opção" do próprio dropdown).
+  const enunciadoChakra = (el) => {
+    let node = el.parentElement;
+    for (let i = 0; i < 3 && node; i++, node = node.parentElement) {
+      const t = [...node.querySelectorAll(":scope > p, :scope > label")]
+        .map((x) => (x.innerText || "").replace(/^\*\s*/, "").trim())
+        .find((s) => s && !/^(selecione|escolha|select)/i.test(s));
+      if (t) return t;
+    }
+    return "";
+  };
+  const perguntarCerebro = async (pergunta, tipo, opcoes, ctx) => {
+    const call = OA.bg({ type: "brain.answer", payload: { pergunta, tipo, opcoes, vagaTitulo: ctx.titulo || "", vagaEmpresa: "", idioma: ctx.idioma || "pt" } });
+    const r = await Promise.race([call, new Promise((res) => setTimeout(() => res(null), 30000))]); // SW pode suspender → não congela
+    return (r?.resposta || "").trim();
+  };
+  // Opções do dropdown custom aberto (portal fora do container). O corte <120 chars
+  // evita casar um elemento gigante com tudo concatenado (aviso do run Selenium).
+  const opcoesDropdownGeek = () => [...document.querySelectorAll("[role='option'], .chakra-menu__menuitem, li[role='menuitem'], [id*='option']")]
+    .filter((o) => { const t = (o.innerText || "").trim(); return OA.isVisible(o) && t && t.length < 120; });
+
+  // Perguntas do modal ("…algumas perguntinhas pra você") — 3 tipos SEM label que o
+  // preenchedor genérico não alcança. Salário/remuneração fica pro genérico (CONFIG,
+  // nunca IA). Nada aqui derruba o wizard (cada campo em try/catch).
   async function preencherPerguntasChakra(container, ctx) {
+    // (a) Chakra NumberInput (type=text, role=spinbutton, name numérico ex. "135499"):
+    // anos de experiência — IA responde pelo CV; tecnologia fora do CV → 0.
     for (const inp of container.querySelectorAll(".chakra-numberinput input, input[role='spinbutton']")) {
       try {
         if ((inp.value || "").trim()) continue; // já respondido
-        const bloco = inp.closest(".chakra-numberinput")?.parentElement || inp.parentElement;
-        const pergunta = (bloco?.querySelector("p, label")?.innerText || "").replace(/^\*\s*/, "").trim();
+        const pergunta = enunciadoChakra(inp);
         if (/(remunera|sal[aá]ri|pretens)/i.test(pergunta)) continue; // salário → forms.js/config
-        const call = OA.bg({ type: "brain.answer", payload: { pergunta: pergunta || "Quantos anos de experiência você tem com a principal tecnologia da vaga?", tipo: "NUMERO", opcoes: [], vagaTitulo: ctx.titulo || "", vagaEmpresa: "", idioma: ctx.idioma || "pt" } });
-        const r = await Promise.race([call, new Promise((res) => setTimeout(() => res(null), 30000))]);
-        let n = parseFloat(String(r?.resposta || "").replace(",", ".").replace(/[^\d.-]/g, ""));
+        const resp = await perguntarCerebro(pergunta || "Quantos anos de experiência você tem com a principal tecnologia da vaga?", "NUMERO", [], ctx);
+        let n = parseFloat(resp.replace(",", ".").replace(/[^\d.-]/g, ""));
         if (!isFinite(n) || n < 0) n = 0; // timeout/recusa → 0 (nunca trava nem descarta a vaga)
         OA.fillInput(inp, String(Number.isInteger(n) ? n : Math.round(n)));
         await OA.sleep(250);
+      } catch (_) {}
+    }
+    // (b) TEXTAREA da pergunta (name numérico, id "tae-NNN", ex. "Você possui alguma
+    // certificação AWS?"): sem label E sem required → o genérico a pulava como
+    // "opcional sem rótulo". Obrigatória (o "*" está no <p>) → nunca deixa vazia.
+    for (const ta of container.querySelectorAll("textarea")) {
+      try {
+        if ((ta.value || "").trim()) continue;
+        const pergunta = enunciadoChakra(ta);
+        if (!pergunta) continue; // sem enunciado → deixa pro genérico
+        if (/(remunera|sal[aá]ri|pretens)/i.test(pergunta)) continue;
+        const resp = await perguntarCerebro(pergunta, "TEXT", [], ctx);
+        OA.fillInput(ta, resp || "Tenho interesse e disponibilidade para a vaga.");
+        await OA.sleep(250);
+      } catch (_) {}
+    }
+    // (c) DROPDOWN custom: <div name="NNN"> com <p>Selecione uma opção</p> + chevron
+    // <svg> (NÃO é <select>, sem role/aria-haspopup → o loop de combobox do forms.js
+    // não o vê; o valor fica num <input hidden> irmão). Abre, lê as opções no portal e
+    // escolhe via IA; fallback = 1ª opção (nunca trava o "Finalizar candidatura").
+    for (const dd of container.querySelectorAll("div[name]")) {
+      try {
+        if (!OA.isVisible(dd) || !dd.querySelector("svg")) continue; // sem chevron → não é dropdown
+        const atual = (dd.querySelector("p")?.innerText || "").trim();
+        if (atual && !/selecione|escolha|select/i.test(atual)) continue; // já escolhido
+        const hid = dd.parentElement?.querySelector("input[hidden], input[class*='chakra-input']");
+        if (hid && (hid.value || "").trim()) continue; // hidden companion já tem valor
+        const pergunta = enunciadoChakra(dd) || "Pergunta da empresa";
+        OA.click(dd); await OA.sleep(700);
+        let opts = opcoesDropdownGeek();
+        if (!opts.length) { OA.clickForte(dd); await OA.sleep(700); opts = opcoesDropdownGeek(); }
+        if (!opts.length) { try { document.body.click(); } catch (_) {} continue; } // não abriu → diagnóstico do wizard pega
+        const textos = opts.map((o) => o.innerText.trim());
+        const resp = (await perguntarCerebro(pergunta, "SELECT", textos, ctx)).toLowerCase();
+        // re-busca a opção A CADA tentativa (o menu re-renderiza e o nó antigo morre)
+        const escolher = () => { const os = opcoesDropdownGeek(); return os.find((o) => o.innerText.trim().toLowerCase() === resp)
+          || (resp && os.find((o) => { const t = o.innerText.trim().toLowerCase(); return t.includes(resp) || resp.includes(t); }))
+          || os[0]; };
+        // MARCOU de verdade? o clique simples fecha o menu mas o componente (estilo
+        // react-select, que escuta POINTER/mousedown) não registra → placeholder volta.
+        // Confirma pelo texto do trigger OU pelo <input hidden> com valor.
+        const marcado = () => { const t = (dd.querySelector("p")?.innerText || "").trim();
+          return (t && !/selecione|escolha|select/i.test(t)) || !!(hid && (hid.value || "").trim()); };
+        for (let tent = 0; tent < 3 && !marcado(); tent++) {
+          let alvo = escolher();
+          if (!alvo) { OA.clickForte(dd); await OA.sleep(700); alvo = escolher(); if (!alvo) break; } // menu fechou sem marcar → reabre
+          if (tent === 0) OA.click(alvo);
+          else { OA.clickForte(alvo); await OA.sleep(250); if (!marcado()) OA.clickForte(alvo.querySelector("p") || alvo); }
+          await OA.sleep(600);
+        }
+        if (!marcado()) { try { document.body.click(); } catch (_) {} } // desiste sem deixar o menu aberto (diagnóstico do wizard aponta)
+        await OA.sleep(300);
       } catch (_) {}
     }
   }
@@ -102,7 +190,11 @@
     _tratou = true;
     try {
       // pausa leve e randômica ao abrir a vaga: a SPA assenta e o ritmo fica humano
-      await rsleep(2000, 4000);
+      await rsleep(1000, 2000);
+      // DEDUP por vaga (igual Gupy/Solides/Senior): se a lista re-abrir a mesma vaga
+      // (gatilho duplicado, re-scrape), fecha sem re-aplicar.
+      const dup = await OA.bg({ type: "stats.isApplied", platform: PLAT, jobId: location.pathname });
+      if (dup?.aplicou) { await status("Já aplicada — fechando."); return; } // finally fecha a aba
       const c = await cfg();
       const desc = (document.querySelector("[class*='description'], main, article")?.innerText || document.body.innerText || "").slice(0, 3500);
       const titulo = (document.querySelector("h1, [class*='title']")?.innerText || document.title || "").trim();
@@ -117,7 +209,7 @@
       const cta = OA.findByText(CTA_APLICAR, { sel: "button, a, [role='button']" });
       const formPg = (cta && cta.closest("form")) || OA.melhorContainer("form, main");
       try { await OA.preencherCampos(formPg, { idioma, onStatus: (s) => status(s) }); } catch (_) {}
-      await rsleep(1400, 2600); // validação React (telefone) assenta antes do submit
+      await rsleep(700, 1300); // validação React (telefone) assenta antes do submit
       if (cta) {
         OA.click(cta);
         // espera o modal de perguntas OU o sucesso direto (vaga sem perguntinhas)
@@ -126,7 +218,7 @@
         if (!modalPerguntas() && !temSucesso()) {
           // submit segurado (validação) → re-preenche e reforça com clique FORTE
           try { await OA.preencherCampos(formPg, { idioma, onStatus: (s) => status(s) }); } catch (_) {}
-          await rsleep(1000, 1800);
+          await rsleep(500, 900);
           OA.clickForte(cta);
           t0 = Date.now();
           while (Date.now() - t0 < 9000 && !modalPerguntas() && !temSucesso()) await OA.sleep(400);
@@ -165,13 +257,21 @@
     }
   }
 
+  // GUARDA de re-entrância (igual Gupy/Solides): cs.kick do SW + auto-start disparam
+  // JUNTOS no load, e o check de _started ficava DEPOIS de dois awaits → os dois fluxos
+  // passavam e a lista iniciava 2x (mesma vaga aberta duas vezes). Só o 1º entra.
+  let _fluxo = false;
   async function rodar() {
-    if (!(await running())) return;
-    await OA.sleep(1000);
-    if (ehVaga()) return tratarVaga();       // aba de vaga
-    if (_started) return;                     // lista só inicia uma vez
-    _started = true;
-    iniciarLista();
+    if (_fluxo) return;
+    _fluxo = true;
+    try {
+      if (!(await running())) return;
+      await OA.sleep(1000);
+      if (ehVaga()) return tratarVaga();     // aba de vaga
+      if (_started) return;                   // lista só inicia uma vez
+      _started = true;
+      await iniciarLista();
+    } finally { _fluxo = false; }
   }
 
   chrome.runtime.onMessage.addListener((m, s, resp) => {

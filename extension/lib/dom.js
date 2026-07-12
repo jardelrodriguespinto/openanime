@@ -209,10 +209,19 @@
     return "";
   }
 
-  // Chama o service worker (o cérebro / storage).
+  // Chama o service worker (o cérebro / storage). WATCHDOG: se o SW nunca responder
+  // (ex.: fetch pendurado segurando o canal aberto), o await do caller ficava PENDENTE
+  // PRA SEMPRE e a automação "ficava parada" na aba (o guard _fluxo não solta e nem o
+  // cs.kick reentra). 90s > o pior caso legítimo (fetch do cérebro com abort em 60s).
+  // Também engole o throw síncrono de contexto invalidado (extensão recarregada).
   function bg(message) {
     return new Promise((resolve) => {
-      chrome.runtime.sendMessage(message, (resp) => resolve(resp || { ok: false }));
+      let fim = false;
+      const done = (r) => { if (!fim) { fim = true; resolve(r); } };
+      const t = setTimeout(() => done({ ok: false, erro: "sem resposta do service worker (timeout)" }), 90000);
+      try {
+        chrome.runtime.sendMessage(message, (resp) => { clearTimeout(t); void chrome.runtime.lastError; done(resp || { ok: false }); });
+      } catch (e) { clearTimeout(t); done({ ok: false, erro: String(e?.message || e) }); }
     });
   }
 

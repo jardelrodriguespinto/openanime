@@ -44,21 +44,36 @@
   //  - "Onde você encontrou essa vaga? (Opcional)": combobox react-aria → escolhe a
   //    1ª opção do listbox (semelhante ao Selenium), nunca trava (é opcional).
   //  - As perguntas da empresa (MUI radio + textarea) são respondidas pelo genérico.
-  async function preencherGupy(root) {
-    // -1) Diálogo "Olá …, vamos continuar sua candidatura?" → clica "Continuar" JÁ AQUI.
-    //    O wizard prioriza "salvar e continuar" ("continuar" casa por includes, e o sticky
-    //    do form ATRÁS do modal continua visível) → o Continuar do diálogo nunca era
-    //    clicado e a candidatura não avançava nessa tela. Match EXATO em "Continuar",
-    //    preferindo o ÚLTIMO (o modal renderiza por último no DOM).
-    if (/vamos continuar sua candidatura/i.test(document.body.innerText || "")) {
-      const conts = [...document.querySelectorAll("button, a, [role='button']")]
+  // Diálogo "Olá …, vamos continuar sua candidatura?" (botão sc-* que costuma IGNORAR
+  // o .click() simples): antes eram só 1 clique + 1 reforço dentro do hook — se o botão
+  // não reagisse, o wizard estourava o "travado" e PULAVA a vaga sem passar do diálogo.
+  // Agora: acha o MENOR container do diálogo (não clica um "continuar" de fora), match
+  // EXATO em "Continuar" preferindo o ÚLTIMO, e insiste com clique FORTE em loop até o
+  // diálogo sumir. Roda no hook do wizard E na entrada do fluxo (o diálogo pode vir já
+  // no load da vaga, antes de qualquer CTA).
+  async function tratarDialogContinuar() {
+    const aberto = () => /vamos continuar sua candidatura/i.test(document.body.innerText || "");
+    if (!aberto()) return false;
+    for (let t = 0; t < 4 && aberto(); t++) {
+      // containers em ordem de documento: o ÚLTIMO que contém o texto é o mais interno
+      const boxes = [...document.querySelectorAll("[role='dialog'], section, div")]
+        .filter((d) => OA.isVisible(d) && /vamos continuar sua candidatura/i.test(d.innerText || "") && d.querySelector("button, a, [role='button']"));
+      const box = boxes[boxes.length - 1] || document;
+      const conts = [...box.querySelectorAll("button, a, [role='button']")]
         .filter((b) => OA.isVisible(b) && !b.disabled && /^continuar$/i.test(((b.innerText || b.textContent || b.getAttribute("aria-label") || "")).trim()));
       const alvo = conts[conts.length - 1];
-      if (alvo) {
-        OA.click(alvo); await OA.sleep(1800);
-        if (/vamos continuar sua candidatura/i.test(document.body.innerText || "")) { OA.clickForte(alvo); await OA.sleep(1800); }
-      }
+      if (!alvo) break;
+      if (t === 0) OA.click(alvo); else OA.clickForte(alvo); // 1º normal; depois só FORTE
+      await OA.sleep(1800);
     }
+    return !aberto();
+  }
+
+  async function preencherGupy(root) {
+    // -1) Diálogo "vamos continuar sua candidatura?" → resolve JÁ AQUI (o wizard
+    //    prioriza "salvar e continuar" e o sticky ATRÁS do modal continua visível →
+    //    sem isto o Continuar do diálogo nunca era clicado).
+    await tratarDialogContinuar();
     // 0) Prompt "Perguntas criadas pela empresa" → clica "Responder agora" JÁ AQUI.
     //    O wizard priorizava o "Salvar e continuar" (sticky do passo de trás, ainda
     //    visível) e nunca chegava no prompt → a automação travava nessa tela.
@@ -73,7 +88,9 @@
       const nm = (r.name || "").toLowerCase();
       const fs = r.closest("fieldset");
       const leg = (fs?.querySelector("legend")?.innerText || "").toLowerCase();
-      const ehReferral = "indicated" in nm || nm.includes("indicad") || leg.includes("indicad") || leg.includes("indicou");
+      // (era `"indicated" in nm` — TypeError em string; o catch do wizard engolia e
+      // o hook morria aqui, pulando combobox + perguntas MUI neste passo)
+      const ehReferral = nm.includes("indicated") || nm.includes("indicad") || leg.includes("indicad") || leg.includes("indicou");
       const ehFuncionario = nm.includes("companyemployee") || nm.includes("funcion") || leg.includes("trabalha na empresa");
       if (ehReferral || ehFuncionario) {
         const querNao = r.value === "no" || (r.getAttribute("data-testid") || "").toLowerCase().endsWith("no");
@@ -183,7 +200,13 @@
     const gate = await OA.deveAplicar(desc, { titulo: document.title, platform: PLAT });
     if (!gate.aplicar) { await status(`Pulei: ${gate.motivo}`.slice(0, 80)); return "sem_match"; }
     const cta = OA.findByText(CTA, { sel: "a, button, [role='button']" });
-    if (cta && OA.isVisible(cta)) { OA.click(cta); await OA.sleep(2000); }
+    if (cta && OA.isVisible(cta)) {
+      OA.click(cta); await OA.sleep(2000);
+      // botão sc-* do Gupy às vezes ignora o .click() simples → se a candidatura não
+      // abriu, reforça com clique FORTE (senão o wizard rodava na página da vaga,
+      // "falhava" sem botão e a vaga era pulada sem aplicar).
+      if (!ehTelaCandidatura()) { try { OA.clickForte(cta); } catch (_) {} await OA.sleep(2000); }
+    }
     return rodarWizardGupy(gate.idioma);
   }
 
@@ -191,20 +214,29 @@
     if (!(await running())) return;
     if (!(await cfg()).openrouter.apiKey) return status("⚠️ Configure a OpenRouter key na dashboard.");
     await OA.sleep(1200);
-    // Já é uma página de vaga? (tem CTA candidatar-se) → aplica e segue a fila.
-    if (OA.findByText(CTA, { sel: "a, button, [role='button']" })) {
+    // diálogo "vamos continuar sua candidatura?" já no load → resolve antes de rotear
+    await tratarDialogContinuar();
+    // Página de VAGA (a URL da LISTA é sempre /job-search/…; o resto veio da fila).
+    // O CTA "Candidatar-se" demora a renderizar (SPA) → espera até ~12s. Sem CTA nem
+    // tela de candidatura = vaga encerrada/já aplicada/login → PULA pra próxima.
+    // (Antes o roteamento era por "tem CTA AGORA?": vaga lenta/encerrada caía no ramo
+    // da LISTA, esperava 25s por cards inexistentes e dava run.stop "Sem mais vagas" —
+    // matava o run inteiro no meio da fila: a Gupy "ficava parada".)
+    if (!/job-search/.test(location.pathname)) {
       const c = await cfg();
+      let cta = null;
+      for (let i = 0; i < 12; i++) {
+        if (ehTelaCandidatura()) break;
+        cta = OA.findByText(CTA, { sel: "a, button, [role='button']" });
+        if (cta && OA.isVisible(cta)) break;
+        cta = null; await OA.sleep(1000);
+      }
       let r;
-      try { r = await aplicarVagaAtual(c); } catch (e) { try { console.log("[AutoApply][gupy] erro:", e?.message); } catch (_) {} r = "erro"; }
+      try { r = cta ? await aplicarVagaAtual(c) : (ehTelaCandidatura() ? await rodarWizardGupy("pt") : "sem_cta"); }
+      catch (e) { try { console.log("[AutoApply][gupy] erro:", e?.message); } catch (_) {} r = "erro"; }
+      if (r === "sem_cta") await status("Vaga sem 'Candidatar-se' (encerrada/já aplicada?) — pulando.");
       if (r === "pausa") return status("⏸️ Confirme o envio no Gupy, depois ▶️ para seguir.");
       return proximo(); // SEMPRE segue pra próxima (não trava/para a automação)
-    }
-    // JÁ dentro da candidatura ("vamos continuar", dados adicionais, perguntas)? → wizard.
-    if (ehTelaCandidatura()) {
-      let r;
-      try { r = await rodarWizardGupy("pt"); } catch (e) { try { console.log("[AutoApply][gupy] erro:", e?.message); } catch (_) {} r = "erro"; }
-      if (r === "pausa") return status("⏸️ Confirme o envio no Gupy, depois ▶️ para seguir.");
-      return proximo();
     }
     // Lista: guarda a URL da lista (p/ paginar), coleta os links e enfileira.
     await chrome.storage.local.set({ oaGupyList: listaUrl() });
@@ -227,6 +259,7 @@
   async function retomar() {
     if (!(await running())) return;
     const c = await cfg();
+    await tratarDialogContinuar(); // diálogo pode reaparecer ao retomar no meio do fluxo
     if (OA.findByText(CTA, { sel: "a, button, [role='button']" })) {
       let r;
       try { r = await aplicarVagaAtual(c); } catch (e) { try { console.log("[AutoApply][gupy] erro:", e?.message); } catch (_) {} r = "erro"; }
