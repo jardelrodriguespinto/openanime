@@ -123,7 +123,7 @@
       if (dup?.aplicou) continue;
 
       await rsleep(1500, 4000); // "ler o card" antes de abrir (humano)
-      OA.click(card); await rsleep(1500, 3000); // abre o detalhe (master-detail)
+      OA.click(card); await rsleep(2000, 4000); // abre o detalhe (master-detail) + pausa leve pra SPA assentar
 
       const desc = (document.querySelector("[class*='description'], [class*='detail'], main")?.innerText || document.body.innerText || "").slice(0, 3500);
       const titulo = (document.querySelector("h1, [class*='title']")?.innerText || tituloCard || "").trim();

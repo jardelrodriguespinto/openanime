@@ -19,6 +19,9 @@
   const getQ = async () => (await chrome.storage.local.get(QK))[QK] || [];
   const setQ = (q) => chrome.storage.local.set({ [QK]: q });
   const log = (...a) => { try { console.log("[AutoApply][solides]", ...a); } catch (_) {} };
+  // sleeps HUMANOS (mesmo padrão Gupy/GeekHunter)
+  const rand = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
+  const rsleep = (a, b) => OA.sleep(rand(a, b));
 
   const CARD_LINK = "a[href*='/vaga/']";
   const CTA_RAPIDA = ["candidatura rápida", "candidatura rapida"]; // NÃO "candidatura revisada"
@@ -208,6 +211,8 @@
   }
 
   async function aplicarVaga() {
+    // pausa leve e randômica ao abrir a vaga: a SPA assenta e o ritmo fica humano
+    await rsleep(2000, 4000);
     const jk = location.pathname;
     const dup = await OA.bg({ type: "stats.isApplied", platform: PLAT, jobId: jk });
     if (dup?.aplicou) return "pulada";

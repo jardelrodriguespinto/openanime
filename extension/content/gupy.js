@@ -172,6 +172,8 @@
   }
 
   async function aplicarVagaAtual(c) {
+    // pausa leve e randômica ao abrir a vaga: a SPA assenta e o ritmo fica humano
+    await rsleep(2000, 4000);
     // dedup: já aplicou nesta vaga? (pula em re-scrape de páginas)
     const jk = location.pathname;
     const dup = await OA.bg({ type: "stats.isApplied", platform: PLAT, jobId: jk });
