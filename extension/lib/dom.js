@@ -3,7 +3,23 @@
 (function () {
   if (window.OA) return;
 
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const sleepLocal = (ms) => new Promise((r) => setTimeout(r, ms));
+  // Aba OCULTA (ex.: "Iniciar tudo" abre 5 abas em background): o Chrome agrupa os
+  // timers de aba oculta em ~1/minuto (throttling intensivo após 5 min) e a automação
+  // inteira "fica parada" — inclusive os sleeps curtos do waitFor/digitação. TODO sleep
+  // roda no SERVICE WORKER (não sofre throttling de visibilidade); timeout local com
+  // folga como rede de segurança caso o SW seja suspenso no meio.
+  function sleep(ms) {
+    if (!document.hidden || !chrome.runtime?.id) return sleepLocal(ms);
+    return new Promise((resolve) => {
+      let fim = false;
+      const done = () => { if (!fim) { fim = true; resolve(); } };
+      try {
+        chrome.runtime.sendMessage({ type: "util.sleep", ms }, () => { void chrome.runtime.lastError; done(); });
+      } catch (_) { return void sleepLocal(ms).then(done); }
+      setTimeout(done, ms + 70000);
+    });
+  }
 
   function isVisible(el) {
     if (!el) return false;

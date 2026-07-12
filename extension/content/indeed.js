@@ -22,6 +22,12 @@
   const rint = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
   const rsleep = (a, b) => OA.sleep(rint(a, b));
 
+  // reCAPTCHA v2/Enterprise: o DESAFIO (bframe) está ABERTO? (iframe grande e visível). O
+  // Enterprise NÃO popula #g-recaptcha-response, então "resolvido" = o desafio FECHOU
+  // (recaptcha.js clicou Verificar) — detectamos por aqui, não pelo token.
+  const desafioCaptcha = () => [...document.querySelectorAll("iframe")].some((f) =>
+    /recaptcha\/(api2|enterprise)\/bframe/.test(f.src || "") && OA.isVisible(f) && f.getBoundingClientRect().height > 120);
+
   const SK = "oaIndeedStart";
   async function proximo() {
     if (!(await running())) { status("parado."); return; }
@@ -71,25 +77,29 @@
         // preenchidos por content/recaptcha.js, injetado NESSE frame. Daqui só dá pra
         // ler o token no doc principal (#g-recaptcha-response) — esperamos ele aparecer
         // (= desafio resolvido) e então enviamos.
-        if (OA.captchaPresente() && !OA.captchaResolvido()) {
+        // Se o desafio do reCAPTCHA está ABERTO (apareceu depois de um clique anterior em
+        // Enviar), espera o solver (recaptcha.js, dentro do iframe) resolver e FECHAR o
+        // desafio — e SÓ ENTÃO clica 'Enviar sua candidatura' de novo. (Enterprise não gera
+        // token, então esperamos o desafio fechar, não o #g-recaptcha-response.)
+        if (desafioCaptcha() || (OA.captchaPresente() && !OA.captchaResolvido())) {
           await status("🔓 Resolvendo CAPTCHA (áudio) com AssemblyAI…");
-          let ok = false;
-          for (let w = 0; w < 24 && !(ok = OA.captchaResolvido()); w++) {
+          for (let w = 0; w < 32 && desafioCaptcha() && !OA.captchaResolvido(); w++) {
             if (!(await running())) return;
-            await OA.sleep(1500); // ~36s aguardando o solver do iframe
+            await OA.sleep(1500); // ~48s aguardando o solver do iframe
           }
-          if (!ok) { await status("🔒 CAPTCHA — resolva você mesmo e clique 'Enviar sua candidatura'."); return; }
-          await status("✅ CAPTCHA resolvido, enviando…");
-          await OA.sleep(600);
+          if (desafioCaptcha()) { await status("🔒 CAPTCHA — resolva você mesmo e clique 'Enviar sua candidatura'."); return; }
+          await status("✅ CAPTCHA resolvido, clicando 'Enviar sua candidatura'…");
+          await rsleep(900, 1800);
         }
-        // Envio AUTOMÁTICO no Indeed (a pedido): clica 'Enviar sua candidatura' mesmo com
-        // "pausar antes do envio" LIGADO — o captcha já foi resolvido acima. Na 1ª passada
-        // o captcha ainda não apareceu → clica, o desafio abre, o loop reavalia e reenvia.
-        // Reforça com clique FORTE se o botão mosaic (styled-components) ignorar o .click().
+        // Envio AUTOMÁTICO no Indeed (a pedido): clica 'Enviar sua candidatura'. Na 1ª passada
+        // o captcha ainda não apareceu → clica, o desafio abre, o loop reavalia, resolve e
+        // reclica. Reforça com clique FORTE se o botão mosaic ignorar o .click() (só se o
+        // desafio NÃO abriu com o clique — senão deixa o loop resolver o captcha primeiro).
         await status("Enviando candidatura…");
         await rsleep(900, 2400); // "revisão humana" antes de enviar
-        OA.click(submit); await rsleep(2400, 4200);
-        if (OA.isVisible(submit) && !OA.captchaPresente()) { OA.clickForte(submit); await rsleep(2200, 3600); }
+        const s2 = document.querySelector("button[name='submit-application'], [data-testid='submit-application-button']") || submit;
+        OA.click(s2); await rsleep(2400, 4200);
+        if (OA.isVisible(s2) && !desafioCaptcha()) { OA.clickForte(s2); await rsleep(2200, 3600); }
         continue;
       }
       const cont = document.querySelector("[data-testid='continue-button']") || OA.findByText(["continuar", "continue", "revisar", "verificar"]);
@@ -169,10 +179,14 @@
   }
 
   if (path.startsWith("/jobs")) {
+    // GUARDA de re-entrância: cs.kick do SW + auto-start disparam juntos no load →
+    // dois fluxos na mesma aba (fila raspada/avançada 2x). Só o primeiro entra.
+    let _fluxo = false;
+    const umFluxo = async (fn) => { if (_fluxo) return; _fluxo = true; try { await fn(); } finally { _fluxo = false; } };
     chrome.runtime.onMessage.addListener((msg, s, resp) => {
-      if (msg?.type === "cs.kick" && msg.platform === PLAT) { iniciar(); resp({ ok: true }); }
+      if (msg?.type === "cs.kick" && msg.platform === PLAT) { umFluxo(iniciar); resp({ ok: true }); }
       return true;
     });
-    OA.bg({ type: "run.isRunning" }).then((r) => { if (r?.running && r?.platform === PLAT) setTimeout(async () => { const q = await getQueue(); q.length ? proximo() : iniciar(); }, 1500); });
+    OA.bg({ type: "run.isRunning" }).then((r) => { if (r?.running && r?.platform === PLAT) setTimeout(() => umFluxo(async () => { const q = await getQueue(); return q.length ? proximo() : iniciar(); }), 1500); });
   }
 })();

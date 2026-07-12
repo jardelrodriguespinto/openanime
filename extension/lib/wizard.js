@@ -23,6 +23,10 @@
     } = opts || {};
 
     const log = (...a) => { try { console.log("[AutoApply][wizard]", ...a); } catch (_) {} };
+    // Delays HUMANOS: sleeps randômicos p/ a automação não ficar RÁPIDA DEMAIS (Gupy/GeekHunter
+    // avançavam antes do campo/validação React assentar → "preenche e não dá certo").
+    const rint = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
+    const rsleep = (a, b) => OA.sleep(rint(a, b));
     const habil = (b) => b && !b.disabled && b.getAttribute("aria-disabled") !== "true";
     const assinatura = () => location.href + "|" + document.querySelectorAll("input,select,textarea,button").length + "|" + (document.body.innerText || "").length;
 
@@ -66,11 +70,28 @@
       for (const [, cbs] of cg) if (!cbs.some((c) => c.checked)) out.push(nomeCampo(cbs[0]));
       return [...new Set(out)];
     };
+    // Dump de diagnóstico (o usuário NÃO tem console numa extensão): captura o form travado
+    // (URL, campos com name/type/label/obrigatório/valor, botões) → dashboard baixa .txt.
+    const dumpDiag = async (motivo, container) => {
+      try {
+        const root = container || document;
+        const botoes = [...document.querySelectorAll("button, a, [role='button']")]
+          .filter((b) => OA.isVisible(b)).slice(0, 40)
+          .map((b) => ({ txt: (b.innerText || b.getAttribute("aria-label") || "").trim().slice(0, 40), off: !habil(b), name: b.getAttribute("name") || "", id: b.id || "" }));
+        const campos = [...root.querySelectorAll("input, select, textarea")].slice(0, 120).map((el) => ({
+          tag: el.tagName.toLowerCase(), type: (el.type || "").slice(0, 12), name: (el.getAttribute("name") || "").slice(0, 40), id: (el.id || "").slice(0, 40),
+          label: (OA.headingLabel(el) || OA.labelFor(el) || "").slice(0, 70),
+          req: !!(el.required || el.getAttribute("aria-required") === "true" || /\*/.test(OA.labelFor(el) || "")),
+          val: (el.type === "checkbox" || el.type === "radio") ? (el.checked ? "MARCADO" : "-") : (el.value || "").slice(0, 30),
+        }));
+        await OA.bg({ type: "debug.push", tag: motivo, data: { url: location.href, title: (document.title || "").slice(0, 90), vazios: camposVazios(root), botoes, campos } });
+      } catch (_) {}
+    };
     let travado = 0;
 
     for (let step = 0; step < maxSteps; step++) {
       if (!(await isRunning())) return "parou";
-      await OA.sleep(700);
+      await rsleep(1200, 2800); // pausa humana entre passos (não em rajada)
       const container = (typeof getContainer === "function" ? getContainer() : getContainer) || document.body;
 
       // hook por-plataforma ANTES do preenchimento genérico (ex.: Gupy força "Não" no
@@ -78,7 +99,9 @@
       try { if (typeof preencher === "function") await preencher(container, step); } catch (e) { log("preencher(hook) erro:", e?.message); }
       // preencher NUNCA pode derrubar o wizard (senão a automação "para" silenciosa).
       try { await OA.preencherCampos(container, { ...ctx, onStatus }); } catch (e) { log("preencherCampos erro:", e?.message); }
-      await OA.sleep(400);
+      // Espera o React ASSENTAR o que foi preenchido (telefone/validação) ANTES de avançar —
+      // era o "preenche mas não dá certo": clicava rápido demais e o campo ainda estava vazio.
+      await rsleep(1400, 3000);
       const sigAntes = assinatura();
 
       // CANDIDATOS A AVANÇAR — definido ANTES do finalizar (a ordem importa). Retorna
@@ -142,13 +165,14 @@
           for (const b of habilitados) {
             if (!OA.isVisible(b) || !habil(b)) continue; // pode ter sumido após clique anterior
             log("step", step, "AVANÇAR (clicando):", (b.innerText || "").trim().slice(0, 30));
-            OA.click(b); await OA.sleep(1500);
+            await rsleep(500, 1400); // "hesitação" humana antes de clicar
+            OA.click(b); await rsleep(1600, 3000);
             if (assinatura() !== sigAntes) break;
             // clique normal não mudou a página → SEMPRE reforça com clique FORTE (o
             // botão sc-* do Gupy ignora o .click() simples). O guard de assinatura já
             // garante que nada aconteceu, então não há duplo-envio. (Antes eu condicionava
             // a camposVazios — um falso-positivo bloqueava o reforço e o botão "não clicava".)
-            log("step", step, "clique normal não avançou → clique FORTE"); OA.clickForte(b); await OA.sleep(1600);
+            log("step", step, "clique normal não avançou → clique FORTE"); OA.clickForte(b); await rsleep(1700, 3000);
             if (assinatura() !== sigAntes) break;
             log("step", step, "botão não avançou → tentando o próximo 'continuar'");
           }
@@ -156,11 +180,12 @@
           const vazios = camposVazios(container);
           log("step", step, "AVANÇAR DESABILITADO:", (cands[0]?.innerText || "").trim().slice(0, 30), "| campos vazios:", vazios);
           onStatus(vazios.length ? `Falta preencher: ${vazios.join(" · ")}`.slice(0, 110) : "Aguardando preencher campo obrigatório…");
-          if (++travado >= 5) { onStatus(`Não consegui preencher: ${vazios.join(" · ") || "um campo obrigatório"}. Complete à mão e ▶️.`.slice(0, 120)); return "falhou"; }
+          if (++travado >= 5) { await dumpDiag("avancar-desabilitado", container); onStatus(`Não consegui preencher: ${vazios.join(" · ") || "um campo obrigatório"}. Baixe o Diagnóstico no dashboard.`.slice(0, 120)); return "falhou"; }
           continue;
         }
       } else {
         log("step", step, "SEM botão de avançar/finalizar");
+        await dumpDiag("sem-botao", container);
         onStatus("Sem botão de avançar/finalizar — pulei.");
         return "falhou";
       }
@@ -171,7 +196,7 @@
       if (!avancou) {
         const vazios = camposVazios(container);
         if (vazios.length) log("step", step, "não avançou — campos vazios:", vazios);
-        if (++travado >= 3) { onStatus(`Formulário travou${vazios.length ? " (falta: " + vazios.join(" · ") + ")" : ""} — pulei.`.slice(0, 120)); return "falhou"; }
+        if (++travado >= 3) { await dumpDiag("formulario-travou", container); onStatus(`Formulário travou${vazios.length ? " (falta: " + vazios.join(" · ") + ")" : ""} — baixe o Diagnóstico.`.slice(0, 120)); return "falhou"; }
       } else travado = 0;
     }
     return "falhou";

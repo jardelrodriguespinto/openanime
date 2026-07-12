@@ -35,6 +35,15 @@ $("start").addEventListener("click", async () => {
   if (!r.ok) setStatus(r.erro || "erro ao iniciar", false);
 });
 
+$("startAll").addEventListener("click", async () => {
+  const cfg = await getConfig();
+  if (!cfg.openrouter.apiKey) { $("warn").classList.remove("hidden"); return; }
+  setStatus("abrindo TODAS as plataformas…", true);
+  const r = await bg({ type: "run.startAll" });
+  if (!r.ok) setStatus(r.erro || "erro ao iniciar tudo", false);
+  else setStatus(`rodando: ${(r.platforms || []).join(", ")}`, true);
+});
+
 $("stop").addEventListener("click", async () => {
   await bg({ type: "run.stop" });
   setStatus("parado", false);

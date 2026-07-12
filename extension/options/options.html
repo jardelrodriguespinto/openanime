@@ -86,6 +86,18 @@
         <p class="muted">Todas as plataformas têm content script. LinkedIn é o mais maduro; Indeed/Gupy/GeekHunter/Senior são 1ª versão e os seletores podem precisar de ajuste no 1º run real.</p>
       </section>
 
+      <section>
+        <h2>Diagnóstico</h2>
+        <p class="muted">Quando a automação trava num formulário, ela grava aqui o passo + os campos (nome, tipo, rótulo, obrigatório, valor) e os botões. <b>Baixe o .txt e me mande</b> — é assim que eu vejo o que travou (a extensão não tem console p/ você copiar).</p>
+        <div class="actions">
+          <button id="diagAtualizar">Atualizar</button>
+          <button id="diagCopiar">Copiar</button>
+          <button id="diagBaixar" class="primary">Baixar .txt</button>
+          <button id="diagLimpar" class="ghost">Limpar</button>
+        </div>
+        <textarea id="diagOut" rows="14" readonly style="width:100%;font-family:monospace;font-size:12px;white-space:pre;overflow:auto"></textarea>
+      </section>
+
       <div class="actions">
         <button id="salvar" class="primary">Salvar</button>
         <span id="salvo" class="muted"></span>

@@ -60,6 +60,14 @@
     // esses (achando que a plataforma pré-preenche) — mas GeekHunter/etc. NÃO preenchem
     // → form obrigatório ficava vazio ("não preenche nada"). Agora preenche DO PERFIL.
     const perfil = (((await OA.bg({ type: "config.get" })).config) || {}).perfil || {};
+    // Só os dígitos NACIONAIS (DDD+número): o widget (react-phone-input-2) já mostra o "+55"
+    // fixo → preenchemos SÓ o número, NUNCA o +55. Tira o código de país 55 só quando o número
+    // vem completo (12–13 dígitos); um DDD 55 nacional (10–11 dígitos) NÃO é tocado.
+    const telNacional = (tel) => {
+      let d = String(tel || "").replace(/\D/g, "");
+      if (d.length >= 12 && d.startsWith("55")) d = d.slice(2);
+      return d;
+    };
     const valorContato = (label, inp) => {
       const l = (label || "").toLowerCase();
       const type = (inp.type || "").toLowerCase();
@@ -69,25 +77,33 @@
       const hint = ((inp.getAttribute("placeholder") || "") + " " + (inp.value || "")).toLowerCase();
       if (/linkedin/.test(l) || /linkedin/.test(auto)) return perfil.linkedin || "";
       if (/(e-mail|email)/.test(l) || type === "email" || auto.includes("email")) return perfil.email || "";
-      if (/(celular|telefone|phone|whatsapp|\bddd\b)/.test(l) || type === "tel" || auto === "tel" || /\+55|\bddd\b|\(\d{2}\)/.test(hint)) return perfil.telefone || ""; // VERBATIM do dashboard (não mexe em +55)
+      if (/(celular|telefone|phone|whatsapp|\bddd\b)/.test(l) || type === "tel" || auto === "tel" || /\+55|\bddd\b|\(\d{2}\)/.test(hint)) return telNacional(perfil.telefone); // só o número, sem +55
       if (/(nome completo|nome|name|full name)/.test(l) && !/(empresa|company|usu[aá]rio|user|arquivo)/.test(l)) return perfil.nome || "";
       if (/(cidade|city|localiza|location)/.test(l)) return perfil.localizacao || "";
       return "";
     };
-    for (const inp of container.querySelectorAll("input[type='text'], input[type='email'], input[type='tel'], input[type='url'], input:not([type])")) await wrap(async () => {
+    // CONTATOS varridos no DOCUMENTO INTEIRO (não só no container): "Celular com DDD"/
+    // LinkedIn às vezes ficam num bloco fora do form que o melhorContainer escolheu → nunca
+    // eram preenchidos. naoOculto + valorContato (só rótulos de contato) evitam campo errado.
+    for (const inp of document.querySelectorAll("input[type='text'], input[type='email'], input[type='tel'], input[type='url'], input:not([type])")) await wrap(async () => {
       if (!naoOculto(inp) || inp.readOnly || inp.getAttribute("role") === "combobox") return;
       const label = OA.labelFor(inp);
+      const ehTel = inp.type === "tel" || /(celular|telefone|phone|whatsapp|\bddd\b)/i.test(label) || /\+55|\bddd\b|\(\d{2}\)/.test(((inp.getAttribute("placeholder") || "") + " " + (inp.value || "")).toLowerCase());
       const v = valorContato(label, inp);
-      if (!v) return;
+      if (!v) {
+        // Achou o "Celular com DDD" mas o TELEFONE está VAZIO no perfil da extensão → avisa
+        // (é a causa nº1 de "não preenche e não continua": o número não está salvo em Opções).
+        if (ehTel && !(perfil.telefone || "").trim() && ctx.onStatus) ctx.onStatus("⚠️ Telefone VAZIO no perfil da extensão (Opções) — 'Celular com DDD' fica obrigatório.");
+        return;
+      }
       // "já preenchido?" — MAS "Celular com DDD" vem com "+55" (só o prefixo) e conta
       // como VAZIO (senão fica "campo obrigatório").
       const cur = (inp.value || "").trim();
-      const ehTel = inp.type === "tel" || /(celular|telefone|phone|whatsapp|\bddd\b)/i.test(label);
       // "Celular com DDD" vem com só o "+55" (prefixo do widget) e conta como VAZIO (senão
       // fica "campo obrigatório"). Preenche o número EXATAMENTE como está no dashboard.
       const jaPreenchido = cur && !(ehTel && cur.replace(/\D/g, "").length <= 3);
       if (jaPreenchido) return;
-      OA.fillInput(inp, v);
+      if (ehTel) await preencherTelefone(inp, v); else OA.fillInput(inp, v);
       log("contato:", (label || "").slice(0, 30), "→", String(v).slice(0, 25), "| ficou:", (inp.value || "").slice(0, 20));
     });
     log("preencherCampos: selects=", container.querySelectorAll("select").length,
@@ -280,6 +296,41 @@
       OA.fillInput(inp, resp);
       log("texto:", (label || "(sem rótulo)").slice(0, 40), "| tipo:", tipo, "| obrig:", obrig, "| resp:", String(resp).slice(0, 30));
     });
+  }
+
+  // Preenche telefone em widget CONTROLADO (react-phone-input-2 do GeekHunter:
+  // input[type=tel][name=phone], já vem com "+55 "). Fiel ao Selenium que FUNCIONAVA
+  // (_preencher_telefone_geekhunter): NUNCA substitui o valor inteiro — setar
+  // "11912345678" faz o widget re-parsear o DDI pelos PRIMEIROS dígitos (vira +1…) ou
+  // reverter pro "+55" logo DEPOIS do nosso check → "não preenche o telefone". Aqui:
+  // caret no FIM (depois do "+55 ") e DIGITA o número nacional — o widget formata.
+  // NUNCA escrever "+55" no valor: o GeekHunter valida o campo como NACIONAL e o código
+  // do país escrito dispara "informe um número de telefone válido". Cadência humana
+  // (a 45ms/char a validação não assentava); se não assentou, limpa e re-digita.
+  async function preencherTelefone(inp, nacional) {
+    const dig = String(nacional || "").replace(/\D/g, "");
+    if (!dig) return;
+    const digitos = () => (inp.value || "").replace(/\D/g, "");
+    const ok = () => digitos().endsWith(dig);
+    if (digitos().length >= 10) return; // já tem um número real
+    const digitar = async (cadencia) => {
+      try { inp.focus(); } catch (_) {}
+      // sobrou valor parcial (mais que o DDI, menos que um número) → limpa antes
+      if (digitos().length > 3) { try { inp.select(); document.execCommand("delete"); } catch (_) {} await OA.sleep(300); }
+      try { const n = (inp.value || "").length; inp.setSelectionRange(n, n); } catch (_) {}
+      for (const ch of dig) {
+        let ins = false;
+        try { ins = document.execCommand("insertText", false, ch); } catch (_) {}
+        if (!ins) { try { OA.setNativeValue(inp, (inp.value || "") + ch); } catch (_) {} }
+        inp.dispatchEvent(new KeyboardEvent("keyup", { key: ch, bubbles: true }));
+        await OA.sleep(cadencia + Math.floor(Math.random() * 70));
+      }
+      await OA.sleep(800); // widget re-formata/valida antes de conferir
+    };
+    await digitar(90);
+    if (!ok()) await digitar(150); // não assentou → limpa e re-digita mais devagar
+    if (!ok()) OA.fillInput(inp, dig); // último recurso: input simples sem widget (SÓ o número, sem DDI)
+    try { inp.blur(); } catch (_) {}
   }
 
   function clampNum(inp, resp) {

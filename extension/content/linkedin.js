@@ -229,6 +229,9 @@
     try {
       const cfg = await config();
       if (!cfg.openrouter.apiKey) { await status("⚠️ Configure a OpenRouter API key na dashboard da extensão."); return; }
+      // SPA em aba de background renderiza devagar → espera os cards antes do loop
+      // (com 0 cards ele concluía "Fim das páginas" na largada do "Iniciar tudo").
+      await OA.waitFor(SEL.cards, { timeout: 25000 });
 
       let aplicadas = 0, pagina = 1;
       // PAGINAÇÃO: percorre as páginas de resultados (como o Selenium). Só vira de

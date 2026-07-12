@@ -13,12 +13,19 @@
 
   const CARD_LINK = "[data-testid='job-list__listitem'] a[href], a[data-testid='job-cta-link'][href], a[href*='/job/'], a[href*='/jobs/'], a[href*='/vaga']";
   const CTA = ["candidatar-se", "candidatar", "aplicar", "quero me candidatar"];
+  // sleeps HUMANOS: a automação estava rápida demais (avançava antes de assentar).
+  const rand = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
+  const rsleep = (a, b) => OA.sleep(rand(a, b));
 
   const PK = "oaGupyPage";
   const listaUrl = () => { const u = new URL(location.href); return u.origin + u.pathname; }; // /job-search/term=...
   async function proximo() {
     if (!(await running())) { status("parado."); return; }
     const q = await getQ(); const next = q.shift(); await setQ(q);
+    // espaçamento humano entre vagas (não abre uma logo atrás da outra)
+    await status("Aguardando um pouco antes da próxima vaga…");
+    await rsleep(5000, 13000);
+    if (!(await running())) { status("parado."); return; }
     if (next) { location.href = next; return; }
     // fila vazia → PRÓXIMA PÁGINA da busca (Gupy: ?page=N). Guardamos a URL da lista.
     const base = (await chrome.storage.local.get("oaGupyList")).oaGupyList;
@@ -38,6 +45,29 @@
   //    1ª opção do listbox (semelhante ao Selenium), nunca trava (é opcional).
   //  - As perguntas da empresa (MUI radio + textarea) são respondidas pelo genérico.
   async function preencherGupy(root) {
+    // -1) Diálogo "Olá …, vamos continuar sua candidatura?" → clica "Continuar" JÁ AQUI.
+    //    O wizard prioriza "salvar e continuar" ("continuar" casa por includes, e o sticky
+    //    do form ATRÁS do modal continua visível) → o Continuar do diálogo nunca era
+    //    clicado e a candidatura não avançava nessa tela. Match EXATO em "Continuar",
+    //    preferindo o ÚLTIMO (o modal renderiza por último no DOM).
+    if (/vamos continuar sua candidatura/i.test(document.body.innerText || "")) {
+      const conts = [...document.querySelectorAll("button, a, [role='button']")]
+        .filter((b) => OA.isVisible(b) && !b.disabled && /^continuar$/i.test(((b.innerText || b.textContent || b.getAttribute("aria-label") || "")).trim()));
+      const alvo = conts[conts.length - 1];
+      if (alvo) {
+        OA.click(alvo); await OA.sleep(1800);
+        if (/vamos continuar sua candidatura/i.test(document.body.innerText || "")) { OA.clickForte(alvo); await OA.sleep(1800); }
+      }
+    }
+    // 0) Prompt "Perguntas criadas pela empresa" → clica "Responder agora" JÁ AQUI.
+    //    O wizard priorizava o "Salvar e continuar" (sticky do passo de trás, ainda
+    //    visível) e nunca chegava no prompt → a automação travava nessa tela.
+    const ra = document.querySelector("button[aria-label='Responder agora']") ||
+      OA.findByText(["responder agora"], { sel: "a, button, [role='button']" });
+    if (ra && OA.isVisible(ra) && !ra.disabled) {
+      OA.click(ra); await OA.sleep(1500);
+      if (OA.isVisible(ra)) { OA.clickForte(ra); await OA.sleep(1500); }
+    }
     // 1) Radios de "Dados adicionais": força "Não".
     for (const r of root.querySelectorAll("input[type='radio']")) {
       const nm = (r.name || "").toLowerCase();
@@ -69,36 +99,34 @@
     await responderPerguntasMui(root);
   }
 
-  // Responde os grupos de opção (checkbox MUI) das perguntas da empresa: agrupa por <h3>,
-  // PULA os já respondidos (evita o toggle que destrava→trava), e escolhe UMA opção via IA.
-  // Marca todo input do grupo com data-oa-gupy-mui pra o forms.js NÃO tocar nessas opções.
+  // Responde as "Perguntas criadas pela empresa" (opções = CHECKBOX MUI, input oculto dentro
+  // de <label>). AGRUPA pelo `name` do input ("checkbox-<idPergunta>-<i>", 1 idPergunta por
+  // pergunta) — NÃO por <h3>, porque a Smarthis usa <h1> pro título do passo e o enunciado
+  // nem sempre é <h3>. PULA perguntas já respondidas (evita o toggle que destrava→trava) e
+  // escolhe UMA opção via IA. Marca todo input com data-oa-gupy-mui p/ o forms.js não tocar.
   async function responderPerguntasMui(root) {
-    // Varre <h3> (enunciado) + os CHECKBOX em ordem de documento e atribui cada checkbox ao
-    // h3 mais recente. Pega o input direto (o MUI esconde o input: opacity 0) — mais robusto
-    // que depender da classe do <label>. Clicável = <label> que envolve/aponta o input.
-    let atual = null;
-    const grupos = [];
-    for (const el of root.querySelectorAll("h3, input[type='checkbox']")) {
-      if (el.tagName.toLowerCase() === "h3") {
-        const texto = (el.innerText || "").trim().replace(/^\d+[\.\)]\s*/, "").replace(/\s*\*\s*$/, "").trim();
-        atual = texto ? { pergunta: texto, opcoes: [] } : null;
-        if (atual) grupos.push(atual);
-        continue;
-      }
-      if (!atual) continue; // checkbox antes de qualquer <h3> não é pergunta da empresa
-      const lbl = el.closest("label") || (el.id && root.querySelector(`label[for="${CSS.escape(el.id)}"]`)) || null;
-      const txt = ((lbl && lbl.innerText) || el.getAttribute("aria-label") || OA.labelFor(el) || "").trim();
-      if (txt) atual.opcoes.push({ inp: el, click: lbl || el, txt });
+    const grupos = new Map(); // key = idPergunta (prefixo do name) → { primeiro, opcoes:[] }
+    let n = 0;
+    for (const inp of root.querySelectorAll("input[type='checkbox']")) {
+      const nm = inp.getAttribute("name") || "";
+      const m = nm.match(/^(.+)-\d+$/); // tira o "-<i>" final → idPergunta
+      const key = m ? m[1] : (OA.headingLabel(inp) || nm || ("cb" + (n++)));
+      const lbl = inp.closest("label") || (inp.id && root.querySelector(`label[for="${CSS.escape(inp.id)}"]`)) || null;
+      const txt = ((lbl && lbl.innerText) || inp.getAttribute("aria-label") || OA.labelFor(inp) || "").trim();
+      if (!txt) continue;
+      if (!grupos.has(key)) grupos.set(key, { primeiro: inp, opcoes: [] });
+      grupos.get(key).opcoes.push({ inp, click: lbl || inp, txt });
     }
-    // marca cada opção com o ÍNDICE da pergunta → forms.js agrupa/pula por pergunta (e o
-    // diagnóstico "Falta preencher" nomeia a PERGUNTA, não cada opção não marcada).
-    grupos.forEach((g, gi) => g.opcoes.forEach((o) => { o.inp.dataset.oaGupyMui = String(gi); }));
-    for (const g of grupos) {
-      if (!g.opcoes.length || g.opcoes.some((o) => o.inp.checked)) continue; // vazia responde; marcada pula (sem toggle)
+    let gi = 0;
+    for (const [, g] of grupos) {
+      const idx = gi++;
+      for (const o of g.opcoes) o.inp.dataset.oaGupyMui = String(idx); // forms.js agrupa/pula por pergunta
+      if (g.opcoes.some((o) => o.inp.checked)) continue; // já respondida → não mexe (evita toggle)
+      const enun = OA.headingLabel(g.primeiro) || OA.labelFor(g.primeiro) || "Pergunta da empresa";
       const opcoesTxt = g.opcoes.map((o) => o.txt);
       let escolha = "";
       try {
-        const r = await OA.bg({ type: "brain.answer", payload: { pergunta: g.pergunta, tipo: "SELECT", opcoes: opcoesTxt, idioma: "pt" } });
+        const r = await OA.bg({ type: "brain.answer", payload: { pergunta: enun, tipo: "SELECT", opcoes: opcoesTxt, idioma: "pt" } });
         escolha = (r?.resposta || "").trim();
       } catch (_) {}
       const e = escolha.toLowerCase();
@@ -107,7 +135,7 @@
         || g.opcoes[0];
       // Clica só se ainda não marcado → nunca faz toggle (re-clique desmarcaria e travaria).
       if (!alvo.inp.checked) {
-        OA.click(alvo.click); await OA.sleep(200);
+        OA.click(alvo.click); await OA.sleep(rand(300, 700));
         if (!alvo.inp.checked) { try { OA.setChecked(alvo.inp, true, root); } catch (_) {} }
       }
     }
@@ -126,8 +154,11 @@
   // Roda SÓ o wizard (quando já estamos na candidatura). Envio confirmado → stats.applied.
   async function rodarWizardGupy(idioma) {
     const r = await OA.rodarWizard(() => OA.melhorContainer("form, [role='dialog'], main"), {
-      avancar: ["salvar e continuar", "responder agora", "continuar", "próximo", "próxima", "avançar", "next"],
-      avancarSel: ["button[name='saveAndContinueButton']", "button[aria-label='Responder agora']"],
+      // "responder agora" ANTES de "salvar e continuar": no prompt das perguntas o
+      // sticky "Salvar e continuar" do passo de trás continua visível e ganhava a
+      // prioridade → o prompt nunca era clicado (automação travada em "Responder agora").
+      avancar: ["responder agora", "salvar e continuar", "continuar", "próximo", "próxima", "avançar", "next"],
+      avancarSel: ["button[aria-label='Responder agora']", "button[name='saveAndContinueButton']"],
       finalizar: ["finalizar candidatura", "finalizar", "concluir"],
       finalizarSel: ["#dialog-give-up-personalization-step"],
       sucessoFrases: ["candidatura realizada", "candidatura foi realizada", "inscrição realizada", "você se candidatou", "sua candidatura foi enviada", "recebemos sua candidatura", "application submitted", "you have applied"],
@@ -175,6 +206,11 @@
     }
     // Lista: guarda a URL da lista (p/ paginar), coleta os links e enfileira.
     await chrome.storage.local.set({ oaGupyList: listaUrl() });
+    // SPA (ainda mais em aba de BACKGROUND do "Iniciar tudo") demora a renderizar os
+    // cards → espera aparecerem antes de concluir "sem vagas" (o 0-cards prematuro
+    // encerrava a plataforma na largada).
+    await status("Aguardando as vagas carregarem…");
+    await OA.waitFor(CARD_LINK, { timeout: 25000 });
     for (let i = 0; i < 3; i++) { window.scrollTo(0, document.body.scrollHeight); await OA.sleep(900); } window.scrollTo(0, 0);
     const links = [...new Set([...document.querySelectorAll(CARD_LINK)].map((a) => a.href).filter(Boolean))];
     if (!links.length) {
@@ -204,6 +240,11 @@
     iniciar();
   }
 
-  chrome.runtime.onMessage.addListener((m, s, resp) => { if (m?.type === "cs.kick" && m.platform === PLAT) { iniciar(); resp({ ok: true }); } return true; });
-  OA.bg({ type: "run.isRunning" }).then(async (r) => { if (r?.running && r?.platform === PLAT) { const q = await getQ(); setTimeout(q.length ? retomar : iniciar, 1500); } });
+  // GUARDA de re-entrância: a cada load o cs.kick do SW E o auto-start abaixo disparam
+  // JUNTOS → DOIS fluxos na mesma aba (fila avançava 2x pulando vagas, wizard duplicado
+  // clicava/desmarcava). Só o primeiro entra; o outro vira no-op.
+  let _fluxo = false;
+  const umFluxo = async (fn) => { if (_fluxo) return; _fluxo = true; try { await fn(); } finally { _fluxo = false; } };
+  chrome.runtime.onMessage.addListener((m, s, resp) => { if (m?.type === "cs.kick" && m.platform === PLAT) { umFluxo(iniciar); resp({ ok: true }); } return true; });
+  OA.bg({ type: "run.isRunning" }).then(async (r) => { if (r?.running && r?.platform === PLAT) { const q = await getQ(); setTimeout(() => umFluxo(q.length ? retomar : iniciar), 1500); } });
 })();

@@ -115,6 +115,31 @@ async function testar() {
   }
 }
 
+// ── Diagnóstico (log baixável — a extensão não tem console p/ o usuário copiar) ──
+function fmtDiag(log) {
+  if (!log || !log.length) return "(sem diagnóstico ainda — rode a automação até travar num formulário)";
+  return log.map((e) => {
+    const d = e.data || {};
+    const campos = (d.campos || []).map((c) => `    ${c.req ? "*" : " "} ${c.tag}/${c.type} name=${c.name || "-"} label="${c.label}" val=[${c.val}]`).join("\n");
+    const botoes = (d.botoes || []).map((b) => `    ${b.off ? "[OFF]" : "[ on]"} "${b.txt}" ${b.name ? "name=" + b.name : ""}${b.id ? " id=" + b.id : ""}`).join("\n");
+    return `===== ${e.t} | ${e.platform} | ${e.tag} =====\nURL: ${d.url}\nTitulo: ${d.title}\nFALTA PREENCHER: ${(d.vazios || []).join(" · ") || "(nada apontado)"}\nBOTOES:\n${botoes}\nCAMPOS:\n${campos}`;
+  }).join("\n\n");
+}
+async function carregarDiag() {
+  const r = await chrome.runtime.sendMessage({ type: "debug.get" });
+  $("diagOut").value = fmtDiag(r?.log);
+}
+$("diagAtualizar").addEventListener("click", carregarDiag);
+$("diagCopiar").addEventListener("click", () => { $("diagOut").select(); try { document.execCommand("copy"); } catch (_) {} });
+$("diagBaixar").addEventListener("click", () => {
+  const blob = new Blob([$("diagOut").value || ""], { type: "text/plain" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = "autoapply-diagnostico.txt"; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+});
+$("diagLimpar").addEventListener("click", async () => { await chrome.runtime.sendMessage({ type: "debug.clear" }); carregarDiag(); });
+
 $("salvar").addEventListener("click", salvar);
 $("testar").addEventListener("click", testar);
 load();
+carregarDiag();

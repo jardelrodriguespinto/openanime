@@ -96,11 +96,24 @@ export async function getState() {
   return st;
 }
 
-export async function setState(patch) {
-  const st = await getState();
-  const next = { ...st, ...patch };
-  await chrome.storage.local.set({ [STATE_KEY]: next });
-  return next;
+// Mutações de estado SERIALIZADAS numa fila única. Com várias plataformas rodando
+// ("Iniciar tudo"), dois handlers concorrentes fazem read-modify-write e o segundo
+// sobrescreve o primeiro — um status.push que leu o estado ANTES do run.start gravar
+// apagava running/platforms recém-escritos e a automação "parava" sozinha.
+let _fila = Promise.resolve();
+function serial(fn) {
+  const p = _fila.then(fn, fn);
+  _fila = p.then(() => {}, () => {});
+  return p;
+}
+
+export function setState(patch) {
+  return serial(async () => {
+    const st = await getState();
+    const next = { ...st, ...patch };
+    await chrome.storage.local.set({ [STATE_KEY]: next });
+    return next;
+  });
 }
 
 export async function contador(platform) {
@@ -108,13 +121,15 @@ export async function contador(platform) {
   return st.counts[platform] || 0;
 }
 
-export async function registrarCandidatura(platform, jobId) {
-  const st = await getState();
-  st.counts[platform] = (st.counts[platform] || 0) + 1;
-  st.applied[platform] = st.applied[platform] || {};
-  if (jobId) st.applied[platform][jobId] = 1;
-  await chrome.storage.local.set({ [STATE_KEY]: st });
-  return st.counts[platform];
+export function registrarCandidatura(platform, jobId) {
+  return serial(async () => {
+    const st = await getState();
+    st.counts[platform] = (st.counts[platform] || 0) + 1;
+    st.applied[platform] = st.applied[platform] || {};
+    if (jobId) st.applied[platform][jobId] = 1;
+    await chrome.storage.local.set({ [STATE_KEY]: st });
+    return st.counts[platform];
+  });
 }
 
 export async function jaAplicou(platform, jobId) {

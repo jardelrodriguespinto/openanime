@@ -9,6 +9,9 @@
   const running = async () => { const r = await OA.bg({ type: "run.isRunning" }); return r?.running && r?.platform === PLAT; };
   const status = (t, a) => OA.bg({ type: "status.push", platform: PLAT, status: t, action: a });
   const cfg = async () => (await OA.bg({ type: "config.get" })).config;
+  // sleeps HUMANOS: estava rápido demais (abria vaga atrás de vaga sem espaçar).
+  const rand = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
+  const rsleep = (a, b) => OA.sleep(rand(a, b));
 
   const CTA_APLICAR = ["quero me candidatar", "candidatar-se", "candidatar", "finalizar candidatura", "enviar candidatura", "enviar minha candidatura", "aplicar para a vaga", "aplicar"];
   const FECHAR = ["entendi", "fechar", "ok"];
@@ -44,9 +47,11 @@
     const can = await OA.bg({ type: "stats.canApply", platform: PLAT });
     if (can?.ok && !can.permitido) { await status(`Teto do dia (${can.teto}).`); return OA.bg({ type: "run.stop" }); }
     await status(`Abrindo vaga ${_idx + 1}/${_vers.length}…`);
+    await rsleep(4000, 10000); // espaçamento humano entre vagas
+    if (!(await running())) return;
     OA.click(_vers[_idx]); // abre nova aba (o content script da vaga assume)
   }
-  async function proxima() { _idx++; if (await running()) abrirAtual(); }
+  async function proxima() { _idx++; if (await running()) { await rsleep(2000, 5000); abrirAtual(); } }
 
   // ── VAGA (nova aba): match → aplica ou fecha. SEMPRE fecha no fim (try/finally),
   // mesmo se der erro — era o bug "a aba não fechava". ─────────────────────────

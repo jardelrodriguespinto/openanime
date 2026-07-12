@@ -79,12 +79,20 @@
 
   // Diálogo "Você está a 1 passo… Deseja revisar seu currículo?" → Sim (abre o passo
   // de habilidades/revisão). Cancelar NÃO conclui a candidatura, então clicamos Sim.
-  function tratarDialogRevisar() {
-    const t = (document.body.innerText || "").toLowerCase();
-    if (!/deseja revisar seu currículo|você está a 1 passo|voce esta a 1 passo|revisar seu curr/.test(t)) return false;
-    const sim = OA.findByText(["sim"], { sel: "button, a, [role='button']" });
-    if (sim && OA.isVisible(sim)) { log("diálogo revisar currículo → Sim"); OA.click(sim); return true; }
-    return false;
+  // Match EXATO no texto do botão: findByText usa includes() e "sim" casa DENTRO de
+  // outras palavras/botões → clicava o elemento errado, o diálogo ficava aberto e a
+  // candidatura não seguia. Prefere o ÚLTIMO (o diálogo renderiza por último no DOM).
+  async function tratarDialogRevisar() {
+    const aberto = () => /deseja revisar seu currículo|você está a 1 passo|voce esta a 1 passo|revisar seu curr/i.test(document.body.innerText || "");
+    if (!aberto()) return false;
+    const sims = [...document.querySelectorAll("button, a, [role='button']")]
+      .filter((b) => OA.isVisible(b) && !b.disabled && /^sim$/i.test(((b.innerText || b.textContent || b.getAttribute("aria-label") || "")).trim()));
+    const sim = sims[sims.length - 1];
+    if (!sim) return false;
+    log("diálogo revisar currículo → Sim");
+    OA.click(sim); await OA.sleep(1400);
+    if (aberto()) { OA.clickForte(sim); await OA.sleep(1400); }
+    return true;
   }
 
   // "Habilidades para a vaga" — radios SEM name (id="skill-option-…", value 0..3, um
@@ -149,7 +157,9 @@
   // "Efetuar candidatura" pode abrir o diálogo de currículo/habilidades e só depois
   // envia de fato). Re-consulta o DOM a cada passo (cobre modal e rota SPA).
   async function fluxoCandidatura(pausar) {
-    for (let step = 0; step < 14; step++) {
+    // 20 passos: diálogo "revisar currículo?" + os VÁRIOS "Avançar" da revisão do
+    // currículo + envio em 2 fases (14 ficava curto e encerrava "incerto" no meio).
+    for (let step = 0; step < 20; step++) {
       if (!(await running())) return "parou";
       await OA.sleep(900);
       // sucesso? → "Ok, entendi!" e encerra
@@ -159,8 +169,10 @@
         return "enviado";
       }
       const container = OA.melhorContainer("[role='dialog'], form, main");
+      // diálogo "1 passo / revisar currículo?" → Sim e REAVALIA o passo do zero (sem o
+      // continue, o "Efetuar candidatura" ATRÁS do diálogo era re-clicado no mesmo passo)
+      try { if (await tratarDialogRevisar()) continue; } catch (e) { log("dialog erro:", e?.message); }
       // preenche tudo que der (defensivo — nada aqui derruba o loop)
-      try { tratarDialogRevisar(); } catch (e) { log("dialog erro:", e?.message); }
       try { marcarNaoIndicacao(container); } catch (e) { log("indicação erro:", e?.message); }
       try { await responderHabilidades(container); } catch (e) { log("habilidades erro:", e?.message); }
       try { await OA.preencherCampos(container, { idioma: "pt", onStatus: (s) => status(s) }); } catch (e) { log("preencher erro:", e?.message); }
@@ -259,6 +271,10 @@
   }
 
   log("carregado:", location.href); // se você NÃO vê esta linha no console, o script não foi injetado → recarregue a extensão + a aba
-  chrome.runtime.onMessage.addListener((m, s, resp) => { if (m?.type === "cs.kick" && m.platform === PLAT) { iniciar(); resp?.({ ok: true }); } return true; });
-  OA.bg({ type: "run.isRunning" }).then((r) => { if (r?.running && r?.platform === PLAT) setTimeout(iniciar, 1500); });
+  // GUARDA de re-entrância: cs.kick do SW + auto-start disparam juntos no load →
+  // dois fluxos na mesma aba. Só o primeiro entra.
+  let _fluxo = false;
+  const umFluxo = async (fn) => { if (_fluxo) return; _fluxo = true; try { await fn(); } finally { _fluxo = false; } };
+  chrome.runtime.onMessage.addListener((m, s, resp) => { if (m?.type === "cs.kick" && m.platform === PLAT) { umFluxo(iniciar); resp?.({ ok: true }); } return true; });
+  OA.bg({ type: "run.isRunning" }).then((r) => { if (r?.running && r?.platform === PLAT) setTimeout(() => umFluxo(iniciar), 1500); });
 })();
