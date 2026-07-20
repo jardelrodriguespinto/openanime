@@ -89,29 +89,49 @@
   const containerVaga = () => { const m = modalPerguntas(); return (m && (m.querySelector("form") || m)) || OA.melhorContainer("[class*='chakra-modal'], form, [role='dialog'], [class*='modal'], main"); };
 
   // Enunciado de um campo do modal GeekHunter: o <p class="chakra-text"> (com o "*") é
-  // IRMÃO do wrapper do campo — sem <label for>, sem heading → labelFor()/headingLabel()
-  // não acham NADA (por isso textarea/dropdown/numberinput ficavam vazios). Sobe até 3
-  // ancestrais e pega o 1º <p>/<label> FILHO direto com texto (ignora o placeholder
-  // "Selecione uma opção" do próprio dropdown).
+  // IRMÃO do wrapper do campo — sem <label for>, sem heading. Estratégias em ordem, até 4
+  // ancestrais: (1) <p>/<label> FILHO direto; (2) irmão ANTERIOR (o rótulo costuma vir logo
+  // acima do wrapper — não é filho de um ancestral comum); (3) OA.labelFor (aria/heading/
+  // placeholder). Ignora o placeholder "Selecione uma opção". Sem isso a IA recebia pergunta
+  // vazia → respondia genérico/errado (textarea/dropdown/numberinput ficavam mal preenchidos).
+  const limpaEnun = (s) => (s || "").replace(/^\*\s*/, "").replace(/\s*\*\s*$/, "").trim();
+  const ehPlaceholderEnun = (s) => !s || s.length < 3 || /^(selecione|escolha|select|digite|informe|--)/i.test(s);
   const enunciadoChakra = (el) => {
     let node = el.parentElement;
-    for (let i = 0; i < 3 && node; i++, node = node.parentElement) {
-      const t = [...node.querySelectorAll(":scope > p, :scope > label")]
-        .map((x) => (x.innerText || "").replace(/^\*\s*/, "").trim())
-        .find((s) => s && !/^(selecione|escolha|select)/i.test(s));
-      if (t) return t;
+    for (let i = 0; i < 4 && node; i++, node = node.parentElement) {
+      // (1) <p>/<label> filho DIRETO do ancestral (estrutura original, comprovada)
+      const filho = [...node.querySelectorAll(":scope > p, :scope > label")]
+        .map((x) => limpaEnun(x.innerText)).find((s) => !ehPlaceholderEnun(s));
+      if (filho) return filho;
+      // (2) irmão ANTERIOR do ancestral: o rótulo costuma vir logo ACIMA do wrapper do campo
+      // (não é filho de um ancestral comum) → nem o (1) nem o labelFor alcançavam, e o campo
+      // recebia pergunta vazia → IA respondia genérico/errado.
+      let prev = node.previousElementSibling;
+      for (let j = 0; j < 3 && prev; j++, prev = prev.previousElementSibling) {
+        if (!prev.matches?.("p, label, span, h1, h2, h3, h4, h5, h6")) continue;
+        const t = limpaEnun(prev.innerText);
+        if (!ehPlaceholderEnun(t) && t.length < 200) return t;
+      }
     }
-    return "";
+    // (3) helpers já testados do dom.js (aria-label / label[for] / heading / placeholder)
+    const lbl = limpaEnun(OA.labelFor(el));
+    return ehPlaceholderEnun(lbl) ? "" : lbl;
   };
   const perguntarCerebro = async (pergunta, tipo, opcoes, ctx) => {
-    const call = OA.bg({ type: "brain.answer", payload: { pergunta, tipo, opcoes, vagaTitulo: ctx.titulo || "", vagaEmpresa: "", idioma: ctx.idioma || "pt" } });
-    const r = await Promise.race([call, new Promise((res) => setTimeout(() => res(null), 30000))]); // SW pode suspender → não congela
+    // Sem race próprio: o OA.bg já tem watchdog de 90s e o servidor (responderPergunta) faz
+    // 1 retry. O antigo race de 30s era MENOR que o abort do fetch (40s) → descartava resposta
+    // VÁLIDA lenta e o campo caía no genérico "tenho disponibilidade".
+    const r = await OA.bg({ type: "brain.answer", payload: { pergunta, tipo, opcoes, vagaTitulo: ctx.titulo || "", vagaEmpresa: "", idioma: ctx.idioma || "pt" } });
     return (r?.resposta || "").trim();
   };
-  // Opções do dropdown custom aberto (portal fora do container). O corte <120 chars
-  // evita casar um elemento gigante com tudo concatenado (aviso do run Selenium).
-  const opcoesDropdownGeek = () => [...document.querySelectorAll("[role='option'], .chakra-menu__menuitem, li[role='menuitem'], [id*='option']")]
-    .filter((o) => { const t = (o.innerText || "").trim(); return OA.isVisible(o) && t && t.length < 120; });
+  // Opções do dropdown custom aberto (portal fora do container). Seletores LARGOS (o
+  // componente varia: role=option/menuitem, chakra-menu, ids react-select "…-option-N",
+  // classes "-option"/"menuitem"). Corte <120 chars evita casar um elemento gigante
+  // concatenado; filtra o próprio placeholder ("Selecione…") pra ele nunca virar "opção".
+  const opcoesDropdownGeek = () => [...document.querySelectorAll(
+    "[role='option'], [role='menuitem'], .chakra-menu__menuitem, li[role='menuitem'], " +
+    "[id*='option'], [class*='-option'], [class*='menuitem'], [class*='MenuList'] > div"
+  )].filter((o) => { const t = (o.innerText || "").trim(); return OA.isVisible(o) && t && t.length < 120 && !/^(selecione|escolha|select)/i.test(t); });
 
   // Perguntas do modal ("…algumas perguntinhas pra você") — 3 tipos SEM label que o
   // preenchedor genérico não alcança. Salário/remuneração fica pro genérico (CONFIG,
@@ -152,34 +172,62 @@
     for (const dd of container.querySelectorAll("div[name]")) {
       try {
         if (!OA.isVisible(dd) || !dd.querySelector("svg")) continue; // sem chevron → não é dropdown
-        const atual = (dd.querySelector("p")?.innerText || "").trim();
-        if (atual && !/selecione|escolha|select/i.test(atual)) continue; // já escolhido
-        const hid = dd.parentElement?.querySelector("input[hidden], input[class*='chakra-input']");
-        if (hid && (hid.value || "").trim()) continue; // hidden companion já tem valor
+        // texto do trigger = TODO o dd (não só o 1º <p>: o valor escolhido pode ir pra
+        // outro nó → o marcado() antigo dava falso-negativo). placeholderTxt inicial p/ comparar.
+        const triggerTxt = () => (dd.innerText || "").replace(/\s+/g, " ").trim();
+        const placeholderTxt = triggerTxt().toLowerCase();
+        if (placeholderTxt && !/selecione|escolha|select/i.test(placeholderTxt)) continue; // já escolhido
+        // <input> companheiro com o valor (hidden/chakra) — busca no dd, no pai E no avô
+        // (antes só o pai → falso-negativo). É a confirmação mais confiável da escolha.
+        const hiddenComValor = () => {
+          for (const root of [dd, dd.parentElement, dd.parentElement?.parentElement]) {
+            if (!root) continue;
+            const h = root.querySelector("input[type='hidden'], input[hidden], input[class*='chakra-input']");
+            if (h && (h.value || "").trim()) return true;
+          }
+          return false;
+        };
+        if (hiddenComValor()) continue; // já respondido
         const pergunta = enunciadoChakra(dd) || "Pergunta da empresa";
-        OA.click(dd); await OA.sleep(700);
+        // react-select/Chakra custom ABRE no mousedown → clickForte (sequência de ponteiro)
+        // desde a 1ª; OA.click e um filho-trigger como fallbacks caso a raiz não seja o alvo.
+        OA.clickForte(dd); await OA.sleep(700);
         let opts = opcoesDropdownGeek();
-        if (!opts.length) { OA.clickForte(dd); await OA.sleep(700); opts = opcoesDropdownGeek(); }
-        if (!opts.length) { try { document.body.click(); } catch (_) {} continue; } // não abriu → diagnóstico do wizard pega
+        if (!opts.length) { OA.click(dd); await OA.sleep(700); opts = opcoesDropdownGeek(); }
+        if (!opts.length) {
+          const inner = dd.querySelector("p, svg")?.closest("div") || dd.firstElementChild;
+          if (inner && inner !== dd) { OA.clickForte(inner); await OA.sleep(700); opts = opcoesDropdownGeek(); }
+        }
+        if (!opts.length) {
+          try { document.body.click(); } catch (_) {}
+          // grava a estrutura real (o usuário não tem console) p/ um run revelar o dropdown
+          OA.bg({ type: "debug.push", tag: "geek-dropdown-nao-abriu", data: { pergunta: pergunta.slice(0, 80), name: dd.getAttribute("name") || "", html: (dd.outerHTML || "").slice(0, 300) } });
+          continue;
+        }
         const textos = opts.map((o) => o.innerText.trim());
         const resp = (await perguntarCerebro(pergunta, "SELECT", textos, ctx)).toLowerCase();
-        // re-busca a opção A CADA tentativa (o menu re-renderiza e o nó antigo morre)
+        // re-busca a opção A CADA tentativa (o menu re-renderiza e o nó antigo morre).
+        // os[0] já é opção REAL (opcoesDropdownGeek filtra o placeholder).
         const escolher = () => { const os = opcoesDropdownGeek(); return os.find((o) => o.innerText.trim().toLowerCase() === resp)
           || (resp && os.find((o) => { const t = o.innerText.trim().toLowerCase(); return t.includes(resp) || resp.includes(t); }))
           || os[0]; };
-        // MARCOU de verdade? o clique simples fecha o menu mas o componente (estilo
-        // react-select, que escuta POINTER/mousedown) não registra → placeholder volta.
-        // Confirma pelo texto do trigger OU pelo <input hidden> com valor.
-        const marcado = () => { const t = (dd.querySelector("p")?.innerText || "").trim();
-          return (t && !/selecione|escolha|select/i.test(t)) || !!(hid && (hid.value || "").trim()); };
+        // MARCOU? o trigger deixou de mostrar o placeholder OU o input companheiro tem valor.
+        // (o antigo olhava só o 1º <p> + o pai → falso-negativo fazia o loop "desfazer" a escolha.)
+        const marcado = () => {
+          const t = triggerTxt().toLowerCase();
+          return (t && t !== placeholderTxt && !/selecione|escolha|select/i.test(t)) || hiddenComValor();
+        };
         for (let tent = 0; tent < 3 && !marcado(); tent++) {
           let alvo = escolher();
           if (!alvo) { OA.clickForte(dd); await OA.sleep(700); alvo = escolher(); if (!alvo) break; } // menu fechou sem marcar → reabre
-          if (tent === 0) OA.click(alvo);
-          else { OA.clickForte(alvo); await OA.sleep(250); if (!marcado()) OA.clickForte(alvo.querySelector("p") || alvo); }
+          OA.clickForte(alvo); await OA.sleep(300);                    // react-select seleciona no mousedown → clickForte já na 1ª
+          if (!marcado()) OA.clickForte(alvo.querySelector("p, span") || alvo); // reforça no texto interno
           await OA.sleep(600);
         }
-        if (!marcado()) { try { document.body.click(); } catch (_) {} } // desiste sem deixar o menu aberto (diagnóstico do wizard aponta)
+        if (!marcado()) {
+          try { document.body.click(); } catch (_) {} // fecha o menu (não deixa aberto)
+          OA.bg({ type: "debug.push", tag: "geek-dropdown-nao-marcou", data: { pergunta: pergunta.slice(0, 80), resp, opcoes: textos.slice(0, 12) } });
+        }
         await OA.sleep(300);
       } catch (_) {}
     }

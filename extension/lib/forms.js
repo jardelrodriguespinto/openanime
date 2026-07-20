@@ -13,13 +13,10 @@
   const ehConsent = (l) => { l = (l || "").toLowerCase(); return CONSENT.some((c) => l.includes(c)); };
 
   async function responder(pergunta, tipo, opcoes, ctx) {
-    // TIMEOUT: o service worker MV3 pode ser suspenso durante o fetch da OpenRouter →
-    // a resposta nunca volta e o preenchimento CONGELA. Corre com um timeout: se não
-    // responder em 30s, segue com "" (selects caem na 1ª opção; texto fica vazio).
-    const call = OA.bg({ type: "brain.answer", payload: { pergunta, tipo, opcoes, vagaTitulo: ctx.vagaTitulo || "", vagaEmpresa: ctx.vagaEmpresa || "", idioma: ctx.idioma || "pt" } });
-    const to = new Promise((res) => setTimeout(() => res({ resposta: "", _timeout: true }), 30000));
-    const r = await Promise.race([call, to]);
-    if (r?._timeout) { try { console.log("[AutoApply] brain.answer TIMEOUT:", pergunta.slice(0, 40)); } catch (_) {} }
+    // Sem race próprio: o OA.bg (dom.js) já tem watchdog de 90s e o servidor (responderPergunta)
+    // faz 1 retry antes do fallback. O antigo race de 30s era MENOR que o abort do fetch (40s) →
+    // descartava resposta VÁLIDA lenta e o campo caía no genérico "Tenho disponibilidade…".
+    const r = await OA.bg({ type: "brain.answer", payload: { pergunta, tipo, opcoes, vagaTitulo: ctx.vagaTitulo || "", vagaEmpresa: ctx.vagaEmpresa || "", idioma: ctx.idioma || "pt" } });
     return r?.resposta || "";
   }
 

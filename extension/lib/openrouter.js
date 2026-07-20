@@ -20,6 +20,9 @@ async function chat(cfg, messages, { json = false, maxTokens = 400, temperature 
   // pra sempre → o OA.bg() do content script nunca resolvia → a automação "ficava
   // parada" na aba (o guard _fluxo não solta e nem o cs.kick reentra). Com o abort,
   // o erro propaga e os callers são fail-open (match aplica, resposta cai no fallback).
+  // 40s (não 60s): o responderPergunta faz 1 retry → 2×40=80s cabem no watchdog de 90s
+  // do OA.bg (dom.js). Os content scripts NÃO fazem mais race próprio (era menor que o
+  // abort e só descartava resposta VÁLIDA lenta → caía no genérico "tenho disponibilidade").
   const resp = await fetch(ENDPOINT, {
     method: "POST",
     headers: {
@@ -29,7 +32,7 @@ async function chat(cfg, messages, { json = false, maxTokens = 400, temperature 
       "X-Title": "AutoApply Extension",
     },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(60000),
+    signal: AbortSignal.timeout(40000),
   });
   if (!resp.ok) {
     const t = await resp.text().catch(() => "");
@@ -42,15 +45,24 @@ async function chat(cfg, messages, { json = false, maxTokens = 400, temperature 
 // ── Match vaga ↔ currículo (fail-open: erro/sem-CV → aplica) ──────────────────
 export async function avaliarMatch(cfg, { descricao, titulo = "", empresa = "" }) {
   const cv = cfg?.perfil?.resumo_curriculo || "";
+  const nivel = cfg?.perfil?.nivel_senioridade || "";
+  const cargo = cfg?.perfil?.cargo_atual || "";
   const limiar = 0; // o limiar por-plataforma é aplicado por quem chama
   if (!cv || !descricao) return { aplicar: true, nota: 100, motivo: "sem CV/descrição — fail-open" };
   try {
     const sys =
       "Você avalia se um candidato deve se candidatar a uma vaga, comparando o " +
-      "currículo com a descrição. Responda SOMENTE JSON: " +
+      "currículo E A SENIORIDADE do candidato com a descrição. Responda SOMENTE JSON: " +
       '{"nota": <0-100>, "aplicar": <true|false>, "motivo": "<curto>"}. ' +
-      "nota = aderência do currículo à vaga. Seja permissivo (fail-open): na dúvida, aplicar=true.";
+      "nota = aderência do currículo à vaga. Seja permissivo (fail-open): na dúvida, aplicar=true. " +
+      // pedido explícito do usuário: NÃO candidatar sênior a vaga júnior (nem o inverso claro).
+      "PORÉM respeite a SENIORIDADE: se houver incompatibilidade CLARA de nível — candidato " +
+      "sênior/pleno para vaga júnior/estágio/trainee, ou candidato júnior para vaga " +
+      "sênior/especialista/staff/lead/principal — então nota BAIXA (<40) e aplicar=false, " +
+      "citando o nível no motivo. Só bloqueie por senioridade quando a incompatibilidade for " +
+      "evidente pelo título/descrição; na dúvida sobre o nível, aplicar=true.";
     const usr =
+      `CANDIDATO — senioridade: ${nivel || "não informada"} | cargo atual: ${cargo || "não informado"}\n\n` +
       `VAGA: ${titulo} @ ${empresa}\n\nDESCRIÇÃO:\n${descricao.slice(0, 4000)}\n\n` +
       `CURRÍCULO:\n${cv.slice(0, 4000)}`;
     const out = await chat(cfg, [
@@ -163,6 +175,18 @@ function respostaSalario(perfil, pergunta) {
   return String(v || perfil.pretensao_salarial || "").trim();
 }
 
+// Limpa o texto que a IA às vezes envolve em rótulo/markdown ("**Resposta:** ...", "R:",
+// aspas, ``) — esse literal ia direto pro campo do formulário. Tira SÓ o invólucro,
+// preservando o conteúdo. Não toca em número/salário (tratados antes).
+function limparResposta(s) {
+  let t = (s || "").trim();
+  // rótulo inicial em qualquer combinação de markdown: **Resposta:**, _Resp:_, "Answer -"
+  t = t.replace(/^\s*[*_`>#\s]*\b(resposta|minha resposta|answer|resp)\b[*_`\s]*\s*[:\-–]\s*/i, "");
+  // ênfase/código remanescente e aspas externas
+  t = t.replace(/\*\*|__|`/g, "").replace(/^["'“”\s]+|["'“”\s]+$/g, "");
+  return t.trim();
+}
+
 function respostaSeguraLocal(tipo, opcoes) {
   // Fallback determinístico se a IA falhar — nunca deixa vazio (campo obrigatório).
   if (tipo === "SELECT" || tipo === "RADIO") {
@@ -185,43 +209,54 @@ export async function responderPergunta(cfg, { pergunta, tipo = "TEXT", opcoes =
   }
 
   // 2) IA (OpenRouter).
-  try {
-    const idiomaLabel = idioma === "en" ? "English" : "português";
-    const sys =
-      `Você preenche formulários de candidatura em nome do candidato. Responda no idioma: ${idiomaLabel}. ` +
-      "Seja direto e curto. NUNCA invente salário. " +
-      (tipo === "SELECT" || tipo === "RADIO"
-        ? "A resposta DEVE ser EXATAMENTE uma das opções dadas (copie o texto da opção)."
-        : tipo === "NUMERO"
-        ? "Responda APENAS um número inteiro (anos de experiência, quantidade etc.). Se não souber, 0."
-        : "Responda em 1-2 frases.");
-    const ctx =
-      `CANDIDATO (currículo):\n${(perfil.resumo_curriculo || "").slice(0, 2500)}\n\n` +
-      `Cargo atual: ${perfil.cargo_atual || "-"} | Senioridade: ${perfil.nivel_senioridade || "-"}\n` +
-      `VAGA: ${vagaTitulo} @ ${vagaEmpresa}\n\n` +
-      `PERGUNTA (${tipo}): ${pergunta}` +
-      (opcoes && opcoes.length ? `\nOPÇÕES: ${opcoes.join(" | ")}` : "");
-    const out = await chat(cfg, [
-      { role: "system", content: sys },
-      { role: "user", content: ctx },
-    ], { maxTokens: 160, temperature: 0.3 });
-    let ans = (out || "").trim();
-    if ((tipo === "SELECT" || tipo === "RADIO") && opcoes?.length) {
-      // casa a resposta com a opção mais próxima
-      const exact = opcoes.find((o) => o.trim().toLowerCase() === ans.toLowerCase());
-      if (exact) return exact;
-      const contains = opcoes.find((o) => ans.toLowerCase().includes(o.trim().toLowerCase()) || o.toLowerCase().includes(ans.toLowerCase()));
-      if (contains) return contains;
-      return respostaSeguraLocal(tipo, opcoes);
-    }
-    if (tipo === "NUMERO") {
-      const m = ans.match(/-?\d+/);
-      return m ? m[0] : "0";
-    }
-    return ans || respostaSeguraLocal(tipo, opcoes);
-  } catch (e) {
+  const idiomaLabel = idioma === "en" ? "English" : "português";
+  const sys =
+    `Você preenche formulários de candidatura em nome do candidato. Responda no idioma: ${idiomaLabel}. ` +
+    "Seja direto e curto. NUNCA invente salário. " +
+    // a IA às vezes devolvia "**Resposta:** …" e o rótulo ia pro campo → proíbe explicitamente.
+    "Responda APENAS o conteúdo final — SEM rótulos (nada de 'Resposta:', 'R:', 'Answer:') e SEM markdown (nada de **, _, #, aspas ou listas). " +
+    (tipo === "SELECT" || tipo === "RADIO"
+      ? "A resposta DEVE ser EXATAMENTE uma das opções dadas (copie o texto da opção, sem nada a mais)."
+      : tipo === "NUMERO"
+      ? "Responda APENAS um número inteiro (anos de experiência, quantidade etc.). Se não souber, 0."
+      // reforça que precisa RESPONDER O QUE FOI PERGUNTADO (não um texto genérico de interesse).
+      : "Leia a pergunta com atenção e responda EXATAMENTE o que ela pede, em 1-2 frases.");
+  const ctx =
+    `CANDIDATO (currículo):\n${(perfil.resumo_curriculo || "").slice(0, 2500)}\n\n` +
+    `Cargo atual: ${perfil.cargo_atual || "-"} | Senioridade: ${perfil.nivel_senioridade || "-"}\n` +
+    `VAGA: ${vagaTitulo} @ ${vagaEmpresa}\n\n` +
+    `PERGUNTA (${tipo}): ${pergunta}` +
+    (opcoes && opcoes.length ? `\nOPÇÕES: ${opcoes.join(" | ")}` : "");
+
+  // 1 RETRY: uma falha transitória da OpenRouter (timeout/rede) NÃO deve virar a resposta
+  // genérica ("Tenho disponibilidade…") — dá 2ª chance antes do fallback. Os content scripts
+  // não fazem mais race próprio, então o retry mora aqui (2×40s < watchdog de 90s do OA.bg).
+  let ans = "";
+  for (let tent = 0; tent < 2; tent++) {
+    try {
+      const out = await chat(cfg, [
+        { role: "system", content: sys },
+        { role: "user", content: ctx },
+      ], { maxTokens: 160, temperature: 0.3 });
+      ans = limparResposta(out);
+      if (ans) break;
+    } catch (e) { ans = ""; }
+  }
+
+  if ((tipo === "SELECT" || tipo === "RADIO") && opcoes?.length) {
+    // casa a resposta com a opção mais próxima (só se a IA respondeu — senão o
+    // `o.includes("")` casaria a 1ª opção por engano; sem resposta vai pro fallback seguro)
+    const exact = ans && opcoes.find((o) => o.trim().toLowerCase() === ans.toLowerCase());
+    if (exact) return exact;
+    const contains = ans && opcoes.find((o) => ans.toLowerCase().includes(o.trim().toLowerCase()) || o.toLowerCase().includes(ans.toLowerCase()));
+    if (contains) return contains;
     return respostaSeguraLocal(tipo, opcoes);
   }
+  if (tipo === "NUMERO") {
+    const m = ans.match(/-?\d+/);
+    return m ? m[0] : "0";
+  }
+  return ans || respostaSeguraLocal(tipo, opcoes);
 }
 
 // ── Habilidades eliminatórias (Solides) — nível por skill, UMA chamada ─────────
