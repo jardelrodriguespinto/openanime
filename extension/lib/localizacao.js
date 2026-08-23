@@ -30,9 +30,22 @@
 
   function modalidadeDoTexto(texto) {
     const t = norm(texto);
-    if (/(híbrid|hibrid|hybrid|semipresencial|semi-presencial)/.test(t)) return "hibrido";
-    if (/(remoto|remote|home office|home-office|100% remoto|anywhere|teletrabalho)/.test(t)) return "remoto";
-    if (/(presencial|on-site|on site|onsite|no local|no escritório|no escritorio|in office|in-office)/.test(t)) return "presencial";
+    // híbrido ANTES de presencial ("semipresencial" contém "presencial")
+    if (/(híbrid|hibrid|hybrid|semipresencial|semi-presencial|modelo\s+híbrido|modelo\s+hibrido)/.test(t)) return "hibrido";
+    if (/(remoto|remote|home[- ]office|anywhere|teletrabalho|trabalho (100%\s*)?remoto|vaga remota|100%\s*remot)/.test(t)) return "remoto";
+    if (/(presencial|on[- ]?site|no local|no escritório|no escritorio|in office|trabalho presencial|vaga presencial|100%\s*presencial)/.test(t)) return "presencial";
+    return "";
+  }
+
+  // Nível do texto (TÍTULO da vaga OU senioridade do perfil) → junior|pleno|senior.
+  // Sênior primeiro: "Líder/Especialista" não pode ser mascarado por um "júnior" no meio
+  // do texto; \b evita casar "jr" dentro de palavra.
+  function nivelDoTexto(t) {
+    const s = norm(t);
+    if (!s) return "";
+    if (/(\bs[eê]nior\b|\bsenior\b|\bsr\b\.?|especialista|staff|principal|\blead\b|\bl[íi]der\b|\blider\b|arquitet)/.test(s)) return "senior";
+    if (/(\bpleno\b|\bmid\b|mid-level|\bpl\b\.?)/.test(s)) return "pleno";
+    if (/(est[aá]gio|trainee|aprendiz|\bj[uú]nior\b|\bjunior\b|\bjr\b\.?)/.test(s)) return "junior";
     return "";
   }
   function extrairUF(texto) {
@@ -78,24 +91,45 @@
   }
   OA.detectarIdioma = detectarIdioma;
 
-  // Gate único usado por TODAS as plataformas: 1) filtro modalidade/região (config do
-  // usuário — antes era ignorado na extensão), 2) match com currículo (limiar por
-  // plataforma). Retorna {aplicar, motivo}. Fail-open.
-  async function deveAplicar(descricao, { titulo = "", empresa = "", platform = "" } = {}) {
+  // Gate único usado por TODAS as plataformas:
+  //   1) MODALIDADE/REGIÃO (config do usuário) — sinal AMPLIADO: título + descrição +
+  //      texto da página. Antes olhava só a descrição raspada, onde o "Remoto/Híbrido"
+  //      muitas vezes NÃO está (fica num badge fora dela) → "indefinida" → fail-open
+  //      aceitava tudo e "o filtro não era levado em consideração".
+  //   2) SENIORIDADE LOCAL (determinística, funciona MESMO se a IA cair): só bloqueia
+  //      desequilíbrio CLARO (júnior↔sênior, distância ≥2 na escada). Pleno↔sênior etc.
+  //      passam — o recorte fino fica por conta do match com IA.
+  //   3) MATCH IA (limiar por plataforma) — com fallback de modelo (openrouter.js).
+  // Retorna {aplicar, motivo}. Fail-open.
+  const ESCADA = { junior: 0, pleno: 1, senior: 2 };
+  async function deveAplicar(descricao, { titulo = "", empresa = "", platform = "", pagina = "" } = {}) {
     const cfg = (await OA.bg({ type: "config.get" })).config || {};
     const perfil = cfg.perfil || {};
-    if (descricao) {
-      const [ok, motivo] = vagaAceita(descricao, perfil.modalidades_aceitas, perfil.regioes_relocacao);
+    const idioma = detectarIdioma([titulo, descricao].filter(Boolean).join("\n"));
+    // 1) modalidade/região
+    const textoMod = [titulo, descricao, pagina].filter(Boolean).join("\n");
+    if (textoMod) {
+      const [ok, motivo] = vagaAceita(textoMod, perfil.modalidades_aceitas, perfil.regioes_relocacao);
       if (!ok) return { aplicar: false, motivo };
     }
+    // 2) senioridade local (título da vaga × senioridade declarada no perfil)
+    const nvUser = nivelDoTexto(perfil.nivel_senioridade);
+    const nvVaga = nivelDoTexto(titulo);
+    if (nvUser && nvVaga && ESCADA[nvUser] - ESCADA[nvVaga] >= 2) {
+      return { aplicar: false, motivo: `senioridade: candidato ${nvUser}, vaga ${nvVaga}`, idioma };
+    }
+    if (nvUser && nvVaga && ESCADA[nvVaga] - ESCADA[nvUser] >= 2) {
+      return { aplicar: false, motivo: `senioridade: vaga ${nvVaga}, candidato ${nvUser}`, idioma };
+    }
+    // 3) match IA (currículo × descrição)
     if (descricao && perfil.resumo_curriculo) {
       const limiar = (cfg.plataformas?.[platform] || {}).limiarMatch || 0;
       const m = await OA.bg({ type: "brain.match", payload: { descricao, titulo, empresa } });
       if (m?.ok && (m.aplicar === false || (limiar > 0 && typeof m.nota === "number" && m.nota < limiar))) {
-        return { aplicar: false, motivo: `sem match: ${m.motivo || ""} (nota ${m.nota})`, idioma: "pt" };
+        return { aplicar: false, motivo: `sem match: ${m.motivo || ""} (nota ${m.nota})`, idioma };
       }
     }
-    return { aplicar: true, motivo: "", idioma: detectarIdioma(descricao) };
+    return { aplicar: true, motivo: "", idioma };
   }
   OA.deveAplicar = deveAplicar;
 })();

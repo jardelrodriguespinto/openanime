@@ -207,7 +207,7 @@
     const desc = descricaoVaga();
     const vagaTitulo = tituloVaga();
     const vagaEmpresa = empresaVaga();
-    const gate = await OA.deveAplicar(desc, { titulo: vagaTitulo, empresa: vagaEmpresa, platform: PLAT });
+    const gate = await OA.deveAplicar(desc, { titulo: vagaTitulo, empresa: vagaEmpresa, platform: PLAT, pagina: (document.body.innerText || "").slice(0, 2500) });
     if (!gate.aplicar) { await status(`Pulei: ${gate.motivo}`.slice(0, 80)); return "sem_match"; }
 
     OA.click(easy);

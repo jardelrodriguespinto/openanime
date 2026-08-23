@@ -28,6 +28,9 @@
     // modelo configurado + fallbacks; se TUDO falhar, devolve `erro` p/ avisar aqui.
     const r = await OA.bg({ type: "brain.answer", payload: { pergunta, tipo, opcoes, vagaTitulo: ctx.vagaTitulo || "", vagaEmpresa: ctx.vagaEmpresa || "", idioma: ctx.idioma || "pt" } });
     if (r?.erroIA) avisarIaFalhou(r.erroIA, ctx);
+    // o bg em SI falhou (SW dormiu/watchdog de 90s estourou): r vem sem `erroIA` —
+    // sem este aviso o campo só recebia o texto genérico e ninguém sabia por quê.
+    else if (!r?.ok) avisarIaFalhou(r?.erro || "service worker não respondeu", ctx);
     return r?.resposta || "";
   }
 

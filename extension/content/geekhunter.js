@@ -229,7 +229,7 @@
       const c = await cfg();
       const desc = (document.querySelector("[class*='description'], main, article")?.innerText || document.body.innerText || "").slice(0, 3500);
       const titulo = (document.querySelector("h1, [class*='title']")?.innerText || document.title || "").trim();
-      const gate = await OA.deveAplicar(desc, { titulo, platform: PLAT });
+      const gate = await OA.deveAplicar(desc, { titulo, platform: PLAT, pagina: (document.body.innerText || "").slice(0, 2500) });
       if (!gate.aplicar) {
         await status(`Pulei (${gate.motivo}): ${titulo.slice(0, 35)}`);
         return "sem_match";

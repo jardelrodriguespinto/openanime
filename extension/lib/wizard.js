@@ -20,7 +20,13 @@
       preferUltimo = false, // Gupy: página repete o botão (sticky + rodapé) → clica o ÚLTIMO
       avancarSel = [], // seletores CSS EXATOS do botão de avançar (elimina ambiguidade de
                       // "continuar" casando em 2 botões — ex.: Gupy usa name='saveAndContinueButton')
+      finalizarPrioridade = false, // finalizarSel visível+habilitado TEM prioridade sobre avançar
     } = opts || {};
+
+    // Frases genéricas de sucesso — somadas às específicas de cada plataforma. Gupy/
+    // GeekHunter variam o texto pós-envio ("Candidatura realizada!", "Inscrição
+    // concluída"…) e sem frase casável o envio VERIFICADO virava "incerto".
+    const SUCESSO_GENERICAS = ["candidatura enviada", "candidatura realizada", "inscrição realizada", "inscrição concluída", "application submitted", "you have applied", "you've applied", "obrigado pela sua candidatura"];
 
     const log = (...a) => { try { console.log("[AutoApply][wizard]", ...a); } catch (_) {} };
     // Delays HUMANOS: sleeps randômicos p/ a automação não ficar RÁPIDA DEMAIS (Gupy/GeekHunter
@@ -131,6 +137,17 @@
       };
       let cands = candidatosAvancar();
 
+      // PRIORIDADE DE FINALIZAR (Gupy): o diálogo terminal ("Personalizar candidatura" |
+      // "Finalizar candidatura", #dialog-give-up-...) é o FIM do fluxo, mas botões de
+      // avançar da tela DE TRÁS continuam "visíveis" ATRÁS do overlay → o wizard clicava
+      // o fundo em loop e "travava em Finalizar candidatura". Seletor EXATO + habilitado
+      // = tela final real → zera os candidatos e vai direto pro envio.
+      const ehBotaoReal = (b) => b.tagName === "BUTTON" || b.tagName === "A" || b.getAttribute("role") === "button";
+      if (finalizarPrioridade) {
+        const prio = finalizarSel.map((s) => document.querySelector(s)).find((b) => b && ehBotaoReal(b) && OA.isVisible(b) && habil(b));
+        if (prio) { log("step", step, "FINALIZAR prioritário (diálogo terminal)"); cands = []; }
+      }
+
       // FINALIZAR (envio) — SÓ quando NÃO há botão de AVANÇAR visível. Ordem crítica p/ o
       // Gupy: na tela de perguntas o "Salvar e continuar" coexiste com o give-up "Finalizar
       // candidatura"; se finalizasse primeiro, clicava o give-up e o "Salvar e continuar"
@@ -140,7 +157,7 @@
       if (!cands.length) {
         // Guard: o seletor CSS pode casar o CONTAINER do diálogo (div) em vez do botão —
         // clicar div não faz nada e parecia "botão travado". Só aceita botão/link real.
-        const ehBotao = (b) => b.tagName === "BUTTON" || b.tagName === "A" || b.getAttribute("role") === "button";
+        const ehBotao = ehBotaoReal;
         const finalCss = finalizarSel.map((s) => document.querySelector(s)).find((b) => b && ehBotao(b) && OA.isVisible(b));
         const btnFinal = finalCss || OA.findByText(finalizar);
 
@@ -158,20 +175,30 @@
         if (btnFinal && OA.isVisible(btnFinal) && habil(btnFinal)) {
           if (pausarAntesEnvio) { onStatus("🔒 Revise e finalize/envie você mesmo (pausa antes do envio)."); return "pausa"; }
           log("step", step, "FINALIZAR:", (btnFinal.innerText || "").trim().slice(0, 30));
+          // validação VISÍVEL antes do clique: clicar form inválido não faz NADA (e
+          // parecia "botão travado") — mostra no popup qual campo está reclamando.
+          try {
+            const invalido = [...container.querySelectorAll("[aria-invalid='true']")].find((el) => el !== btnFinal && OA.isVisible(el));
+            if (invalido) onStatus(`Campo com erro/pendente: ${nomeCampo(invalido)}`.slice(0, 100));
+          } catch (_) {}
+          const urlAntes = location.href;
+          const frases = [...new Set([...sucessoFrases.map((f) => f.toLowerCase()), ...SUCESSO_GENERICAS])];
           OA.click(btnFinal); await OA.sleep(2000);
           // botões styled-components ignoram .click() simples → reforça com FORTE
           if (assinatura() === sigAntes) { OA.clickForte(btnFinal); await OA.sleep(1800); }
-          // VERIFICAÇÃO REAL do envio (até ~9s): frase de sucesso OU evidência estrutural
-          // (botão sumiu). Confirma também diálogos pós-clique ("Confirmar candidatura?").
-          // Antes: seletor CSS forte = "enviado" SEM verificar → falso-sucesso envenenava
-          // o dedup e a automação "voltava pra página inicial" sem ter aplicado de fato.
+          // VERIFICAÇÃO REAL do envio (até ~18s): frase de sucesso OU evidência estrutural
+          // (mudança de URL/botão sumiu). Confirma também diálogos pós-clique ("Confirmar
+          // candidatura?"). REFORÇO ÚNICO aos ~9s se a página não reagiu EM NADA — o sc-*
+          // do Gupy às vezes ignora os dois primeiros cliques; sem reação não há risco de
+          // duplo envio. Antes: 9s sem reclick → "incerto" → a vaga voltava todo run.
           const tEnvio = Date.now();
+          let reClicou = false;
           let enviado = false;
-          while (Date.now() - tEnvio < 9000) {
+          while (Date.now() - tEnvio < 18000) {
             await OA.sleep(700);
             try { OA.fecharBanners?.(); } catch (_) {}
             const txt2 = (document.body.innerText || "").toLowerCase();
-            if (sucessoFrases.some((f) => txt2.includes(f))) { enviado = true; break; }
+            if (frases.some((f) => txt2.includes(f))) { enviado = true; break; }
             // diálogo de confirmação aberto após o clique → confirma dentro DELE
             const dlg = [...document.querySelectorAll("[role='dialog'], [role='alertdialog'], .artdeco-modal, .chakra-modal__content")]
               .find((d) => OA.isVisible(d));
@@ -182,11 +209,16 @@
               });
               if (conf) { OA.click(conf); await OA.sleep(1500); }
             }
+            if (!reClicou && Date.now() - tEnvio > 9000 && assinatura() === sigAntes
+              && document.contains(btnFinal) && OA.isVisible(btnFinal) && habil(btnFinal)) {
+              log("step", step, "sem reação ao enviar (~9s) → REFORÇO FORTE único");
+              reClicou = true; OA.clickForte(btnFinal); await OA.sleep(1500);
+            }
             // evidência estrutural: botão de envio sumiu/escondeu (fluxo avançou)
             if (!document.contains(btnFinal) || !OA.isVisible(btnFinal)) {
               await OA.sleep(1500); // dá tempo da frase renderizar
               const txt3 = (document.body.innerText || "").toLowerCase();
-              enviado = sucessoFrases.some((f) => txt3.includes(f)) || !sucessoFrases.length;
+              enviado = frases.some((f) => txt3.includes(f)) || location.href !== urlAntes || !sucessoFrases.length;
               break;
             }
           }

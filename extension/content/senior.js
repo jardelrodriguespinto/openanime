@@ -127,7 +127,7 @@
 
       const desc = (document.querySelector("[class*='description'], [class*='detail'], main")?.innerText || document.body.innerText || "").slice(0, 3500);
       const titulo = (document.querySelector("h1, [class*='title']")?.innerText || tituloCard || "").trim();
-      const gate = await OA.deveAplicar(desc, { titulo, platform: PLAT });
+      const gate = await OA.deveAplicar(desc, { titulo, platform: PLAT, pagina: (document.body.innerText || "").slice(0, 2500) });
       if (!gate.aplicar) { await status(`Pulei (${gate.motivo}): ${titulo.slice(0, 35)}`.slice(0, 80)); continue; }
 
       // Candidatar-se: seletores testados do senior_selenium.py + fallback por texto.

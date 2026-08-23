@@ -181,7 +181,11 @@
       avancarSel: ["button[aria-label='Responder agora']", "button[name='saveAndContinueButton']"],
       finalizar: ["finalizar candidatura", "finalizar", "concluir"],
       finalizarSel: ["#dialog-give-up-personalization-step"],
-      sucessoFrases: ["candidatura realizada", "candidatura foi realizada", "inscrição realizada", "você se candidatou", "sua candidatura foi enviada", "recebemos sua candidatura", "application submitted", "you have applied"],
+      // O diálogo final é TERMINAL, mas o "Salvar e continuar"/"Continuar" da tela de
+      // trás continua "visível" ATRÁS do overlay → sem prioridade o wizard clicava o
+      // fundo em loop e "travava em Finalizar candidatura".
+      finalizarPrioridade: true,
+      sucessoFrases: ["candidatura realizada", "candidatura foi realizada", "inscrição realizada", "inscrição concluída", "você se candidatou", "sua candidatura foi enviada", "candidatura enviada com sucesso", "recebemos sua candidatura", "application submitted", "you have applied"],
       ctx: { idioma: idioma || "pt", destravarGrupoCheckbox: true }, // perguntas da empresa com checkbox obrigatório
       preencher: preencherGupy,
       preferUltimo: true, // Gupy repete o botão (sticky + rodapé): clica o do rodapé
@@ -200,7 +204,7 @@
     if (dup?.aplicou) return "pulada";
     // Gate: modalidade/região + match (o Gupy não tinha filtro na extensão).
     const desc = (document.querySelector("[data-testid='job-description'], main, article")?.innerText || document.body.innerText || "").slice(0, 3500);
-    const gate = await OA.deveAplicar(desc, { titulo: document.title, platform: PLAT });
+    const gate = await OA.deveAplicar(desc, { titulo: document.title, platform: PLAT, pagina: (document.body.innerText || "").slice(0, 2500) });
     if (!gate.aplicar) { await status(`Pulei: ${gate.motivo}`.slice(0, 80)); return "sem_match"; }
     const cta = OA.findByText(CTA, { sel: "a, button, [role='button']" });
     if (cta && OA.isVisible(cta)) {

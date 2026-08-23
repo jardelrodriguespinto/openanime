@@ -128,7 +128,7 @@
       const desc = (document.querySelector("#jobDescriptionText, .jobsearch-JobComponent-description")?.innerText || "");
       const titulo = (document.querySelector("h1.jobsearch-JobInfoHeader-title, h1")?.innerText || "").trim();
       const empresa = (document.querySelector("[data-testid='inlineHeader-companyName'], [data-company-name]")?.innerText || "").trim();
-      const gate = await OA.deveAplicar(desc, { titulo, empresa, platform: PLAT });
+      const gate = await OA.deveAplicar(desc, { titulo, empresa, platform: PLAT, pagina: (document.body.innerText || "").slice(0, 2500) });
       if (!gate.aplicar) { await status(`pulei: ${gate.motivo}`.slice(0, 80)); return proximo(); }
       // guarda o idioma p/ a aba do SmartApply responder no idioma certo
       await chrome.storage.local.set({ [JK]: { jobId: jk, titulo, empresa, idioma: gate.idioma || "pt" } });

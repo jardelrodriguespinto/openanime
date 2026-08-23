@@ -7,9 +7,17 @@ const ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
 // Fallback de modelos: se o modelo configurado falhar (id inválido, rate limit,
 // indisp. do provedor), tenta estes antes de desistir — é o que garante que as
 // perguntas sejam respondidas POR IA em vez da frase genérica de disponibilidade.
-const MODELS_FALLBACK = ["openai/gpt-4o-mini", "meta-llama/llama-3.3-70b-instruct"];
+// Os ":free" entram por causa de chave SEM créditos: gpt-4o-mini/llama pagos voltam
+// 402 na hora e, sem uma variante gratuita na fila, TODAS as tentativas falham e o
+// campo recebe o texto genérico ("Tenho interesse e disponibilidade…").
+const MODELS_FALLBACK = [
+  "openai/gpt-4o-mini",
+  "meta-llama/llama-3.3-70b-instruct",
+  "meta-llama/llama-3.3-70b-instruct:free",
+  "google/gemma-2-9b-it:free",
+];
 
-async function chat(cfg, messages, { json = false, maxTokens = 400, temperature = 0.3, modelo = "" } = {}) {
+async function chat(cfg, messages, { json = false, maxTokens = 400, temperature = 0.3, modelo = "", timeoutMs = 40000 } = {}) {
   const apiKey = cfg?.openrouter?.apiKey;
   if (!apiKey) throw new Error("OpenRouter API key não configurada (abra a dashboard da extensão).");
   const model = modelo || (json && cfg.openrouter.modelMatch) || cfg.openrouter.model;
@@ -25,9 +33,10 @@ async function chat(cfg, messages, { json = false, maxTokens = 400, temperature 
   // pra sempre → o OA.bg() do content script nunca resolvia → a automação "ficava
   // parada" na aba (o guard _fluxo não solta e nem o cs.kick reentra). Com o abort,
   // o erro propaga e os callers são fail-open (match aplica, resposta cai no fallback).
-  // 40s (não 60s): o responderPergunta faz 1 retry → 2×40=80s cabem no watchdog de 90s
-  // do OA.bg (dom.js). Os content scripts NÃO fazem mais race próprio (era menor que o
-  // abort e só descartava resposta VÁLIDA lenta → caía no genérico "tenho disponibilidade").
+  // O timeout POR TENTATIVA é parametrizável porque o responderPergunta tem VÁRIAS
+  // tentativas em sequência e TODAS juntas têm que caber no watchdog de 90s do
+  // OA.bg — com 40s por tentativa, a 2ª já estourava o teto e o content script
+  // recebia "sem resposta do service worker" SEM `erroIA` → texto genérico sem aviso.
   const resp = await fetch(ENDPOINT, {
     method: "POST",
     headers: {
@@ -37,7 +46,7 @@ async function chat(cfg, messages, { json = false, maxTokens = 400, temperature 
       "X-Title": "AutoApply Extension",
     },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(40000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!resp.ok) {
     const t = await resp.text().catch(() => "");
@@ -47,12 +56,34 @@ async function chat(cfg, messages, { json = false, maxTokens = 400, temperature 
   return data?.choices?.[0]?.message?.content?.trim() || "";
 }
 
+// Loop COMPARTILHADO de tentativas: modelo configurado ×2 + fallbacks (incl. :free),
+// com PRAZO TOTAL (~75s) que cabe no watchdog de 90s do OA.bg. Retorna { out, erro } —
+// `erro` só fica setado se NENHUM modelo responder. Usado pelo MATCH e pelas RESPOSTAS:
+// sem isso, uma falha do modelo configurado derrubava o match → fail-open aplicava
+// em TUDO (o filtro de compatibilidade/senioridade "não era levado em consideração").
+async function chatComFallback(cfg, messages, { json = false, maxTokens = 400, temperature = 0.3, usarModelMatch = false } = {}) {
+  const base = (usarModelMatch && cfg.openrouter.modelMatch) || cfg.openrouter.model;
+  const modelos = [base, ...MODELS_FALLBACK.filter((m) => m !== base)];
+  const prazo = Date.now() + 75000;
+  let ultimoErro = "";
+  for (const modelo of modelos) {
+    for (let tent = 0; tent < (modelo === base ? 2 : 1); tent++) {
+      const resta = prazo - Date.now();
+      if (resta < 4000) return { out: "", erro: ultimoErro || "sem tempo útil restante (watchdog do service worker)" };
+      try {
+        const out = await chat(cfg, messages, { json, maxTokens, temperature, modelo, timeoutMs: Math.min(20000, resta) });
+        if (out && out.trim()) return { out: out.trim(), erro: "" }; // IA respondeu (mesmo via fallback) → sem erro
+      } catch (e) { ultimoErro = String(e?.message || e); }
+    }
+  }
+  return { out: "", erro: ultimoErro };
+}
+
 // ── Match vaga ↔ currículo (fail-open: erro/sem-CV → aplica) ──────────────────
 export async function avaliarMatch(cfg, { descricao, titulo = "", empresa = "" }) {
   const cv = cfg?.perfil?.resumo_curriculo || "";
   const nivel = cfg?.perfil?.nivel_senioridade || "";
   const cargo = cfg?.perfil?.cargo_atual || "";
-  const limiar = 0; // o limiar por-plataforma é aplicado por quem chama
   if (!cv || !descricao) return { aplicar: true, nota: 100, motivo: "sem CV/descrição — fail-open" };
   try {
     const sys =
@@ -70,10 +101,11 @@ export async function avaliarMatch(cfg, { descricao, titulo = "", empresa = "" }
       `CANDIDATO — senioridade: ${nivel || "não informada"} | cargo atual: ${cargo || "não informado"}\n\n` +
       `VAGA: ${titulo} @ ${empresa}\n\nDESCRIÇÃO:\n${descricao.slice(0, 4000)}\n\n` +
       `CURRÍCULO:\n${cv.slice(0, 4000)}`;
-    const out = await chat(cfg, [
+    const { out, erro } = await chatComFallback(cfg, [
       { role: "system", content: sys },
       { role: "user", content: usr },
-    ], { json: true, maxTokens: 200 });
+    ], { json: true, maxTokens: 200, usarModelMatch: true });
+    if (!out) return { aplicar: true, nota: 100, motivo: "match indisponível (fail-open): " + erro };
     const j = JSON.parse(out);
     return {
       nota: typeof j.nota === "number" ? j.nota : 100,
@@ -233,25 +265,15 @@ export async function responderPergunta(cfg, { pergunta, tipo = "TEXT", opcoes =
     `PERGUNTA (${tipo}): ${pergunta}` +
     (opcoes && opcoes.length ? `\nOPÇÕES: ${opcoes.join(" | ")}` : "");
 
-  // 1 RETRY no modelo principal + FALLBACK em outros modelos: uma falha transitória
-  // OU um modelo configurado inválido/indisponível NÃO deve virar a resposta genérica
-  // ("Tenho disponibilidade…"). O erro do ÚLTIMO attempt volta em `erro` p/ o caller
-  // avisar o usuário (antes era engolido e ninguém sabia por que a IA não respondia).
-  let ans = "";
-  let ultimoErro = "";
-  const modelos = [cfg.openrouter.model, ...MODELS_FALLBACK.filter((m) => m !== cfg.openrouter.model)];
-  externo: for (const modelo of modelos) {
-    for (let tent = 0; tent < (modelo === cfg.openrouter.model ? 2 : 1); tent++) {
-      try {
-        const out = await chat(cfg, [
-          { role: "system", content: sys },
-          { role: "user", content: ctx },
-        ], { maxTokens: 160, temperature: 0.3, modelo });
-        ans = limparResposta(out);
-        if (ans) break externo;
-      } catch (e) { ultimoErro = String(e?.message || e); }
-    }
-  }
+  // 1 RETRY no modelo principal + FALLBACK em outros modelos (helper compartilhado com
+  // o match). PRAZO TOTAL ~75s: cabe no watchdog de 90s do OA.bg — antes (40s/tentativa)
+  // o teto estourava no meio da fila e o content script recebia "sem resposta do
+  // service worker" SEM erroIA → texto genérico ("Tenho disponibilidade…") sem aviso.
+  const { out, erro: ultimoErro } = await chatComFallback(cfg, [
+    { role: "system", content: sys },
+    { role: "user", content: ctx },
+  ], { maxTokens: 160, temperature: 0.3 });
+  const ans = limparResposta(out);
 
   if ((tipo === "SELECT" || tipo === "RADIO") && opcoes?.length) {
     // casa a resposta com a opção mais próxima (só se a IA respondeu — senão o

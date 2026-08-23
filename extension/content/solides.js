@@ -276,7 +276,7 @@
     if (ehFluxoCandidatura() && !OA.findByText(CTA_RAPIDA, { sel: "button, a, [role='button']" })) return finalizar(await fluxoCandidatura(pausar));
 
     // detalhe: gate primeiro (modalidade/região + match)
-    const gate = await OA.deveAplicar(coletarDescricao(), { titulo: tituloVaga(), platform: PLAT });
+    const gate = await OA.deveAplicar(coletarDescricao(), { titulo: tituloVaga(), platform: PLAT, pagina: (document.body.innerText || "").slice(0, 2500) });
     if (!gate.aplicar) { await status(`Pulei: ${gate.motivo}`.slice(0, 80)); return "sem_match"; }
 
     // espera o botão aparecer (SPA carrega a vaga aos poucos) até ~6s
