@@ -123,7 +123,7 @@
       // Preenchedor ROBUSTO compartilhado: pega TODOS os campos do modal (text/number/
       // select/radio/checkbox/combobox), não um por grupo — era isso que deixava campos
       // em branco e travava o "Avançar" na validação.
-      await OA.preencherCampos(modal, { vagaTitulo, vagaEmpresa, idioma });
+      await OA.preencherCampos(modal, { vagaTitulo, vagaEmpresa, idioma, onStatus: (s) => status(s) });
       await OA.sleep(500);
       const sig = sigModal(modal);
 
@@ -149,7 +149,7 @@
           // botão existe mas está DESABILITADO → campo obrigatório faltando: re-preenche
           semAvanco++;
           await status(`Campo pendente (botão desabilitado) — re-preenchendo… (${semAvanco})`);
-          await OA.preencherCampos(modal, { vagaTitulo, vagaEmpresa, idioma });
+          await OA.preencherCampos(modal, { vagaTitulo, vagaEmpresa, idioma, onStatus: (s) => status(s) });
           await OA.sleep(600);
           if (semAvanco >= 5) { await status("Um campo obrigatório não consegui preencher — finalize no LinkedIn e ▶️.", "manual"); return "falhou"; }
           continue;
@@ -163,7 +163,7 @@
       const modal2 = document.querySelector(SEL.modal);
       if (modal2 && sigModal(modal2) === sig) {
         semAvanco++;
-        await OA.preencherCampos(modal2, { vagaTitulo, vagaEmpresa, idioma });
+        await OA.preencherCampos(modal2, { vagaTitulo, vagaEmpresa, idioma, onStatus: (s) => status(s) });
         await OA.sleep(500);
         if (semAvanco >= 5) { await status("Campos pendentes que não consegui resolver — pulei a vaga.", "manual"); return "falhou"; }
       } else {

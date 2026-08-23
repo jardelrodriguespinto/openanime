@@ -325,5 +325,20 @@
     return !!(t && (t.value || "").trim());
   }
 
-  window.OA = { sleep, isVisible, waitFor, click, clickForte, findByText, findButtonsByText, melhorContainer, setNativeValue, fillInput, selectOption, labelFor, headingLabel, bg, setChecked, uploadArquivo, captchaPresente, captchaResolvido };
+  // Fecha banners de cookie/LGPD que ficam POR CIMA do form e interceptam cliques
+  // ("ACEITAR / NÃO, OBRIGADO" do Gupy, CMPs em geral). Só clica botões DENTRO de um
+  // container de banner/consent (nunca um "não" do formulário). Retorna true se fechou.
+  function fecharBanners() {
+    const alvos = [...document.querySelectorAll("button, a, [role='button']")].filter((b) => {
+      if (!isVisible(b)) return false;
+      const t = ((b.innerText || b.getAttribute("aria-label") || "").trim().toLowerCase());
+      if (!/^(aceitar( todos| os cookies| tudo)?|aceito( o uso de cookies)?|concordo|aceitar e fechar|accept( all)?|ok,? (entendi|entendo)|entendi|n[ãa]o,? obrigado|dismiss|fechar)$/.test(t)) return false;
+      // precisa estar num container de consentimento/banner/diálogo (ou fixo na tela)
+      return !!b.closest("[class*='cookie' i], [id*='cookie' i], [class*='consent' i], [id*='consent' i], [class*='lgpd' i], [class*='banner' i], [class*='privacy' i], [role='dialog'], [role='alertdialog'], header, footer");
+    });
+    for (const b of alvos.slice(0, 3)) { try { clickForte(b); } catch (_) {} }
+    return alvos.length > 0;
+  }
+
+  window.OA = { sleep, isVisible, waitFor, click, clickForte, findByText, findButtonsByText, melhorContainer, setNativeValue, fillInput, selectOption, labelFor, headingLabel, bg, setChecked, uploadArquivo, captchaPresente, captchaResolvido, fecharBanners };
 })();

@@ -1,14 +1,19 @@
-// GeekHunter — content script (geekhunter.com). SPA Chakra. Cards SEM href: clica-se
-// "Visualizar vaga" (abre NOVA ABA). Fluxo UMA ABA POR VEZ (não abre inúmeras):
-//   LISTA: clica 1 "Visualizar vaga" → abre a aba da vaga.
-//   VAGA:  checa match → se NÃO for pra aplicar, pede pro SW FECHAR a aba; se for,
-//          aplica (wizard) e depois pede pro SW fechar. O SW fecha a aba e manda a
-//          LISTA abrir a próxima (mensagem cs.next).
+// GeekHunter — content script (geekhunter.com / .com.br). O site FOI REFORMULADO:
+// os cards da lista agora são LINKS DIRETOS (https://www.geekhunter.com/pt/<empresa>/
+// jobs/<slug>) e o botão "Visualizar vaga" que abria nova aba NÃO EXISTE MAIS — o fluxo
+// antigo não encontrava nada ("não aplica nas vagas"). Fluxo atual (fila na MESMA aba,
+// igual Gupy/Solides — sem popup-blocker e sem abrir inúmeras abas):
+//   LISTA (/pt/vagas): coleta os hrefs dos cards (/jobs/<slug>) → FILA em storage →
+//     navega de vaga em vaga na mesma aba (?page=N pra paginar).
+//   VAGA  (/…/jobs/<slug>): match → preenche o form DA PÁGINA (contato/CV/LGPD) →
+//     "Candidatar para a vaga" → modal "perguntinhas" (wizard) → sucesso → próxima.
 (function () {
-  const OA = window.OA, PLAT = "geekhunter";
+  const OA = window.OA, PLAT = "geekhunter", QK = "oaGeekQueue", PK = "oaGeekPage", LK = "oaGeekList";
   const running = async () => { const r = await OA.bg({ type: "run.isRunning" }); return r?.running && r?.platform === PLAT; };
   const status = (t, a) => OA.bg({ type: "status.push", platform: PLAT, status: t, action: a });
   const cfg = async () => (await OA.bg({ type: "config.get" })).config;
+  const getQ = async () => (await chrome.storage.local.get(QK))[QK] || [];
+  const setQ = (q) => chrome.storage.local.set({ [QK]: q });
   // sleeps HUMANOS: estava rápido demais (abria vaga atrás de vaga sem espaçar).
   const rand = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
   const rsleep = (a, b) => OA.sleep(rand(a, b));
@@ -16,67 +21,42 @@
   const CTA_APLICAR = ["candidatar para a vaga", "quero me candidatar", "candidatar-se", "candidatar", "finalizar candidatura", "enviar candidatura", "enviar minha candidatura", "aplicar para a vaga", "aplicar"];
   const FECHAR = ["entendi", "fechar", "ok"];
 
-  let _started = false, _vers = [], _idx = 0;
+  // Vaga = URL de detalhe (/pt/<empresa>/jobs/<slug>). Confere ao vivo: a lista é
+  // /pt/vagas e TODA vaga tem segmento "/jobs/" no pathname.
+  const ehVaga = () => /\/jobs\/.+/.test(location.pathname);
 
-  const ehVaga = () => !!OA.findByText(CTA_APLICAR, { sel: "button, a, [role='button']" }) &&
-    !OA.findByText(["visualizar vaga"], { sel: "button, a, p, [role='button']" });
+  // ── FILA (mesma aba) ────────────────────────────────────────────────────────
+  async function proximo() {
+    if (!(await running())) { status("parado."); return; }
+    const q = await getQ(); const next = q.shift(); await setQ(q);
+    // espaçamento humano entre vagas
+    await status("Aguardando um pouco antes da próxima vaga…");
+    await rsleep(4000, 10000);
+    if (!(await running())) { status("parado."); return; }
+    if (next) { location.href = next; return; }
+    // fila vazia → PRÓXIMA PÁGINA da busca (lista é /pt/vagas?page=N)
+    const base = (await chrome.storage.local.get(LK))[LK];
+    let page = (await chrome.storage.local.get(PK))[PK] || 1;
+    page += 1;
+    if (!base || page > 40) { status("Fim das páginas. ✅"); await OA.bg({ type: "run.stop" }); return; }
+    await chrome.storage.local.set({ [PK]: page });
+    const u = new URL(base);
+    u.searchParams.set("page", String(page));
+    status(`Próxima página (${page})…`);
+    location.href = u.toString();
+  }
 
-  // ── LISTA: abre uma vaga por vez ────────────────────────────────────────────
-  async function iniciarLista() {
-    const c = await cfg();
-    if (!c.openrouter.apiKey) return status("⚠️ Configure a OpenRouter key na dashboard.");
-    for (let i = 0; i < 3; i++) { window.scrollTo(0, document.body.scrollHeight); await OA.sleep(900); } window.scrollTo(0, 0);
-    // O clicável costuma ser <button|a><p>Visualizar vaga</p></…> → botão E <p> casavam
-    // no filtro e a MESMA vaga entrava 2x em _vers (abria o card duas vezes). Mantém só
-    // o elemento MAIS INTERNO de cada gatilho e pula os já clicados (data-oa-visto —
-    // cobre o re-scrape de "próxima página" que não paginou de verdade).
-    const els = [...document.querySelectorAll("a, button, [role='button'], p")]
-      .filter((e) => OA.isVisible(e) && /visualizar vaga/i.test(e.innerText || "") && !e.dataset.oaVisto);
-    _vers = els.filter((e) => !els.some((o) => o !== e && e.contains(o)));
-    _idx = 0;
-    if (!_vers.length) return status("Não achei 'Visualizar vaga'. Abra a lista do GeekHunter e clique ▶️.");
-    await status(`${_vers.length} vaga(s). Abrindo 1 por vez…`);
-    abrirAtual();
-  }
-  let _abrindo = false; // reentrância: um cs.next duplicado não pode abrir 2 vagas (ou 2x a mesma)
-  async function abrirAtual() {
-    if (_abrindo) return;
-    _abrindo = true;
-    try { await abrirAtualInterno(); } finally { _abrindo = false; }
-  }
-  async function abrirAtualInterno() {
-    if (!(await running())) return;
-    if (_idx >= _vers.length) {
-      // acabou a página → tenta a PRÓXIMA (como o Selenium paginava)
-      const next = OA.findByText(["próxima", "próximo", "next"], { sel: "button, a, [aria-label]" }) ||
-        document.querySelector("[aria-label*='próxima' i], [aria-label*='next' i], .pagination-next, nav [rel='next']");
-      if (next && OA.isVisible(next) && !next.disabled) {
-        await status("Próxima página…"); OA.click(next); await OA.sleep(2800);
-        return iniciarLista(); // re-raspa a nova página
-      }
-      return status("Fim das vagas. ✅");
-    }
-    const can = await OA.bg({ type: "stats.canApply", platform: PLAT });
-    if (can?.ok && !can.permitido) { await status(`Teto do dia (${can.teto}).`); return OA.bg({ type: "run.stop" }); }
-    await status(`Abrindo vaga ${_idx + 1}/${_vers.length}…`);
-    await rsleep(2000, 5000); // espaçamento humano entre vagas
-    if (!(await running())) return;
-    const el = _vers[_idx];
-    try { el.dataset.oaVisto = "1"; } catch (_) {} // marca ANTES do clique: nunca re-entra num re-scrape
-    OA.click(el); // abre nova aba (o content script da vaga assume)
-  }
-  async function proxima() { _idx++; if (await running()) { await rsleep(1000, 2500); abrirAtual(); } }
-
-  // ── VAGA (nova aba): match → aplica ou fecha. SEMPRE fecha no fim (try/finally),
-  // mesmo se der erro — era o bug "a aba não fechava". Fluxo REAL do GeekHunter:
+  // ── VAGA (mesma aba): match → aplica ou pula. Fluxo REAL do GeekHunter:
   //   1) o form da PÁGINA tem o "Celular com DDD" (o "+55" é prefixo fixo do widget —
   //      NUNCA mexer nele, digita-se SÓ o número; o preencherTelefone do forms.js já
-  //      faz isso) e o "Candidatar para a vaga" é type=submit DESSE form → preenche
-  //      ANTES de clicar, senão a validação segura o submit e o modal nunca abre;
+  //      faz isso), CV obrigatório e o "Candidatar para a vaga" é type=submit DESSE
+  //      form → preenche ANTES de clicar, senão a validação segura o submit e o modal
+  //      nunca abre;
   //   2) o clique abre o modal "…tem algumas perguntinhas pra você": Chakra
-  //      NumberInputs (anos de experiência — IA responde pelo CV) + checkbox LGPD
-  //      (genérico marca: "privacidade" é consent) + "Finalizar candidatura";
-  //   3) sucesso = "Obrigado pela sua candidatura!" → fecha o modal e a aba.
+  //      NumberInputs (anos de experiência — IA responde pelo CV) + dropdowns/textarea
+  //      + checkbox LGPD (genérico marca) + "Finalizar candidatura";
+  //   3) sucesso = "Obrigado pela sua candidatura!" → fecha o modal e segue a fila.
+  // Retorna 'enviado' | 'pausa' | 'pulada' | 'sem_match' | 'sem_cta' | 'incerto' | 'falhou'.
   let _tratou = false;
 
   const SUCESSO = /obrigado pela (sua )?candidatura/i;
@@ -234,63 +214,67 @@
   }
 
   async function tratarVaga() {
-    if (!(await running()) || _tratou) return; // guarda: 1x por página (evita "2x na mesma vaga")
+    if (_tratou) return "pulada"; // guarda: 1x por página (evita "2x na mesma vaga")
     _tratou = true;
+    let r = "incerto";
     try {
+      if (!(await running())) return "parou";
       // pausa leve e randômica ao abrir a vaga: a SPA assenta e o ritmo fica humano
       await rsleep(1000, 2000);
-      // DEDUP por vaga (igual Gupy/Solides/Senior): se a lista re-abrir a mesma vaga
-      // (gatilho duplicado, re-scrape), fecha sem re-aplicar.
+      // banner de cookies pode interceptar o submit do form → fecha cedo
+      try { OA.fecharBanners(); } catch (_) {}
+      // DEDUP por vaga (igual Gupy/Solides): nunca re-aplica a mesma vaga.
       const dup = await OA.bg({ type: "stats.isApplied", platform: PLAT, jobId: location.pathname });
-      if (dup?.aplicou) { await status("Já aplicada — fechando."); return; } // finally fecha a aba
+      if (dup?.aplicou) { await status("Já aplicada — pulando."); return "pulada"; }
       const c = await cfg();
       const desc = (document.querySelector("[class*='description'], main, article")?.innerText || document.body.innerText || "").slice(0, 3500);
       const titulo = (document.querySelector("h1, [class*='title']")?.innerText || document.title || "").trim();
       const gate = await OA.deveAplicar(desc, { titulo, platform: PLAT });
       if (!gate.aplicar) {
-        await status(`Descartando e fechando (${gate.motivo}): ${titulo.slice(0, 35)}`);
-        return; // finally fecha a aba
+        await status(`Pulei (${gate.motivo}): ${titulo.slice(0, 35)}`);
+        return "sem_match";
       }
       const idioma = gate.idioma || "pt";
 
-      // 1) preenche o form da PÁGINA (Celular com DDD etc.) ANTES do submit
+      // 1) preenche o form da PÁGINA (contato/CV/remuneração CLT) ANTES do submit
       const cta = OA.findByText(CTA_APLICAR, { sel: "button, a, [role='button']" });
-      const formPg = (cta && cta.closest("form")) || OA.melhorContainer("form, main");
+      if (!cta) { await status("Sem botão de candidatura — vaga encerrada/já aplicada? Pulando."); return "sem_cta"; }
+      const formPg = cta.closest("form") || OA.melhorContainer("form, main");
       try { await OA.preencherCampos(formPg, { idioma, onStatus: (s) => status(s) }); } catch (_) {}
       await rsleep(700, 1300); // validação React (telefone) assenta antes do submit
-      if (cta) {
-        OA.click(cta);
-        // espera o modal de perguntas OU o sucesso direto (vaga sem perguntinhas)
-        let t0 = Date.now();
+      OA.click(cta);
+      // espera o modal de perguntas OU o sucesso direto (vaga sem perguntinhas)
+      let t0 = Date.now();
+      while (Date.now() - t0 < 9000 && !modalPerguntas() && !temSucesso()) await OA.sleep(400);
+      if (!modalPerguntas() && !temSucesso()) {
+        // submit segurado (validação) → re-preenche e reforça com clique FORTE
+        try { await OA.preencherCampos(formPg, { idioma, onStatus: (s) => status(s) }); } catch (_) {}
+        await rsleep(500, 900);
+        OA.clickForte(cta);
+        t0 = Date.now();
         while (Date.now() - t0 < 9000 && !modalPerguntas() && !temSucesso()) await OA.sleep(400);
-        if (!modalPerguntas() && !temSucesso()) {
-          // submit segurado (validação) → re-preenche e reforça com clique FORTE
-          try { await OA.preencherCampos(formPg, { idioma, onStatus: (s) => status(s) }); } catch (_) {}
-          await rsleep(500, 900);
-          OA.clickForte(cta);
-          t0 = Date.now();
-          while (Date.now() - t0 < 9000 && !modalPerguntas() && !temSucesso()) await OA.sleep(400);
-        }
       }
 
       let enviado = temSucesso(); // sem perguntinhas: sucesso direto após o CTA
-      if (!enviado) {
-        // 2) modal "…perguntinhas": NumberInputs (IA) + LGPD + "Finalizar candidatura".
+      if (!enviado && modalPerguntas()) {
+        // 2) modal "…perguntinhas": NumberInputs (IA) + dropdowns + LGPD + "Finalizar".
         // finalizar SÓ com textos do MODAL — com "candidatar"/"aplicar" na lista o wizard
         // re-clicava o "Candidatar para a vaga" da página como se fosse o envio final.
-        const r = await OA.rodarWizard(containerVaga, {
+        r = await OA.rodarWizard(containerVaga, {
           preencher: (cont) => preencherPerguntasChakra(cont, { titulo, idioma }),
           avancar: ["salvar e continuar", "continuar", "próximo", "próxima", "avançar", "next"],
-          finalizar: ["finalizar candidatura", "enviar candidatura", "enviar minha candidatura"],
+          finalizar: ["finalizar candidatura", "enviar candidatura", "enviar minha candidatura", "finalizar", "concluir"],
           sucessoFrases: ["obrigado pela sua candidatura", "obrigado pela candidatura", "confirmar sua candidatura pelo e-mail", "confirmar sua candidatura pelo email", "sua candidatura foi enviada", "candidatura enviada com sucesso", "candidatura foi enviada", "recebemos sua candidatura", "sua candidatura foi realizada"],
           ctx: { idioma },
           pausarAntesEnvio: false, isRunning: running, onStatus: (s) => status(s),
         });
+        if (r === "pausa") return "pausa";
         // o "Obrigado…" às vezes renderiza DEPOIS do check do wizard → re-confere
         enviado = r === "enviado" || (r !== "parou" && (await esperaSucesso(7000)));
       }
 
       if (enviado) {
+        r = "enviado";
         await OA.bg({ type: "stats.applied", platform: PLAT, jobId: location.pathname, titulo });
         await status(`✅ Candidatura enviada: ${titulo.slice(0, 40)}`);
         // 3) fecha o modal de agradecimento ("Obrigado pela sua candidatura!")
@@ -300,33 +284,58 @@
       }
     } catch (e) {
       try { console.log("[AutoApply][geek] erro na vaga:", e?.message); } catch (_) {}
-    } finally {
-      await OA.bg({ type: "tab.doneClose" }); // SEMPRE: fecha a aba + avança a lista
+      r = "erro";
     }
+    return r;
   }
 
-  // GUARDA de re-entrância (igual Gupy/Solides): cs.kick do SW + auto-start disparam
-  // JUNTOS no load, e o check de _started ficava DEPOIS de dois awaits → os dois fluxos
-  // passavam e a lista iniciava 2x (mesma vaga aberta duas vezes). Só o 1º entra.
-  let _fluxo = false;
+  // ── LISTA: coleta os links dos cards e enfileira (mesma aba) ────────────────
+  async function iniciarLista() {
+    const c = await cfg();
+    if (!c.openrouter.apiKey) return status("⚠️ Configure a OpenRouter key na dashboard.");
+    await chrome.storage.local.set({ [LK]: location.href }); // base p/ paginar (?page=N)
+    // SPA carrega os cards aos poucos → espera + scroll antes de concluir "sem vagas".
+    await status("Aguardando as vagas carregarem…");
+    let achou = null;
+    for (let tent = 0; tent < 4 && !achou; tent++) {
+      for (let i = 0; i < 2; i++) { window.scrollTo(0, document.body.scrollHeight); await OA.sleep(700); }
+      window.scrollTo(0, 0);
+      achou = await OA.waitFor("a[href*='/jobs/']", { timeout: 3000 });
+    }
+    // Cards = links diretos p/ detalhe (/pt/<empresa>/jobs/<slug>) do PRÓPRIO GeekHunter.
+    const links = [...new Set([...document.querySelectorAll("a[href*='/jobs/']")]
+      .map((a) => { try { const u = new URL(a.href, location.href); return (/geekhunter\.(com|com\.br)$/.test(u.hostname) && /\/jobs\/.+/.test(u.pathname)) ? u.origin + u.pathname : ""; } catch (_) { return ""; } })
+      .filter(Boolean))];
+    if (!links.length) {
+      await status("Sem vagas nesta página (cards não carregaram — layout diferente?). ✅");
+      await OA.bg({ type: "run.stop" });
+      return;
+    }
+    await setQ(links);
+    await status(`${links.length} vaga(s) na fila. Aplicando (mesma aba)…`);
+    proximo();
+  }
+
+  let _fluxo = false; // guarda de re-entrância: cs.kick + auto-start disparam juntos no load
   async function rodar() {
     if (_fluxo) return;
     _fluxo = true;
     try {
       if (!(await running())) return;
       await OA.sleep(1000);
-      if (ehVaga()) return tratarVaga();     // aba de vaga
-      if (_started) return;                   // lista só inicia uma vez
-      _started = true;
+      try { OA.fecharBanners(); } catch (_) {}
+      if (ehVaga()) {
+        let r;
+        try { r = await tratarVaga(); } catch (e) { try { console.log("[AutoApply][geek] erro:", e?.message); } catch (_) {} r = "erro"; }
+        if (r === "pausa") return status("⏸️ Confirme o envio no GeekHunter, depois ▶️ para seguir.");
+        return proximo(); // SEMPRE segue pra próxima (pulada/sem match/erro não travam a fila)
+      }
       await iniciarLista();
     } finally { _fluxo = false; }
   }
 
   chrome.runtime.onMessage.addListener((m, s, resp) => {
-    if (m?.platform && m.platform !== PLAT) return;
-    if (m?.type === "cs.kick") rodar();
-    else if (m?.type === "cs.next") proxima(); // SW mandou abrir a próxima
-    resp?.({ ok: true });
+    if (m?.type === "cs.kick" && m.platform === PLAT) { _fluxo || rodar(); resp?.({ ok: true }); }
     return true;
   });
   OA.bg({ type: "run.isRunning" }).then((r) => { if (r?.running && r?.platform === PLAT) setTimeout(rodar, 1500); });

@@ -12,11 +12,22 @@
   const ehContato = (l) => { l = (l || "").toLowerCase(); return l.length < 45 && CONTATO.some((c) => l.includes(c)); };
   const ehConsent = (l) => { l = (l || "").toLowerCase(); return CONSENT.some((c) => l.includes(c)); };
 
+  // Aviso (throttled) de que a IA falhou e a resposta veio do fallback — sem isso o
+  // usuário só via "tenho disponibilidade…" no campo sem saber QUE a IA não respondeu.
+  let _avisoIAms = 0;
+  function avisarIaFalhou(erro, ctx) {
+    if (!erro || !ctx?.onStatus) return;
+    const agora = Date.now();
+    if (agora - _avisoIAms < 15000) return; // no máx 1 aviso a cada 15s
+    _avisoIAms = agora;
+    ctx.onStatus(`⚠️ IA não respondeu (${String(erro).slice(0, 70)}) — usando resposta padrão.`);
+  }
+
   async function responder(pergunta, tipo, opcoes, ctx) {
-    // Sem race próprio: o OA.bg (dom.js) já tem watchdog de 90s e o servidor (responderPergunta)
-    // faz 1 retry antes do fallback. O antigo race de 30s era MENOR que o abort do fetch (40s) →
-    // descartava resposta VÁLIDA lenta e o campo caía no genérico "Tenho disponibilidade…".
+    // Sem race próprio: o OA.bg (dom.js) já tem watchdog de 90s. O servidor tenta o
+    // modelo configurado + fallbacks; se TUDO falhar, devolve `erro` p/ avisar aqui.
     const r = await OA.bg({ type: "brain.answer", payload: { pergunta, tipo, opcoes, vagaTitulo: ctx.vagaTitulo || "", vagaEmpresa: ctx.vagaEmpresa || "", idioma: ctx.idioma || "pt" } });
+    if (r?.erroIA) avisarIaFalhou(r.erroIA, ctx);
     return r?.resposta || "";
   }
 

@@ -7,12 +7,20 @@ export const CONFIG_KEY = "autoapply.config";
 export const STATE_KEY = "autoapply.state";
 export const RESUME_KEY = "autoapply.resume";
 
+// Modelo padrão — TEM que existir no OpenRouter. O antigo default "x-ai/grok-4.20"
+// NÃO existe (o id correto nunca foi esse): toda chamada do cérebro voltava erro e
+// os campos caíam na resposta genérica "Tenho interesse e disponibilidade…" (a IA
+// nunca respondia). gpt-4o-mini: barato, rápido e bom em pt-BR p/ perguntas de form.
+export const MODEL_PADRAO = "openai/gpt-4o-mini";
+// Modelos obsoletos que já chegaram a ser default → migrados silenciosamente no load.
+const MODELS_QUEBRADOS = new Set(["x-ai/grok-4.20"]);
+
 // Estrutura padrão da config. Espelha o .env, menos EMAIL/PASSWORD das plataformas.
 export const DEFAULT_CONFIG = {
   openrouter: {
     apiKey: "",
     // Um modelo resolve match + respostas. Barato/rápido é suficiente.
-    model: "x-ai/grok-4.20",
+    model: MODEL_PADRAO,
     // Modelo opcional separado p/ classificar/《match》 (vazio = usa o `model`).
     modelMatch: "",
   },
@@ -71,7 +79,11 @@ function deepMerge(base, extra) {
 
 export async function getConfig() {
   const raw = await chrome.storage.local.get(CONFIG_KEY);
-  return deepMerge(DEFAULT_CONFIG, raw[CONFIG_KEY] || {});
+  const cfg = deepMerge(DEFAULT_CONFIG, raw[CONFIG_KEY] || {});
+  // Migração: config salva com um modelo que não existe no OpenRouter → troca pelo
+  // padrão (sem isso o usuário antigo continuaria SEM IA mesmo após o update).
+  if (MODELS_QUEBRADOS.has(cfg.openrouter?.model)) cfg.openrouter.model = MODEL_PADRAO;
+  return cfg;
 }
 
 export async function setConfig(cfg) {

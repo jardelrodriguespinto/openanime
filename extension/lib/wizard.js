@@ -92,6 +92,10 @@
     for (let step = 0; step < maxSteps; step++) {
       if (!(await isRunning())) return "parou";
       await rsleep(1200, 2800); // pausa humana entre passos (não em rajada)
+      // Banner de cookie/LGPD por cima do form intercepta cliques ("ACEITAR/NÃO,
+      // OBRIGADO" do Gupy) → fecha cedo; barato: só casa botão DENTRO de container
+      // de consentimento (nunca um "não" do formulário).
+      try { OA.fecharBanners?.(); } catch (_) {}
       const container = (typeof getContainer === "function" ? getContainer() : getContainer) || document.body;
 
       // hook por-plataforma ANTES do preenchimento genérico (ex.: Gupy força "Não" no
@@ -134,23 +138,61 @@
       // "Personalizar candidatura" | "Finalizar candidatura" (#dialog-give-up-...), que não
       // tem botão de avançar. Seletor CSS ou texto, no documento INTEIRO.
       if (!cands.length) {
-        const finalCss = finalizarSel.map((s) => document.querySelector(s)).find((b) => b && OA.isVisible(b));
+        // Guard: o seletor CSS pode casar o CONTAINER do diálogo (div) em vez do botão —
+        // clicar div não faz nada e parecia "botão travado". Só aceita botão/link real.
+        const ehBotao = (b) => b.tagName === "BUTTON" || b.tagName === "A" || b.getAttribute("role") === "button";
+        const finalCss = finalizarSel.map((s) => document.querySelector(s)).find((b) => b && ehBotao(b) && OA.isVisible(b));
         const btnFinal = finalCss || OA.findByText(finalizar);
+
+        // Botão de envio EXISTE mas DESABILITADO (termo/campo pendente) → re-preenche e
+        // insiste. Antes caía direto no "SEM botão de avançar/finalizar" = vaga morta
+        // ("travando na parte de finalizar").
+        if (btnFinal && OA.isVisible(btnFinal) && !habil(btnFinal)) {
+          const vazios = camposVazios(container);
+          log("step", step, "FINALIZAR desabilitado | vazios:", vazios);
+          onStatus(vazios.length ? `Falta preencher: ${vazios.join(" · ")}`.slice(0, 110) : "Aguardando o botão de envio habilitar…");
+          if (++travado >= 5) { await dumpDiag("finalizar-desabilitado", container); onStatus(`Não consegui concluir${vazios.length ? " (falta: " + vazios.join(" · ") + ")" : ""}. Baixe o Diagnóstico.`.slice(0, 120)); return "falhou"; }
+          continue;
+        }
+
         if (btnFinal && OA.isVisible(btnFinal) && habil(btnFinal)) {
           if (pausarAntesEnvio) { onStatus("🔒 Revise e finalize/envie você mesmo (pausa antes do envio)."); return "pausa"; }
-          const forte = !!finalCss; // seletor CSS específico (ex.: give-up dialog) = envio real
-          log("step", step, "FINALIZAR:", (btnFinal.innerText || "").trim().slice(0, 30), "forte:", forte);
-          OA.click(btnFinal); await OA.sleep(1800);
-          // botão sc-* do Gupy ignora o .click() simples → se nada mudou, clique FORTE.
-          if (assinatura() === sigAntes) { log("step", step, "finalizar: clique normal não mudou → clique FORTE"); OA.clickForte(btnFinal); await OA.sleep(1600); }
-          for (const s of finalizarSel) { const d = document.querySelector(s); if (d && OA.isVisible(d)) { OA.click(d); await OA.sleep(600); OA.clickForte(d); await OA.sleep(1400); break; } }
-          // VERIFICA o envio (senão marca falso-sucesso e ENVENENA o dedup). Botão forte
-          // (CSS) OU frase de sucesso = enviado; senão "incerto" (não conta).
-          await OA.sleep(1000);
-          const txt = (document.body.innerText || "").toLowerCase();
-          const confirmado = sucessoFrases.some((f) => txt.includes(f));
-          if (forte || confirmado || !sucessoFrases.length) { log("ENVIADO (forte/confirmado)"); return "enviado"; }
-          log("finalizar clicado mas SEM frase de sucesso → INCERTO (não conta)");
+          log("step", step, "FINALIZAR:", (btnFinal.innerText || "").trim().slice(0, 30));
+          OA.click(btnFinal); await OA.sleep(2000);
+          // botões styled-components ignoram .click() simples → reforça com FORTE
+          if (assinatura() === sigAntes) { OA.clickForte(btnFinal); await OA.sleep(1800); }
+          // VERIFICAÇÃO REAL do envio (até ~9s): frase de sucesso OU evidência estrutural
+          // (botão sumiu). Confirma também diálogos pós-clique ("Confirmar candidatura?").
+          // Antes: seletor CSS forte = "enviado" SEM verificar → falso-sucesso envenenava
+          // o dedup e a automação "voltava pra página inicial" sem ter aplicado de fato.
+          const tEnvio = Date.now();
+          let enviado = false;
+          while (Date.now() - tEnvio < 9000) {
+            await OA.sleep(700);
+            try { OA.fecharBanners?.(); } catch (_) {}
+            const txt2 = (document.body.innerText || "").toLowerCase();
+            if (sucessoFrases.some((f) => txt2.includes(f))) { enviado = true; break; }
+            // diálogo de confirmação aberto após o clique → confirma dentro DELE
+            const dlg = [...document.querySelectorAll("[role='dialog'], [role='alertdialog'], .artdeco-modal, .chakra-modal__content")]
+              .find((d) => OA.isVisible(d));
+            if (dlg) {
+              const conf = [...dlg.querySelectorAll("button, [role='button']")].find((b) => {
+                const t = ((b.innerText || b.getAttribute("aria-label") || "")).trim().toLowerCase();
+                return habil(b) && OA.isVisible(b) && /^(confirmar( candidatura| inscri[çã]o| envio)?|enviar( candidatura| inscri[çã]o)?|finalizar( candidatura)?|efetuar candidatura|concluir|sim)$/.test(t);
+              });
+              if (conf) { OA.click(conf); await OA.sleep(1500); }
+            }
+            // evidência estrutural: botão de envio sumiu/escondeu (fluxo avançou)
+            if (!document.contains(btnFinal) || !OA.isVisible(btnFinal)) {
+              await OA.sleep(1500); // dá tempo da frase renderizar
+              const txt3 = (document.body.innerText || "").toLowerCase();
+              enviado = sucessoFrases.some((f) => txt3.includes(f)) || !sucessoFrases.length;
+              break;
+            }
+          }
+          if (enviado) { log("step", step, "ENVIADO (verificado)"); return "enviado"; }
+          log("step", step, "finalizar clicado mas SEM evidência de envio → INCERTO (não conta no dedup)");
+          onStatus("Cliquei em enviar mas não vi a confirmação — revise a página.");
           return "incerto";
         }
       }

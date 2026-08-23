@@ -70,6 +70,9 @@
   }
 
   async function preencherGupy(root) {
+    // -2) Banner de cookies/LGPD (ACEITAR / NÃO, OBRIGADO) fica POR CIMA e intercepta
+    //     cliques nos botões do fluxo → fecha antes de qualquer coisa.
+    try { OA.fecharBanners(); } catch (_) {}
     // -1) Diálogo "vamos continuar sua candidatura?" → resolve JÁ AQUI (o wizard
     //    prioriza "salvar e continuar" e o sticky ATRÁS do modal continua visível →
     //    sem isto o Continuar do diálogo nunca era clicado).

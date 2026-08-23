@@ -4,10 +4,15 @@
 
 const ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
 
-async function chat(cfg, messages, { json = false, maxTokens = 400, temperature = 0.3 } = {}) {
+// Fallback de modelos: se o modelo configurado falhar (id inválido, rate limit,
+// indisp. do provedor), tenta estes antes de desistir — é o que garante que as
+// perguntas sejam respondidas POR IA em vez da frase genérica de disponibilidade.
+const MODELS_FALLBACK = ["openai/gpt-4o-mini", "meta-llama/llama-3.3-70b-instruct"];
+
+async function chat(cfg, messages, { json = false, maxTokens = 400, temperature = 0.3, modelo = "" } = {}) {
   const apiKey = cfg?.openrouter?.apiKey;
   if (!apiKey) throw new Error("OpenRouter API key não configurada (abra a dashboard da extensão).");
-  const model = (json && cfg.openrouter.modelMatch) || cfg.openrouter.model;
+  const model = modelo || (json && cfg.openrouter.modelMatch) || cfg.openrouter.model;
   const body = {
     model,
     messages,
@@ -205,7 +210,7 @@ export async function responderPergunta(cfg, { pergunta, tipo = "TEXT", opcoes =
   // 1) Salário → config, nunca IA.
   if (RE_SALARIO.test(pergunta)) {
     const v = respostaSalario(perfil, pergunta);
-    if (v) return v;
+    if (v) return { resposta: v, erro: "" };
   }
 
   // 2) IA (OpenRouter).
@@ -228,35 +233,40 @@ export async function responderPergunta(cfg, { pergunta, tipo = "TEXT", opcoes =
     `PERGUNTA (${tipo}): ${pergunta}` +
     (opcoes && opcoes.length ? `\nOPÇÕES: ${opcoes.join(" | ")}` : "");
 
-  // 1 RETRY: uma falha transitória da OpenRouter (timeout/rede) NÃO deve virar a resposta
-  // genérica ("Tenho disponibilidade…") — dá 2ª chance antes do fallback. Os content scripts
-  // não fazem mais race próprio, então o retry mora aqui (2×40s < watchdog de 90s do OA.bg).
+  // 1 RETRY no modelo principal + FALLBACK em outros modelos: uma falha transitória
+  // OU um modelo configurado inválido/indisponível NÃO deve virar a resposta genérica
+  // ("Tenho disponibilidade…"). O erro do ÚLTIMO attempt volta em `erro` p/ o caller
+  // avisar o usuário (antes era engolido e ninguém sabia por que a IA não respondia).
   let ans = "";
-  for (let tent = 0; tent < 2; tent++) {
-    try {
-      const out = await chat(cfg, [
-        { role: "system", content: sys },
-        { role: "user", content: ctx },
-      ], { maxTokens: 160, temperature: 0.3 });
-      ans = limparResposta(out);
-      if (ans) break;
-    } catch (e) { ans = ""; }
+  let ultimoErro = "";
+  const modelos = [cfg.openrouter.model, ...MODELS_FALLBACK.filter((m) => m !== cfg.openrouter.model)];
+  externo: for (const modelo of modelos) {
+    for (let tent = 0; tent < (modelo === cfg.openrouter.model ? 2 : 1); tent++) {
+      try {
+        const out = await chat(cfg, [
+          { role: "system", content: sys },
+          { role: "user", content: ctx },
+        ], { maxTokens: 160, temperature: 0.3, modelo });
+        ans = limparResposta(out);
+        if (ans) break externo;
+      } catch (e) { ultimoErro = String(e?.message || e); }
+    }
   }
 
   if ((tipo === "SELECT" || tipo === "RADIO") && opcoes?.length) {
     // casa a resposta com a opção mais próxima (só se a IA respondeu — senão o
     // `o.includes("")` casaria a 1ª opção por engano; sem resposta vai pro fallback seguro)
     const exact = ans && opcoes.find((o) => o.trim().toLowerCase() === ans.toLowerCase());
-    if (exact) return exact;
+    if (exact) return { resposta: exact, erro: ultimoErro };
     const contains = ans && opcoes.find((o) => ans.toLowerCase().includes(o.trim().toLowerCase()) || o.toLowerCase().includes(ans.toLowerCase()));
-    if (contains) return contains;
-    return respostaSeguraLocal(tipo, opcoes);
+    if (contains) return { resposta: contains, erro: ultimoErro };
+    return { resposta: respostaSeguraLocal(tipo, opcoes), erro: ultimoErro };
   }
   if (tipo === "NUMERO") {
     const m = ans.match(/-?\d+/);
-    return m ? m[0] : "0";
+    return { resposta: m ? m[0] : "0", erro: ultimoErro };
   }
-  return ans || respostaSeguraLocal(tipo, opcoes);
+  return { resposta: ans || respostaSeguraLocal(tipo, opcoes), erro: ultimoErro };
 }
 
 // ── Habilidades eliminatórias (Solides) — nível por skill, UMA chamada ─────────

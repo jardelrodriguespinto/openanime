@@ -9,16 +9,20 @@ const PLATAFORMAS = {
   linkedin: { search: (q) => `https://www.linkedin.com/jobs/search/?keywords=${encodeURIComponent(q)}&f_AL=true` },
   indeed: { search: (q) => `https://br.indeed.com/jobs?q=${encodeURIComponent(q)}&l=&from=searchOnHP` },
   gupy: { search: (q) => `https://portal.gupy.io/job-search/term=${encodeURIComponent(q)}` },
-  geekhunter: { search: () => `https://www.geekhunter.com/pt/vagas` },
+  // searchTerm é o formato oficial da busca do GeekHunter (schema.org SearchAction).
+  geekhunter: { search: (q) => `https://www.geekhunter.com/pt/vagas?searchTerm=${encodeURIComponent(q)}` },
   senior: { search: (q) => `https://www.portaldetalentos.senior.com.br/search/vacancies?jobFunction=${encodeURIComponent(q)}` },
-  solides: { search: (q) => `https://vagas.solides.com.br/vagas/todos/${encodeURIComponent(q)}` },
+  // /vagas/todos/<termo> NÃO existe mais (voltava "0 vagas") → abre a lista e o
+  // content script digita a query no próprio formulário de busca do portal.
+  solides: { search: () => `https://vagas.solides.com.br/vagas` },
 };
 const TODAS = Object.keys(PLATAFORMAS); // p/ "Iniciar tudo"
 // Chaves de fila/paginação por plataforma (resetadas ao (re)iniciar aquela plataforma).
 const QUEUE_KEYS = {
   indeed: ["oaIndeedQueue", "oaIndeedStart"],
   gupy: ["oaGupyQueue", "oaGupyPage", "oaGupyList"],
-  geekhunter: ["oaGeekQueue"],
+  // GeekHunter agora usa fila na mesma aba (+ página/base p/ paginar como o Gupy).
+  geekhunter: ["oaGeekQueue", "oaGeekPage", "oaGeekList"],
   solides: ["oaSolidesQueue", "oaSolidesPage", "oaSolidesList"],
   linkedin: [], senior: [],
 };
@@ -65,8 +69,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
         case "brain.answer": {
           const cfg = await getConfig();
-          const resposta = await responderPergunta(cfg, msg.payload || {});
-          return sendResponse({ ok: true, resposta });
+          const r = await responderPergunta(cfg, msg.payload || {});
+          // `erro` = por que (se) a IA falhou e caiu no fallback — o content script
+          // mostra no popup pra deixar claro QUE a resposta não veio da IA e por quê.
+          return sendResponse({ ok: true, resposta: r.resposta, erroIA: r.erro || "" });
         }
         case "brain.skills": {
           const cfg = await getConfig();

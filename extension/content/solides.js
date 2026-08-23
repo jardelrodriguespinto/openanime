@@ -24,26 +24,31 @@
   const rsleep = (a, b) => OA.sleep(rand(a, b));
 
   const CARD_LINK = "a[href*='/vaga/']";
-  const CTA_RAPIDA = ["candidatura rápida", "candidatura rapida"]; // NÃO "candidatura revisada"
+  // Boards white-label variam o texto do CTA ("Candidatura rápida" é o mais comum,
+  // mas há "Quero me candidatar"/"Candidatar-se"). NÃO incluir "candidatura revisada".
+  const CTA_RAPIDA = ["candidatura rápida", "candidatura rapida", "quero me candidatar", "candidatar-se", "candidatar", "inscrever-se"];
   const INTERMED = ["avançar", "avancar", "continuar", "próximo", "proximo", "próxima", "proxima"];
   const SUBMIT = ["efetuar candidatura", "finalizar candidatura", "enviar candidatura", "concluir candidatura"];
   const SUCESSO = ["candidatura realizada", "candidatura com sucesso", "candidatura foi realizada", "recebemos sua candidatura", "candidatou com sucesso"];
 
-  const listaUrl = () => { const u = new URL(location.href); return u.origin + u.pathname; };
+  // URL COMPLETA da lista (com query): a busca feita pela UI pode viver em
+  // parâmetros — guardar só origin+pathname perdia o termo na paginação.
+  const listaUrl = () => location.href;
   const assinatura = () => location.href + "|" + document.querySelectorAll("input,button,textarea,[role='radio']").length + "|" + (document.body.innerText || "").length;
 
   async function proximo() {
     if (!(await running())) { status("parado."); return; }
     const q = await getQ(); const next = q.shift(); await setQ(q);
     if (next) { location.href = next; return; } // volta pro "card" seguinte
-    // fila vazia → próxima página da busca (?page=N — CHUTE; com fallback no botão)
+    // fila vazia → próxima página da busca (?page=N)
     const base = (await chrome.storage.local.get(LK))[LK];
     let page = (await chrome.storage.local.get(PK))[PK] || 1;
     page += 1;
     if (!base || page > 40) { status("Fim das páginas. ✅"); await OA.bg({ type: "run.stop" }); return; }
     await chrome.storage.local.set({ [PK]: page });
     status(`Próxima página (${page})…`);
-    location.href = `${base}?page=${page}`;
+    try { const u = new URL(base); u.searchParams.set("page", String(page)); location.href = u.toString(); }
+    catch (_) { location.href = `${base}${base.includes("?") ? "&" : "?"}page=${page}`; }
   }
 
   // ── Descrição/título p/ o gate ────────────────────────────────────────────────
@@ -286,6 +291,23 @@
     return r;
   }
 
+  // Digita a query no FORMULÁRIO de busca do portal e clica "Buscar vagas". O caminho
+  // antigo (/vagas/todos/<termo>) não existe mais — a URL voltava "0 vaga(s)" e a
+  // automação morria na largada ("não está se aplicando"). A busca confiável é a UI.
+  async function buscarNaLista(query) {
+    try {
+      const inp = [...document.querySelectorAll("input")].find((i) =>
+        /nome da vaga|cargo|procura\?|o que voc[êe] procura/i.test(i.placeholder || "") || /vaga/i.test(i.name || ""));
+      const btn = OA.findByText(["buscar vagas", "buscar"], { sel: "button, [role='button'], input[type='submit']" });
+      if (!inp || !btn) { log("form de busca não encontrado"); return false; }
+      OA.fillInput(inp, query);
+      await rsleep(500, 900);
+      OA.click(btn); await rsleep(2500, 4000); // SPA recarrega os cards
+      log("busca aplicada:", query);
+      return true;
+    } catch (e) { log("buscarNaLista erro:", e?.message); return false; }
+  }
+
   let _kicked = false;
   async function iniciar() {
     if (_kicked) return; _kicked = true;
@@ -293,27 +315,34 @@
     if (!(await cfg()).openrouter.apiKey) return status("⚠️ Configure a OpenRouter key na dashboard.");
     await OA.sleep(1200);
     // detalhe da vaga OU dentro do fluxo?
-    if (/\/vaga\//.test(location.pathname) || ehFluxoCandidatura() || OA.findByText(CTA_RAPIDA, { sel: "button, a, [role='button']" })) {
+    if (/\/vaga\/./.test(location.pathname) || ehFluxoCandidatura() || OA.findByText(CTA_RAPIDA, { sel: "button, a, [role='button']" })) {
       let r;
       try { r = await aplicarVaga(); } catch (e) { log("erro:", e?.message); r = "erro"; }
       if (r === "pausa") return status("⏸️ Confirme o envio na Solides, depois ▶️ para seguir.");
       if (r === "teto") return;
       return proximo();
     }
-    // Só é LISTA se a URL tem cara de lista (a busca é /vagas/todos/<query>). Página
-    // desconhecida no meio do run (rota da candidatura não reconhecida) caía aqui,
-    // clobberava a URL da lista e virava "0 cards" → run.stop matava a automação
-    // inteira. Fora do padrão → só segue a fila.
-    if (!/\/vagas\//.test(location.pathname)) { await status("Página fora do fluxo — seguindo a fila."); return proximo(); }
+    // Só é LISTA se a URL tem cara de lista ("/vagas", "/vagas/…" ou raiz de board
+    // white-label). Página desconhecida no meio do run caía aqui, clobberava a URL da
+    // lista e virava "0 cards" → run.stop matava a automação inteira.
+    if (!/\/vagas(\/|$)/.test(location.pathname) && location.pathname !== "/") { await status("Página fora do fluxo — seguindo a fila."); return proximo(); }
     // lista: guarda a URL (paginação), coleta os cards e enfileira. SPA carrega os
-    // cards aos poucos → tenta algumas vezes (scroll + espera) antes de desistir.
+    // cards aos poucos → tenta algumas vezes (scroll + espera + BUSCA pela UI).
     await chrome.storage.local.set({ [LK]: listaUrl() });
     let links = [];
-    for (let tent = 0; tent < 4 && !links.length; tent++) {
+    for (let tent = 0; tent < 5 && !links.length; tent++) {
       for (let i = 0; i < 3; i++) { window.scrollTo(0, document.body.scrollHeight); await OA.sleep(900); }
       window.scrollTo(0, 0);
-      links = [...new Set([...document.querySelectorAll(CARD_LINK)].map((a) => a.href).filter((h) => /\/vaga\//.test(h)))];
-      if (!links.length) { log("cards não carregaram (tentativa", tent + 1, ") em", location.href); await OA.sleep(1200); }
+      links = [...new Set([...document.querySelectorAll(CARD_LINK)].map((a) => a.href).filter((h) => /\/vaga\/./.test(h)))];
+      if (!links.length) {
+        log("cards não carregaram (tentativa", tent + 1, ") em", location.href);
+        // 2ª tentativa vazia → digita a query configurada no form de busca do portal
+        if (tent === 1) {
+          const q = ((await cfg()).plataformas?.solides?.query || "").trim();
+          if (q) { await status(`Buscando “${q}” no portal…`); await buscarNaLista(q); }
+        }
+        if (!links.length) await OA.sleep(1200);
+      }
     }
     if (!links.length) { await status("Sem vagas nesta página (cards não carregaram — layout diferente?). ✅"); await OA.bg({ type: "run.stop" }); return; }
     await setQ(links);
