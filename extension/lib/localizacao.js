@@ -132,6 +132,11 @@
       const limiar = (cfg.plataformas?.[platform] || {}).limiarMatch || 0;
       const descIA = descricao || [titulo, pagina].filter(Boolean).join("\n").slice(0, 2500);
       const m = await OA.bg({ type: "brain.match", payload: { descricao: descIA, titulo, empresa } });
+      // IA INDISPONÍVEL não pode passar em silêncio (parecia "não chama a IA"): avisa no
+      // console da aba com o motivo real (chave, créditos, timeout…).
+      if (m?.ok && /indispon|fail-open|erro no match/i.test(m.motivo || "")) {
+        try { console.warn(`[OA-IA] match indisponível p/ "${(titulo || "").slice(0, 50)}": ${m.motivo}`); } catch (_) {}
+      }
       if (m?.ok && (m.aplicar === false || (limiar > 0 && typeof m.nota === "number" && m.nota < limiar))) {
         return _logGate(platform, titulo, false, `sem match: ${m.motivo || ""} (nota ${m.nota})`, idioma);
       }

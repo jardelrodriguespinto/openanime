@@ -49,7 +49,12 @@ async function chat(cfg, messages, { json = false, maxTokens = 400, temperature 
   });
   if (!resp.ok) {
     const t = await resp.text().catch(() => "");
-    throw new Error(`OpenRouter ${resp.status}: ${t.slice(0, 200)}`);
+    const e = new Error(`OpenRouter ${resp.status}: ${t.slice(0, 200)}`);
+    // 401 = chave inválida | 402 = SEM CRÉDITOS | 403 = bloqueado → FATAL: trocar de
+    // modelo não resolve (todos falham igual). Sem essa marca, cada chamada queimava
+    // ~75s testando 5 modelos → a automação parecia "não estar chamando a IA".
+    if (resp.status === 401 || resp.status === 402 || resp.status === 403) e.fatal = true;
+    throw e;
   }
   const data = await resp.json();
   return data?.choices?.[0]?.message?.content?.trim() || "";
@@ -72,7 +77,12 @@ async function chatComFallback(cfg, messages, { json = false, maxTokens = 400, t
       try {
         const out = await chat(cfg, messages, { json, maxTokens, temperature, modelo, timeoutMs: Math.min(20000, resta) });
         if (out && out.trim()) return { out: out.trim(), erro: "" }; // IA respondeu (mesmo via fallback) → sem erro
-      } catch (e) { ultimoErro = String(e?.message || e); }
+      } catch (e) {
+        ultimoErro = String(e?.message || e);
+        // Chave/crédito/bloqueio não se resolvem com outro modelo → desiste JÁ com o
+        // motivo explícito (o content script mostra no status/popup).
+        if (e?.fatal) return { out: "", erro: ultimoErro + " [erro fatal: confira a chave e os créditos na OpenRouter]" };
+      }
     }
   }
   return { out: "", erro: ultimoErro };
@@ -101,6 +111,10 @@ export async function avaliarMatch(cfg, { descricao, titulo = "", empresa = "" }
       "Respeite TAMBÉM A FUNÇÃO: candidato técnico/dev/analista NÃO se candidata a vaga de " +
       "GESTÃO/LIDERANÇA formal (gerente, coordenador, head, diretor, supervisor, engineering " +
       "manager) nem o inverso — nesse caso aplicar=false citando a função no motivo. " +
+      // C# passava p/ currículo sem C# — stack principal tem que existir no CV.
+      "Regra de TECNOLOGIA: se o requisito CENTRAL da vaga é uma linguagem/stack que NÃO aparece " +
+      "em lugar nenhum do currículo (ex.: vaga de C#/.NET para um currículo sem qualquer menção a " +
+      "C#/.NET), aplicar=false citando a tecnologia. Stack adjacente/complementar não bloqueia; " +
       (mods.length
         ? `MODALIDADE: o candidato aceita SOMENTE: ${mods.join(", ")}. Se o texto indicar claramente outra modalidade (presencial/híbrido quando só aceita remoto), aplicar=false citando a modalidade; se não houver sinal claro de modalidade, NÃO bloqueie por isso. `
         : "");

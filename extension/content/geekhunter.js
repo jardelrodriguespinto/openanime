@@ -75,14 +75,20 @@
   // placeholder). Ignora o placeholder "Selecione uma opção". Sem isso a IA recebia pergunta
   // vazia → respondia genérico/errado (textarea/dropdown/numberinput ficavam mal preenchidos).
   const limpaEnun = (s) => (s || "").replace(/^\*\s*/, "").replace(/\s*\*\s*$/, "").trim();
-  const ehPlaceholderEnun = (s) => !s || s.length < 3 || /^(selecione|escolha|select|digite|informe|--)/i.test(s);
+  // /^\d+$/ = aria-label numérico do input ("141593") NÃO é pergunta — sem isso a IA
+  // recebia um número como enunciado e respondia lixo/genérico.
+  const ehPlaceholderEnun = (s) => !s || s.length < 3 || /^\d+$/.test(s.trim()) || /^(selecione|escolha|select|digite|informe|--)/i.test(s);
   const enunciadoChakra = (el) => {
     let node = el.parentElement;
     for (let i = 0; i < 4 && node; i++, node = node.parentElement) {
-      // (1) <p>/<label> filho DIRETO do ancestral (estrutura original, comprovada)
-      const filho = [...node.querySelectorAll(":scope > p, :scope > label")]
-        .map((x) => limpaEnun(x.innerText)).find((s) => !ehPlaceholderEnun(s));
-      if (filho) return filho;
+      // (1) <p>/<label> dentro do ancestral — mas só se houver EXATAMENTE UM candidato
+      // distinto. Estrutura nova (NTT DATA): o p fica num div irmão do form-control, um
+      // nível acima do que :scope > p alcançava; e num ancestral ALTO demais haveriam
+      // várias perguntas (pegaria a do campo vizinho) → por isso a exigência de ser único.
+      const cands = [...new Set([...node.querySelectorAll("p, label")]
+        .map((x) => limpaEnun(x.innerText))
+        .filter((s) => !ehPlaceholderEnun(s) && s.length < 200))];
+      if (cands.length === 1) return cands[0];
       // (2) irmão ANTERIOR do ancestral: o rótulo costuma vir logo ACIMA do wrapper do campo
       // (não é filho de um ancestral comum) → nem o (1) nem o labelFor alcançavam, e o campo
       // recebia pergunta vazia → IA respondia genérico/errado.
@@ -121,11 +127,15 @@
     // (lib/cv.js) — só consulta a IA se o CV não tiver nenhum período datado.
     const c = await cfg();
     const cvTxt = c?.perfil?.resumo_curriculo || "";
-    // (a) Chakra NumberInput (type=text, role=spinbutton, name numérico ex. "135499"):
-    // anos de experiência — CALCULADOS do CV por tecnologia; tecnologia fora do CV → 0.
-    for (const inp of container.querySelectorAll(".chakra-numberinput input, input[role='spinbutton']")) {
+    // (a) Chakra NumberInput (type=number/text, name numérico ex. "141593"):
+    // anos de experiência — IA calcula pelas datas do CV. ATENÇÃO: o GeekHunter manda o
+    // input JÁ COM value="0" → "0" NÃO conta como respondido (era o bug de nunca chamar
+    // a IA e deixar tudo zerado). dataset.oaFeito evita reprocessar na 2ª passada.
+    for (const inp of container.querySelectorAll(".chakra-numberinput input, input[role='spinbutton'], .chakra-input__group input[type='number']")) {
       try {
-        if ((inp.value || "").trim()) continue; // já respondido
+        const val = (inp.value || "").trim();
+        if (val && val !== "0") continue; // já respondido com valor REAL
+        if (inp.dataset.oaFeito) continue;
         const pergunta = enunciadoChakra(inp);
         if (/(remunera|sal[aá]ri|pretens)/i.test(pergunta)) continue; // salário → forms.js/config
         const calc = window.OACV && cvTxt ? window.OACV.calcular(cvTxt, pergunta || "") : null;
@@ -141,6 +151,7 @@
         if (!isFinite(n) || n < 0 || n > 45) n = (calc != null ? calc : 0); // IA falhou → cálculo local; senão 0
         try { console.log("[OA-CV]", baseQ.slice(0, 60), "→ IA:", resp, "| datas:", calc, "| usado:", n); } catch (_) {}
         OA.fillInput(inp, String(Number.isInteger(n) ? n : Math.round(n)));
+        inp.dataset.oaFeito = "1"; // já processado — não re-pergunta na próxima passada
         await OA.sleep(250);
       } catch (_) {}
     }
