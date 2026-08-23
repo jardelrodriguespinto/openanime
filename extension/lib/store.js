@@ -59,7 +59,7 @@ export const DEFAULT_CONFIG = {
     // Modo REDE: conecta com recrutadores na busca de pessoas do LinkedIn (sem IA,
     // só pra aumentar a rede). "query" = termo da busca (ex.: "tech recruiter").
     // tetoDia 0 = sem limite próprio (convites não contam como candidatura).
-    rede: { enabled: false, query: "tech recruiter", limiarMatch: 0, tetoDia: 0 },
+    rede: { enabled: true, query: "tech recruiter", limiarMatch: 0, tetoDia: 0 },
   },
   // Pausa antes de enviar (revisão/CAPTCHA) — o humano confirma. Recomendado true.
   pausarAntesEnvio: true,

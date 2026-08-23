@@ -19,9 +19,9 @@ const PLATAFORMAS = {
   // cards que tiverem "Conectar", página por página, sem IA. Termo vem da dashboard.
   rede: { search: (q) => `https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(q || "tech recruiter")}&origin=CLUSTER_EXPANSION` },
 };
-// "Iniciar tudo" NÃO inclui a rede (convites em massa não devem disparar junto
-// com as candidaturas — o usuário inicia a rede de propósito).
-const TODAS = Object.keys(PLATAFORMAS).filter((p) => p !== "rede");
+// "Iniciar tudo" INCLUI a rede (o usuário espera que a guia dos convites abra junto).
+// Teto de segurança por rodada + limite do próprio LinkedIn protegem contra excesso.
+const TODAS = Object.keys(PLATAFORMAS);
 // Chaves de fila/paginação por plataforma (resetadas ao (re)iniciar aquela plataforma).
 const QUEUE_KEYS = {
   indeed: ["oaIndeedQueue", "oaIndeedStart"],
@@ -136,11 +136,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           // rodando — a checagem é por URL — e briga com a nova pela fila zerada)
           const prevTab = tabsDe(await getState())[msg.platform];
           if (prevTab) { try { await chrome.tabs.remove(prevTab); } catch (_) {} }
+          // Grava o estado ANTES de abrir a aba: o content script boota junto com a
+          // página e consultava run.isRunning antes do setState → via "parado" e nunca
+          // começava (mesma corrida do "Iniciar tudo", já corrigida lá).
+          const st0 = await getState();
+          await setState({
+            running: true,
+            platforms: [...new Set([...platsDe(st0), msg.platform])],
+            tabs: { ...tabsDe(st0), [msg.platform]: 0 },
+            platform: msg.platform, tabId: 0, status: "abrindo busca…",
+          });
           const tab = await chrome.tabs.create({ url: plat.search(query), active: true });
           const st = await getState();
-          const platforms = [...new Set([...platsDe(st), msg.platform])];
-          const tabs = { ...tabsDe(st), [msg.platform]: tab.id };
-          await setState({ running: true, platforms, tabs, platform: msg.platform, tabId: tab.id, status: "abrindo busca…" });
+          await setState({ tabs: { ...tabsDe(st), [msg.platform]: tab.id }, tabId: tab.id });
           return sendResponse({ ok: true, tabId: tab.id });
         }
         case "run.startAll": {
