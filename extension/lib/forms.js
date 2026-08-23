@@ -122,14 +122,19 @@
       "checks=", container.querySelectorAll("input[type='checkbox']").length,
       "texts=", container.querySelectorAll("input[type='text'],input[type='number'],textarea").length);
 
-    // 1) selects nativos (React-controlados → selectOption usa native setter)
+    // 1) selects nativos (React-controlados → selectOption usa native setter).
+    // Placeholder em PT/EN/ES — "Selecciona una opción" não casa com /select/ (é
+    // "selecciona") e o select do LinkedIn ficava SEM resposta → "Introduce una respuesta".
+    const ehPlaceholder = (t) => !t || /^(--|—)/.test(t.trim()) ||
+      /^(selecione|selecionar|selecciona(r)?|select|choose|escolha|elige|escoge|pick|por favor|please)/i.test(t.trim()) ||
+      /\b(opci[oó]n|option)\b/i.test(t);
     for (const sel of container.querySelectorAll("select")) await wrap(async () => {
       if (!naoOculto(sel)) return;
       const cur = sel.options[sel.selectedIndex]?.text || "";
-      if (sel.value && !/selecione|selecionar|select|choose|escolha|--/i.test(cur)) return; // já respondido
+      if (sel.value && !ehPlaceholder(cur)) return; // já respondido
       const label = OA.labelFor(sel) || "pergunta";
       if (ehContato(label)) return;
-      const opcoes = [...sel.options].map((o) => o.text).filter((t) => t && !/selecione|selecionar|select|choose|escolha|--/i.test(t));
+      const opcoes = [...sel.options].map((o) => o.text).filter((t) => t && !ehPlaceholder(t));
       const resp = await responder(label, "SELECT", opcoes, ctx);
       const ok = OA.selectOption(sel, resp);
       log("select:", label.slice(0, 40), "| opções:", opcoes.length, "| resp:", resp, "| ok:", ok, "| ficou:", sel.options[sel.selectedIndex]?.text);
@@ -314,7 +319,14 @@
       const ehData = /^(date|month|datetime-local)$/.test(inp.type);
       const tipo = ehData ? "DATA"
         : (inp.type === "number" || /quantos|anos|years|how many|qtd/i.test(label) ? "NUMERO" : "TEXT");
-      let resp = await responder(label || "Pergunta obrigatória da empresa", tipo, [], ctx);
+      // "Anos de experiência com X" → CALCULADO das datas do CV (lib/cv.js). O chute da IA
+      // nesses campos ficava errado; aqui o número sai dos períodos reais do currículo.
+      let resp = "";
+      if (tipo === "NUMERO" && /anos de experi[eê]ncia|years of experience/i.test(label) && window.OACV && perfil.resumo_curriculo) {
+        const calc = window.OACV.calcular(perfil.resumo_curriculo, label);
+        if (calc != null) resp = String(calc);
+      }
+      if (!String(resp).trim()) resp = await responder(label || "Pergunta obrigatória da empresa", tipo, [], ctx);
       if (tipo === "NUMERO") resp = clampNum(inp, resp);
       else if (ehData) {
         // opcional sem resposta da IA → não força (não inventa data em campo opcional)

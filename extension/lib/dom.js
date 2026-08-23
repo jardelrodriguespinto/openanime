@@ -128,7 +128,11 @@
     }
   }
 
-  const _placeholderOpt = (t) => !t || /^(selecione|selecionar|select|choose|escolha|--)/i.test(t.trim());
+  // Placeholder de select em PT/EN/ES — "Selecciona una opción" (LinkedIn em espanhol)
+  // NÃO contém "select" (é "selecciona", sem o t) e passava batido → campo ficava vazio.
+  const _placeholderOpt = (t) => !t || /^(--|—)/.test(t.trim()) ||
+    /^(selecione|selecionar|selecciona(r)?|select|choose|escolha|elige|escoge|pick|por favor|please)/i.test(t.trim()) ||
+    /\b(opci[oó]n|option)\b/i.test(t);
 
   // Preenche um <select>. CRÍTICO: o <select> do LinkedIn é REACT-CONTROLADO — setar
   // `.value` direto o React REVERTE p/ "Selecione uma opção" (o onChange não passa pelo

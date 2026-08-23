@@ -206,8 +206,8 @@ export async function avaliarMatchTitulo(cfg, { titulo = "", empresa = "" }) {
   try {
     const sys =
       'Você filtra vagas pelo TÍTULO para um candidato. Responda SOMENTE JSON {"aplicar": <true|false>, "motivo": "<curto>"}. Regras: ' +
-      "(1) fail-open: na dúvida, aplicar=true; " +
-      "(2) SENIORIDADE: candidato sênior/pleno NÃO se candidata a estágio/trainee/aprendiz/vaga júnior; candidato júnior NÃO se candidata a vaga sênior/especialista/staff/lead/principal/arquiteto; níveis adjacentes (pleno↔sênior) passam; " +
+      "(1) fail-open só se o título NÃO indicar nível claro; " +
+      "(2) SENIORIDADE ESTRICTA: quando o título traz nível, ele tem que BATER com a senioridade do candidato — pleno só aplica em vaga pleno, sênior não aplica em pleno/júnior/estágio/trainee/aprendiz, júnior não aplica em pleno/sênior/especialista/staff/lead/principal/arquiteto; " +
       "(3) ÁREA: o título tem que conversar com o cargo/área do candidato (ex.: dev não aplica p/ vaga de vendas/administração); " +
       '(4) título genérico ("Vaga", "Oportunidade", nome de cargo compatível) → aplicar=true. Localidade/modalidade NÃO são avaliadas aqui.';
     const usr =
@@ -259,7 +259,7 @@ function respostaSeguraLocal(tipo, opcoes) {
     const ops = opcoes || [];
     // prefere "Sim"/"Yes" quando existir; senão a 1ª opção não-placeholder
     const sim = ops.find((o) => /^(sim|yes)$/i.test(o.trim()));
-    return sim || ops.find((o) => o && !/selecione|select|choose|--/i.test(o)) || ops[0] || "";
+    return sim || ops.find((o) => o && !/^(--|—)|^(selecione|selecionar|selecciona|select|choose|escolha|elige|escoge)|\b(opci[oó]n|option)\b/i.test(o)) || ops[0] || "";
   }
   if (tipo === "NUMERO") return "0";
   return "Tenho interesse e disponibilidade para a vaga.";

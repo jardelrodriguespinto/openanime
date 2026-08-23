@@ -117,15 +117,25 @@
   // preenchedor genérico não alcança. Salário/remuneração fica pro genérico (CONFIG,
   // nunca IA). Nada aqui derruba o wizard (cada campo em try/catch).
   async function preencherPerguntasChakra(container, ctx) {
+    // CV vem da dashboard: os anos de experiência são CALCULADOS das datas do currículo
+    // (lib/cv.js) — só consulta a IA se o CV não tiver nenhum período datado.
+    const c = await cfg();
+    const cvTxt = c?.perfil?.resumo_curriculo || "";
     // (a) Chakra NumberInput (type=text, role=spinbutton, name numérico ex. "135499"):
-    // anos de experiência — IA responde pelo CV; tecnologia fora do CV → 0.
+    // anos de experiência — CALCULADOS do CV por tecnologia; tecnologia fora do CV → 0.
     for (const inp of container.querySelectorAll(".chakra-numberinput input, input[role='spinbutton']")) {
       try {
         if ((inp.value || "").trim()) continue; // já respondido
         const pergunta = enunciadoChakra(inp);
         if (/(remunera|sal[aá]ri|pretens)/i.test(pergunta)) continue; // salário → forms.js/config
-        const resp = await perguntarCerebro(pergunta || "Quantos anos de experiência você tem com a principal tecnologia da vaga?", "NUMERO", [], ctx);
-        let n = parseFloat(resp.replace(",", ".").replace(/[^\d.-]/g, ""));
+        const calc = window.OACV && cvTxt ? window.OACV.calcular(cvTxt, pergunta || "") : null;
+        let n;
+        if (calc != null) {
+          n = calc;
+        } else {
+          const resp = await perguntarCerebro(pergunta || "Quantos anos de experiência você tem com a principal tecnologia da vaga?", "NUMERO", [], ctx);
+          n = parseFloat(resp.replace(",", ".").replace(/[^\d.-]/g, ""));
+        }
         if (!isFinite(n) || n < 0) n = 0; // timeout/recusa → 0 (nunca trava nem descarta a vaga)
         OA.fillInput(inp, String(Number.isInteger(n) ? n : Math.round(n)));
         await OA.sleep(250);

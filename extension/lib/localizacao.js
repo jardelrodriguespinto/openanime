@@ -69,7 +69,10 @@
     const mods = new Set((modalidadesAceitas || []).map(norm).filter(Boolean));
     if (!mods.size) return [true, "sem filtro de modalidade"];
     const mod = modalidadeDoTexto(textoVaga);
-    if (!mod) return [true, "modalidade indefinida (fail-open)"];
+    // ESTRICTO (a pedido): "se for pleno remoto, apenas vagas pleno e remoto". Modalidade
+    // não identificada NÃO passa mais — sem sinal claro de remoto/híbrido/presencial no
+    // texto (título+descrição+página), a vaga é descartada.
+    if (!mod) return [false, "modalidade não identificada"];
     if (!mods.has(mod)) return [false, `modalidade '${mod}' não aceita`];
     if (mod === "remoto") return [true, "remoto aceito"];
     const regs = new Set((regioes || []).map((r) => norm(r).replace("centro oeste", "centro-oeste")).filter(Boolean));
@@ -93,14 +96,12 @@
 
   // Gate único usado por TODAS as plataformas:
   //   1) MODALIDADE/REGIÃO (config do usuário) — sinal AMPLIADO: título + descrição +
-  //      texto da página. Antes olhava só a descrição raspada, onde o "Remoto/Híbrido"
-  //      muitas vezes NÃO está (fica num badge fora dela) → "indefinida" → fail-open
-  //      aceitava tudo e "o filtro não era levado em consideração".
-  //   2) SENIORIDADE LOCAL (determinística, funciona MESMO se a IA cair): só bloqueia
-  //      desequilíbrio CLARO (júnior↔sênior, distância ≥2 na escada). Pleno↔sênior etc.
-  //      passam — o recorte fino fica por conta do match com IA.
+  //      texto da página. ESTRICTO: modalidade não identificada DESCARTA a vaga
+  //      ("se for pleno remoto, apenas vagas pleno e remoto").
+  //   2) SENIORIDADE LOCAL (determinística, funciona MESMO se a IA cair) — ESTRICTA:
+  //      o nível do título tem que ser IGUAL ao do perfil (pleno↔sênior bloqueia).
   //   3) MATCH IA (limiar por plataforma) — com fallback de modelo (openrouter.js).
-  // Retorna {aplicar, motivo}. Fail-open.
+  // Retorna {aplicar, motivo}.
   const ESCADA = { junior: 0, pleno: 1, senior: 2 };
   async function deveAplicar(descricao, { titulo = "", empresa = "", platform = "", pagina = "" } = {}) {
     const cfg = (await OA.bg({ type: "config.get" })).config || {};
@@ -112,14 +113,13 @@
       const [ok, motivo] = vagaAceita(textoMod, perfil.modalidades_aceitas, perfil.regioes_relocacao);
       if (!ok) return { aplicar: false, motivo };
     }
-    // 2) senioridade local (título da vaga × senioridade declarada no perfil)
+    // 2) senioridade local (título da vaga × senioridade declarada no perfil) — ESTRICTA:
+    // só passa se o nível bater EXATAMENTE ("pleno remoto" ⇒ só vaga pleno). Título sem
+    // nível detectável não bloqueia aqui (o match com IA decide).
     const nvUser = nivelDoTexto(perfil.nivel_senioridade);
     const nvVaga = nivelDoTexto(titulo);
-    if (nvUser && nvVaga && ESCADA[nvUser] - ESCADA[nvVaga] >= 2) {
+    if (nvUser && nvVaga && ESCADA[nvUser] !== ESCADA[nvVaga]) {
       return { aplicar: false, motivo: `senioridade: candidato ${nvUser}, vaga ${nvVaga}`, idioma };
-    }
-    if (nvUser && nvVaga && ESCADA[nvVaga] - ESCADA[nvUser] >= 2) {
-      return { aplicar: false, motivo: `senioridade: vaga ${nvVaga}, candidato ${nvUser}`, idioma };
     }
     // 3) match IA (currículo × descrição)
     if (descricao && perfil.resumo_curriculo) {
