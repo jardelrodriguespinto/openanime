@@ -83,6 +83,7 @@ export async function avaliarMatch(cfg, { descricao, titulo = "", empresa = "" }
   const cv = cfg?.perfil?.resumo_curriculo || "";
   const nivel = cfg?.perfil?.nivel_senioridade || "";
   const cargo = cfg?.perfil?.cargo_atual || "";
+  const mods = (cfg?.perfil?.modalidades_aceitas || []).filter(Boolean);
   if (!cv || !descricao) return { aplicar: true, nota: 100, motivo: "sem CV/descrição — fail-open" };
   try {
     const sys =
@@ -95,7 +96,14 @@ export async function avaliarMatch(cfg, { descricao, titulo = "", empresa = "" }
       "sênior/pleno para vaga júnior/estágio/trainee, ou candidato júnior para vaga " +
       "sênior/especialista/staff/lead/principal — então nota BAIXA (<40) e aplicar=false, " +
       "citando o nível no motivo. Só bloqueie por senioridade quando a incompatibilidade for " +
-      "evidente pelo título/descrição; na dúvida sobre o nível, aplicar=true.";
+      "evidente pelo título/descrição; na dúvida sobre o nível, aplicar=true. " +
+      // gerente passava como vaga de dev — função/cargo tem que bater também.
+      "Respeite TAMBÉM A FUNÇÃO: candidato técnico/dev/analista NÃO se candidata a vaga de " +
+      "GESTÃO/LIDERANÇA formal (gerente, coordenador, head, diretor, supervisor, engineering " +
+      "manager) nem o inverso — nesse caso aplicar=false citando a função no motivo. " +
+      (mods.length
+        ? `MODALIDADE: o candidato aceita SOMENTE: ${mods.join(", ")}. Se o texto indicar claramente outra modalidade (presencial/híbrido quando só aceita remoto), aplicar=false citando a modalidade; se não houver sinal claro de modalidade, NÃO bloqueie por isso. `
+        : "");
     const usr =
       `CANDIDATO — senioridade: ${nivel || "não informada"} | cargo atual: ${cargo || "não informado"}\n\n` +
       `VAGA: ${titulo} @ ${empresa}\n\nDESCRIÇÃO:\n${descricao.slice(0, 4000)}\n\n` +
@@ -208,8 +216,9 @@ export async function avaliarMatchTitulo(cfg, { titulo = "", empresa = "" }) {
       'Você filtra vagas pelo TÍTULO para um candidato. Responda SOMENTE JSON {"aplicar": <true|false>, "motivo": "<curto>"}. Regras: ' +
       "(1) fail-open só se o título NÃO indicar nível claro; " +
       "(2) SENIORIDADE ESTRICTA: quando o título traz nível, ele tem que BATER com a senioridade do candidato — pleno só aplica em vaga pleno, sênior não aplica em pleno/júnior/estágio/trainee/aprendiz, júnior não aplica em pleno/sênior/especialista/staff/lead/principal/arquiteto; " +
-      "(3) ÁREA: o título tem que conversar com o cargo/área do candidato (ex.: dev não aplica p/ vaga de vendas/administração); " +
-      '(4) título genérico ("Vaga", "Oportunidade", nome de cargo compatível) → aplicar=true. Localidade/modalidade NÃO são avaliadas aqui.';
+      "(3) FUNÇÃO: título de GESTÃO (gerente, coordenador, head, diretor, supervisor, manager) NÃO serve p/ candidato técnico/dev/analista, nem o inverso; " +
+      "(4) ÁREA: o título tem que conversar com o cargo/área do candidato (ex.: dev não aplica p/ vaga de vendas/administração); " +
+      '(5) título genérico ("Vaga", "Oportunidade", nome de cargo compatível) → aplicar=true. Localidade/modalidade NÃO são avaliadas aqui.';
     const usr =
       `CANDIDATO — cargo atual: ${perfil.cargo_atual || "-"} | senioridade: ${perfil.nivel_senioridade || "-"}\n` +
       (perfil.resumo_curriculo ? `CURRÍCULO (resumo):\n${String(perfil.resumo_curriculo).slice(0, 1500)}\n\n` : "") +

@@ -249,8 +249,17 @@
         await status(`Página ${pagina}: buscando vagas…`);
         for (let i = 0; i < 4; i++) { window.scrollTo(0, document.body.scrollHeight); await OA.sleep(1000); }
         window.scrollTo(0, 0);
-        const cards = [...document.querySelectorAll(SEL.cards)].filter((c) => jobIdDoCard(c));
-        await status(`${cards.length} vagas na página ${pagina}. Aplicando…`);
+        let cards = [...document.querySelectorAll(SEL.cards)].filter((c) => jobIdDoCard(c));
+        // Pré-gate por TÍTULO (IA) — igual indeed/gupy/solides/geekhunter. Sem isso o
+        // LinkedIn aplicava em QUALQUER card da busca (ex.: "Gerente de Desenvolvimento").
+        await status(`Consultando a IA sobre ${cards.length} título(s)…`);
+        const avaliados = await OA.filtrarTitulos(cards.map((c) => ({
+          card: c,
+          ref: jobIdDoCard(c),
+          titulo: ((c.querySelector(".job-card-list__title, .base-search-card__title, h3, h2")?.innerText) || (c.innerText || "").split("\n")[0] || "").trim().slice(0, 120),
+        })));
+        cards = avaliados.map((x) => x.card);
+        await status(`${cards.length} vagas batem com o perfil na página ${pagina}. Aplicando…`);
 
         let parou = false;
         for (const card of cards) {

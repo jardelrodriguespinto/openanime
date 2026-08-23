@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "AutoApply — Candidaturas automáticas",
-  "version": "0.1.3",
+  "version": "0.1.5",
   "description": "Aplica em vagas (LinkedIn, Indeed, Gupy, GeekHunter, Senior) no seu próprio navegador logado. Dashboard e config (OpenRouter + preferências) dentro da extensão.",
   "permissions": ["storage", "unlimitedStorage", "tabs", "scripting", "activeTab", "notifications"],
   "host_permissions": [
@@ -31,6 +31,11 @@
     {
       "matches": ["https://*.linkedin.com/jobs/*"],
       "js": ["lib/dom.js", "lib/cv.js", "lib/localizacao.js", "lib/forms.js", "content/linkedin.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://*.linkedin.com/search/results/people/*"],
+      "js": ["lib/dom.js", "content/linkedin-rede.js"],
       "run_at": "document_idle"
     },
     {

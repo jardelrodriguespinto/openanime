@@ -129,14 +129,17 @@
         const pergunta = enunciadoChakra(inp);
         if (/(remunera|sal[aá]ri|pretens)/i.test(pergunta)) continue; // salário → forms.js/config
         const calc = window.OACV && cvTxt ? window.OACV.calcular(cvTxt, pergunta || "") : null;
-        let n;
-        if (calc != null) {
-          n = calc;
-        } else {
-          const resp = await perguntarCerebro(pergunta || "Quantos anos de experiência você tem com a principal tecnologia da vaga?", "NUMERO", [], ctx);
-          n = parseFloat(resp.replace(",", ".").replace(/[^\d.-]/g, ""));
-        }
-        if (!isFinite(n) || n < 0) n = 0; // timeout/recusa → 0 (nunca trava nem descarta a vaga)
+        // TUDO PELA IA (pedido): manda a pergunta com instrução de CALCULAR os anos a
+        // partir das DATAS dos períodos do currículo. O cálculo local (lib/cv.js) entra
+        // como conferência — se a IA devolver algo inválido, usamos ele.
+        const baseQ = pergunta || "Quantos anos de experiência você tem com a principal tecnologia da vaga?";
+        const perguntaIA = baseQ +
+          " Responda CALCULANDO: conte os ANOS entre as datas de início e fim dos períodos de trabalho no currículo em que essa tecnologia aparece." +
+          (calc != null ? ` Conferência automática pelas datas: ${calc} ano(s).` : "");
+        const resp = await perguntarCerebro(perguntaIA, "NUMERO", [], ctx);
+        let n = parseFloat(String(resp).replace(",", ".").replace(/[^\d.-]/g, ""));
+        if (!isFinite(n) || n < 0 || n > 45) n = (calc != null ? calc : 0); // IA falhou → cálculo local; senão 0
+        try { console.log("[OA-CV]", baseQ.slice(0, 60), "→ IA:", resp, "| datas:", calc, "| usado:", n); } catch (_) {}
         OA.fillInput(inp, String(Number.isInteger(n) ? n : Math.round(n)));
         await OA.sleep(250);
       } catch (_) {}

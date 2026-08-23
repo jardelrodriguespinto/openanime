@@ -15,8 +15,13 @@ const PLATAFORMAS = {
   // /vagas/todos/<termo> NÃO existe mais (voltava "0 vagas") → abre a lista e o
   // content script digita a query no próprio formulário de busca do portal.
   solides: { search: () => `https://vagas.solides.com.br/vagas` },
+  // Modo REDE: busca de PESSOAS (recrutadores) no LinkedIn — conecta com todos os
+  // cards que tiverem "Conectar", página por página, sem IA. Termo vem da dashboard.
+  rede: { search: (q) => `https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(q || "tech recruiter")}&origin=CLUSTER_EXPANSION` },
 };
-const TODAS = Object.keys(PLATAFORMAS); // p/ "Iniciar tudo"
+// "Iniciar tudo" NÃO inclui a rede (convites em massa não devem disparar junto
+// com as candidaturas — o usuário inicia a rede de propósito).
+const TODAS = Object.keys(PLATAFORMAS).filter((p) => p !== "rede");
 // Chaves de fila/paginação por plataforma (resetadas ao (re)iniciar aquela plataforma).
 const QUEUE_KEYS = {
   indeed: ["oaIndeedQueue", "oaIndeedStart"],
@@ -25,12 +30,15 @@ const QUEUE_KEYS = {
   geekhunter: ["oaGeekQueue", "oaGeekPage", "oaGeekList"],
   solides: ["oaSolidesQueue", "oaSolidesPage", "oaSolidesList"],
   linkedin: [], senior: [],
+  rede: ["oaRedeCount"], // contador de convites da rodada (resetado ao iniciar)
 };
 // Descobre a plataforma pela URL da aba que chamou → run.isRunning funciona por-plataforma
 // (várias rodando ao mesmo tempo) SEM tocar nos content scripts. Frames do reCAPTCHA
 // (google/recaptcha.net) não casam → caem no fallback "algum run ativo".
 function platformFromUrl(url) {
   const u = (url || "").toLowerCase();
+  // ANTES do linkedin genérico: a busca de pessoas é o modo REDE, não o de vagas.
+  if (u.includes("linkedin.com/search/results/people")) return "rede";
   if (u.includes("linkedin.com")) return "linkedin";
   if (u.includes("indeed.com")) return "indeed";
   if (u.includes("gupy.io")) return "gupy";
@@ -122,7 +130,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           const cfg = await getConfig();
           const plat = PLATAFORMAS[msg.platform];
           if (!plat) return sendResponse({ ok: false, erro: "Plataforma ainda não implementada nesta versão." });
-          const query = cfg.plataformas[msg.platform]?.query || "desenvolvedor";
+          const query = cfg.plataformas[msg.platform]?.query || (msg.platform === "rede" ? "tech recruiter" : "desenvolvedor");
           await chrome.storage.local.remove(QUEUE_KEYS[msg.platform] || []);
           // fecha a aba do run ANTERIOR desta plataforma (senão a antiga continua
           // rodando — a checagem é por URL — e briga com a nova pela fila zerada)

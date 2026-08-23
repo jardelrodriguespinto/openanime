@@ -12,6 +12,7 @@ const PLAT_LABEL = {
   geekhunter: "GeekHunter",
   senior: "Senior",
   solides: "Solides",
+  rede: "🔗 Rede (recrutadores)",
 };
 
 function renderPlats(cfg) {

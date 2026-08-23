@@ -37,12 +37,14 @@
     return "";
   }
 
-  // Nível do texto (TÍTULO da vaga OU senioridade do perfil) → junior|pleno|senior.
-  // Sênior primeiro: "Líder/Especialista" não pode ser mascarado por um "júnior" no meio
-  // do texto; \b evita casar "jr" dentro de palavra.
+  // Nível do texto (TÍTULO da vaga OU senioridade do perfil) → junior|pleno|senior|gestao.
+  // GESTÃO primeiro: "Gerente de Desenvolvimento" contém palavra de dev mas é cargo de
+  // CHEFIA — um candidato técnico NÃO deve aplicar. Depois sênior: "Líder/Especialista"
+  // não pode ser mascarado por um "júnior" no meio do texto; \b evita casar "jr" em palavra.
   function nivelDoTexto(t) {
     const s = norm(t);
     if (!s) return "";
+    if (/(\bgerente\b|\bmanager\b|coordenador|\bhead of\b|\bdiretor|supervisor)/.test(s)) return "gestao";
     if (/(\bs[eê]nior\b|\bsenior\b|\bsr\b\.?|especialista|staff|principal|\blead\b|\bl[íi]der\b|\blider\b|arquitet)/.test(s)) return "senior";
     if (/(\bpleno\b|\bmid\b|mid-level|\bpl\b\.?)/.test(s)) return "pleno";
     if (/(est[aá]gio|trainee|aprendiz|\bj[uú]nior\b|\bjunior\b|\bjr\b\.?)/.test(s)) return "junior";
@@ -69,10 +71,11 @@
     const mods = new Set((modalidadesAceitas || []).map(norm).filter(Boolean));
     if (!mods.size) return [true, "sem filtro de modalidade"];
     const mod = modalidadeDoTexto(textoVaga);
-    // ESTRICTO (a pedido): "se for pleno remoto, apenas vagas pleno e remoto". Modalidade
-    // não identificada NÃO passa mais — sem sinal claro de remoto/híbrido/presencial no
-    // texto (título+descrição+página), a vaga é descartada.
-    if (!mod) return [false, "modalidade não identificada"];
+    // Modalidade EXPLÍCITA e fora do filtro → descarta na hora (estrito). NÃO
+    // identificada → NÃO descarta aqui: muitas páginas não trazem "Remoto" em lugar
+    // nenhum e vagas compatíveis estavam sendo jogadas fora ("ignorava vaga que o perfil
+    // atende"). Quem fecha esse caso é o MATCH IA, que recebe as modalidades aceitas.
+    if (!mod) return [true, "modalidade indefinida — decide a IA"];
     if (!mods.has(mod)) return [false, `modalidade '${mod}' não aceita`];
     if (mod === "remoto") return [true, "remoto aceito"];
     const regs = new Set((regioes || []).map((r) => norm(r).replace("centro oeste", "centro-oeste")).filter(Boolean));
@@ -102,7 +105,7 @@
   //      o nível do título tem que ser IGUAL ao do perfil (pleno↔sênior bloqueia).
   //   3) MATCH IA (limiar por plataforma) — com fallback de modelo (openrouter.js).
   // Retorna {aplicar, motivo}.
-  const ESCADA = { junior: 0, pleno: 1, senior: 2 };
+  const ESCADA = { junior: 0, pleno: 1, senior: 2, gestao: 3 };
   async function deveAplicar(descricao, { titulo = "", empresa = "", platform = "", pagina = "" } = {}) {
     const cfg = (await OA.bg({ type: "config.get" })).config || {};
     const perfil = cfg.perfil || {};
@@ -111,25 +114,35 @@
     const textoMod = [titulo, descricao, pagina].filter(Boolean).join("\n");
     if (textoMod) {
       const [ok, motivo] = vagaAceita(textoMod, perfil.modalidades_aceitas, perfil.regioes_relocacao);
-      if (!ok) return { aplicar: false, motivo };
+      if (!ok) return _logGate(platform, titulo, false, motivo, idioma);
     }
     // 2) senioridade local (título da vaga × senioridade declarada no perfil) — ESTRICTA:
     // só passa se o nível bater EXATAMENTE ("pleno remoto" ⇒ só vaga pleno). Título sem
-    // nível detectável não bloqueia aqui (o match com IA decide).
+    // nível detectável não bloqueia aqui (o match com IA decide). Nível "gestao" (gerente/
+    // coordenador/diretor) ≠ qualquer nível técnico → dev não aplica em vaga de gerente.
     const nvUser = nivelDoTexto(perfil.nivel_senioridade);
     const nvVaga = nivelDoTexto(titulo);
     if (nvUser && nvVaga && ESCADA[nvUser] !== ESCADA[nvVaga]) {
-      return { aplicar: false, motivo: `senioridade: candidato ${nvUser}, vaga ${nvVaga}`, idioma };
+      return _logGate(platform, titulo, false, `senioridade/função: candidato ${nvUser}, vaga ${nvVaga}`, idioma);
     }
-    // 3) match IA (currículo × descrição)
-    if (descricao && perfil.resumo_curriculo) {
+    // 3) match IA (currículo × descrição) — roda MESMO sem descrição raspada: usa
+    // título + texto da página. Antes, descrição vazia = SEM match nenhum → vaga de
+    // gerente passava direto ("aplicava para vaga de gerente sendo desenvolvedor").
+    if ((descricao || titulo) && perfil.resumo_curriculo) {
       const limiar = (cfg.plataformas?.[platform] || {}).limiarMatch || 0;
-      const m = await OA.bg({ type: "brain.match", payload: { descricao, titulo, empresa } });
+      const descIA = descricao || [titulo, pagina].filter(Boolean).join("\n").slice(0, 2500);
+      const m = await OA.bg({ type: "brain.match", payload: { descricao: descIA, titulo, empresa } });
       if (m?.ok && (m.aplicar === false || (limiar > 0 && typeof m.nota === "number" && m.nota < limiar))) {
-        return { aplicar: false, motivo: `sem match: ${m.motivo || ""} (nota ${m.nota})`, idioma };
+        return _logGate(platform, titulo, false, `sem match: ${m.motivo || ""} (nota ${m.nota})`, idioma);
       }
     }
-    return { aplicar: true, motivo: "", idioma };
+    return _logGate(platform, titulo, true, "", idioma);
+  }
+  // Log de TODOS os vereditos do gate no console da página — facilita ver POR QUE uma
+  // vaga foi aplicada ou pulada (F12 → Console → filtro "OA-gate").
+  function _logGate(platform, titulo, ok, motivo, idioma) {
+    try { console.log(`[OA-gate] ${platform || "?"} | ${(titulo || "(sem título)").slice(0, 60)} → ${ok ? "APLICA" : "PULA"}${motivo ? " | " + motivo : ""}`); } catch (_) {}
+    return { aplicar: ok, motivo, idioma };
   }
   OA.deveAplicar = deveAplicar;
 

@@ -319,15 +319,21 @@
       const ehData = /^(date|month|datetime-local)$/.test(inp.type);
       const tipo = ehData ? "DATA"
         : (inp.type === "number" || /quantos|anos|years|how many|qtd/i.test(label) ? "NUMERO" : "TEXT");
-      // "Anos de experiência com X" → CALCULADO das datas do CV (lib/cv.js). O chute da IA
-      // nesses campos ficava errado; aqui o número sai dos períodos reais do currículo.
-      let resp = "";
-      if (tipo === "NUMERO" && /anos de experi[eê]ncia|years of experience/i.test(label) && window.OACV && perfil.resumo_curriculo) {
-        const calc = window.OACV.calcular(perfil.resumo_curriculo, label);
-        if (calc != null) resp = String(calc);
+      // "Anos de experiência com X": a IA SEMPRE calcula — instrução explícita de contar
+      // os anos pelas DATAS dos períodos do currículo (o chute solto da IA ficava errado).
+      // lib/cv.js calcula localmente como conferência; resposta inválida → usa o cálculo.
+      let calcExp = null;
+      if (tipo === "NUMERO" && /anos de experi[eê]ncia|years of experience/i.test(label)) {
+        if (window.OACV && perfil.resumo_curriculo) calcExp = window.OACV.calcular(perfil.resumo_curriculo, label);
+        label += " Responda CALCULANDO: conte os ANOS entre as datas dos períodos de trabalho no currículo em que essa tecnologia aparece." +
+          (calcExp != null ? ` Conferência automática pelas datas: ${calcExp} ano(s).` : "");
       }
-      if (!String(resp).trim()) resp = await responder(label || "Pergunta obrigatória da empresa", tipo, [], ctx);
-      if (tipo === "NUMERO") resp = clampNum(inp, resp);
+      let resp = await responder(label || "Pergunta obrigatória da empresa", tipo, [], ctx);
+      if (tipo === "NUMERO") {
+        const ni = parseFloat(String(resp).replace(",", ".").replace(/[^\d.-]/g, ""));
+        if (!isFinite(ni) || ni < 0 || ni > 45) resp = calcExp != null ? String(calcExp) : resp;
+        resp = clampNum(inp, resp);
+      }
       else if (ehData) {
         // opcional sem resposta da IA → não força (não inventa data em campo opcional)
         if (!obrig && !String(resp).trim()) return;
