@@ -329,25 +329,34 @@
     // lista: guarda a URL (paginação), coleta os cards e enfileira. SPA carrega os
     // cards aos poucos → tenta algumas vezes (scroll + espera + BUSCA pela UI).
     await chrome.storage.local.set({ [LK]: listaUrl() });
-    let links = [];
-    for (let tent = 0; tent < 5 && !links.length; tent++) {
+    let cards = [];
+    for (let tent = 0; tent < 5 && !cards.length; tent++) {
       for (let i = 0; i < 3; i++) { window.scrollTo(0, document.body.scrollHeight); await OA.sleep(900); }
       window.scrollTo(0, 0);
-      links = [...new Set([...document.querySelectorAll(CARD_LINK)].map((a) => a.href).filter((h) => /\/vaga\/./.test(h)))];
-      if (!links.length) {
+      const vistos = new Set();
+      cards = [...document.querySelectorAll(CARD_LINK)]
+        .filter((a) => /\/vaga\/./.test(a.href) && !vistos.has(a.href) && vistos.add(a.href))
+        .map((a) => ({ href: a.href, titulo: ((a.innerText || "").split("\n")[0] || "").trim().slice(0, 120) }));
+      if (!cards.length) {
         log("cards não carregaram (tentativa", tent + 1, ") em", location.href);
         // 2ª tentativa vazia → digita a query configurada no form de busca do portal
+        // (default "desenvolvedor" — a busca NUNCA fica sem termo)
         if (tent === 1) {
-          const q = ((await cfg()).plataformas?.solides?.query || "").trim();
-          if (q) { await status(`Buscando “${q}” no portal…`); await buscarNaLista(q); }
+          const q = (((await cfg()).plataformas?.solides?.query || "").trim()) || "desenvolvedor";
+          await status(`Buscando “${q}” no portal…`);
+          await buscarNaLista(q);
         }
-        if (!links.length) await OA.sleep(1200);
+        if (!cards.length) await OA.sleep(1200);
       }
     }
-    if (!links.length) { await status("Sem vagas nesta página (cards não carregaram — layout diferente?). ✅"); await OA.bg({ type: "run.stop" }); return; }
-    await setQ(links);
-    await status(`${links.length} vaga(s) na fila. Aplicando (mesma aba)…`);
-    log("fila:", links.length, "vagas");
+    if (!cards.length) { await status("Sem vagas nesta página (cards não carregaram — layout diferente?). ✅"); await OA.bg({ type: "run.stop" }); return; }
+    // PRÉ-GATE POR IA NA LISTA: só entra na fila o título que faz sentido c/ o perfil.
+    await status(`Consultando a IA sobre ${cards.length} título(s)…`);
+    const ok = await OA.filtrarTitulos(cards);
+    if (!ok.length) { await status("Nenhuma vaga da página bate com o seu perfil (filtro por IA). ✅"); await OA.bg({ type: "run.stop" }); return; }
+    await setQ(ok.map((c) => c.href));
+    await status(`${ok.length} vaga(s) na fila (${cards.length - ok.length} fora do perfil). Aplicando (mesma aba)…`);
+    log("fila:", ok.length, "vagas");
     proximo();
   }
 

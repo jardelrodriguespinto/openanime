@@ -5,14 +5,13 @@
 const ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
 
 // Fallback de modelos: se o modelo configurado falhar (id inválido, rate limit,
-// indisp. do provedor), tenta estes antes de desistir — é o que garante que as
-// perguntas sejam respondidas POR IA em vez da frase genérica de disponibilidade.
-// Os ":free" entram por causa de chave SEM créditos: gpt-4o-mini/llama pagos voltam
-// 402 na hora e, sem uma variante gratuita na fila, TODAS as tentativas falham e o
-// campo recebe o texto genérico ("Tenho interesse e disponibilidade…").
+// indisp. do provedor), tenta estes antes de desistir — é o que garante que match,
+// filtro de título e perguntas sejam respondidos POR IA em vez de fail-open/genérico.
+// PRIMEIRO fallback = x-ai/grok-4.3 (pedido explícito do usuário). Os ":free" entram
+// por causa de chave SEM créditos: modelos pagos voltam 402 na hora.
 const MODELS_FALLBACK = [
+  "x-ai/grok-4.3",
   "openai/gpt-4o-mini",
-  "meta-llama/llama-3.3-70b-instruct",
   "meta-llama/llama-3.3-70b-instruct:free",
   "google/gemma-2-9b-it:free",
 ];
@@ -194,6 +193,36 @@ export async function transcreverAudio(cfg, { audioUrl, audioB64 } = {}) {
     throw new Error("Tempo limite excedido aguardando transcrição");
   } catch (e) {
     return { erro: e.message };
+  }
+}
+
+// ── Filtro de TÍTULO (pré-gate na LISTA, antes de abrir a vaga) ────────────────
+// Lê o título e decide se faz sentido para o candidato (área + senioridade) usando o
+// perfil da dashboard. É o que impede "aplicar pra qualquer coisa": solides/indeed/
+// gupy/geekhunter filtram os cards POR IA antes de enfileirar. Fail-open.
+export async function avaliarMatchTitulo(cfg, { titulo = "", empresa = "" }) {
+  const perfil = cfg?.perfil || {};
+  if (!titulo) return { aplicar: true, motivo: "" };
+  try {
+    const sys =
+      'Você filtra vagas pelo TÍTULO para um candidato. Responda SOMENTE JSON {"aplicar": <true|false>, "motivo": "<curto>"}. Regras: ' +
+      "(1) fail-open: na dúvida, aplicar=true; " +
+      "(2) SENIORIDADE: candidato sênior/pleno NÃO se candidata a estágio/trainee/aprendiz/vaga júnior; candidato júnior NÃO se candidata a vaga sênior/especialista/staff/lead/principal/arquiteto; níveis adjacentes (pleno↔sênior) passam; " +
+      "(3) ÁREA: o título tem que conversar com o cargo/área do candidato (ex.: dev não aplica p/ vaga de vendas/administração); " +
+      '(4) título genérico ("Vaga", "Oportunidade", nome de cargo compatível) → aplicar=true. Localidade/modalidade NÃO são avaliadas aqui.';
+    const usr =
+      `CANDIDATO — cargo atual: ${perfil.cargo_atual || "-"} | senioridade: ${perfil.nivel_senioridade || "-"}\n` +
+      (perfil.resumo_curriculo ? `CURRÍCULO (resumo):\n${String(perfil.resumo_curriculo).slice(0, 1500)}\n\n` : "") +
+      `TÍTULO DA VAGA: ${titulo}` + (empresa ? ` @ ${empresa}` : "");
+    const { out, erro } = await chatComFallback(cfg, [
+      { role: "system", content: sys },
+      { role: "user", content: usr },
+    ], { json: true, maxTokens: 120, usarModelMatch: true });
+    if (!out) return { aplicar: true, motivo: "filtro indisponível (fail-open): " + erro };
+    const j = JSON.parse(out);
+    return { aplicar: j.aplicar !== false, motivo: String(j.motivo || "").slice(0, 90) };
+  } catch (e) {
+    return { aplicar: true, motivo: "erro no filtro de título: " + e.message };
   }
 }
 

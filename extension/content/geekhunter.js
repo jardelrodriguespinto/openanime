@@ -303,16 +303,27 @@
       achou = await OA.waitFor("a[href*='/jobs/']", { timeout: 3000 });
     }
     // Cards = links diretos p/ detalhe (/pt/<empresa>/jobs/<slug>) do PRÓPRIO GeekHunter.
-    const links = [...new Set([...document.querySelectorAll("a[href*='/jobs/']")]
-      .map((a) => { try { const u = new URL(a.href, location.href); return (/geekhunter\.(com|com\.br)$/.test(u.hostname) && /\/jobs\/.+/.test(u.pathname)) ? u.origin + u.pathname : ""; } catch (_) { return ""; } })
-      .filter(Boolean))];
-    if (!links.length) {
+    const cards = [...new Map([...document.querySelectorAll("a[href*='/jobs/']")]
+      .map((a) => {
+        try {
+          const u = new URL(a.href, location.href);
+          if (!(/geekhunter\.(com|com\.br)$/.test(u.hostname) && /\/jobs\/.+/.test(u.pathname))) return null;
+          return [u.origin + u.pathname, { href: u.origin + u.pathname, titulo: ((a.innerText || "").split("\n")[0] || "").trim().slice(0, 120) }];
+        } catch (_) { return null; }
+      })
+      .filter(Boolean))]
+      .map(([_, v]) => v);
+    if (!cards.length) {
       await status("Sem vagas nesta página (cards não carregaram — layout diferente?). ✅");
       await OA.bg({ type: "run.stop" });
       return;
     }
-    await setQ(links);
-    await status(`${links.length} vaga(s) na fila. Aplicando (mesma aba)…`);
+    // PRÉ-GATE POR IA NA LISTA: título → brain.title antes de enfileirar.
+    await status(`Consultando a IA sobre ${cards.length} título(s)…`);
+    const ok = await OA.filtrarTitulos(cards);
+    if (!ok.length) { await status("Nenhuma vaga da página bate com o seu perfil (filtro por IA). ✅"); await OA.bg({ type: "run.stop" }); return; }
+    await setQ(ok.map((c) => c.href));
+    await status(`${ok.length} vaga(s) na fila (${cards.length - ok.length} fora do perfil). Aplicando (mesma aba)…`);
     proximo();
   }
 

@@ -253,13 +253,20 @@
     await status("Aguardando as vagas carregarem…");
     await OA.waitFor(CARD_LINK, { timeout: 25000 });
     for (let i = 0; i < 3; i++) { window.scrollTo(0, document.body.scrollHeight); await OA.sleep(900); } window.scrollTo(0, 0);
-    const links = [...new Set([...document.querySelectorAll(CARD_LINK)].map((a) => a.href).filter(Boolean))];
-    if (!links.length) {
+    const cards = [...new Map([...document.querySelectorAll(CARD_LINK)]
+      .filter((a) => a.href)
+      .map((a) => [a.href, { href: a.href, titulo: ((a.closest("[data-testid='job-list__listitem']")?.querySelector("h3, h2")?.innerText || a.innerText || "").split("\n")[0] || "").trim().slice(0, 120) }]))
+      .values()];
+    if (!cards.length) {
       // sem cards nesta página → acabou (ou fim da paginação)
       await status("Sem mais vagas. ✅"); await OA.bg({ type: "run.stop" }); return;
     }
-    await setQ(links);
-    await status(`${links.length} vagas na fila (página). Aplicando (mesma aba)…`);
+    // PRÉ-GATE POR IA NA LISTA: título → brain.title antes de enfileirar.
+    await status(`Consultando a IA sobre ${cards.length} título(s)…`);
+    const ok = await OA.filtrarTitulos(cards);
+    if (!ok.length) { await status("Nenhuma vaga da página bate com o seu perfil (filtro por IA). ✅"); await OA.bg({ type: "run.stop" }); return; }
+    await setQ(ok.map((c) => c.href));
+    await status(`${ok.length} vaga(s) na fila (${cards.length - ok.length} fora do perfil). Aplicando (mesma aba)…`);
     proximo();
   }
 

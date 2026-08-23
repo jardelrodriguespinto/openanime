@@ -253,8 +253,25 @@
       }
       for (const [, cbs] of grupos) await wrap(async () => {
         if (cbs.some((c) => c.checked)) return; // grupo já satisfeito (IA marcou algo)
-        OA.setChecked(cbs[0], true, container);
-        log("checkbox-grupo obrig destravado:", (OA.headingLabel(cbs[0]) || OA.labelFor(cbs[0]) || "grupo").slice(0, 40));
+        // IA ESCOLHE entre as opções do grupo (nunca marca às cegas): enunciado =
+        // heading/label do grupo; opções = texto de cada checkbox. Fallback: 1ª.
+        const enun = OA.headingLabel(cbs[0]) || OA.labelFor(cbs[0])
+          || ((cbs[0].closest("fieldset, [role='group'], li, div")?.innerText || "").split("\n")[0] || "").trim()
+          || "Selecione ao menos uma opção";
+        const opcoes = cbs.map((c, ix) =>
+          (OA.labelFor(c) || (c.closest("label")?.innerText || "") || `opção ${ix + 1}`).trim().slice(0, 60));
+        const escolha = (await responder(enun, "SELECT", opcoes, ctx) || "").toLowerCase();
+        let alvo = -1;
+        if (escolha) {
+          let melhor = 0;
+          opcoes.forEach((o, ix) => {
+            const ol = o.toLowerCase();
+            const s = ol === escolha ? 3 : (ol.includes(escolha) || escolha.includes(ol)) ? 2 : 0;
+            if (s > melhor) { melhor = s; alvo = ix; }
+          });
+        }
+        OA.setChecked(cbs[alvo >= 0 ? alvo : 0], true, container);
+        log("checkbox-grupo:", enun.slice(0, 40), "→", alvo >= 0 ? opcoes[alvo] : "(fallback: 1ª)");
       });
     }
 

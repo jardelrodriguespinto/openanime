@@ -166,15 +166,21 @@
     await status("Lendo vagas…");
     for (let i = 0; i < 4; i++) { window.scrollTo(0, document.body.scrollHeight); await rsleep(700, 1600); } window.scrollTo(0, 0);
     const cards = [...document.querySelectorAll("div.job_seen_beacon, .jobsearch-ResultsList > li, [data-jk]")];
-    const jks = [];
+    // PRÉ-GATE POR IA NA LISTA: cada TÍTULO vai pro cérebro (brain.title) ANTES de
+    // enfileirar — só entra na fila o que faz sentido com o perfil (área/senioridade).
+    const vgs = [];
     for (const c of cards) {
       const jk = c.querySelector("[data-jk]")?.getAttribute("data-jk") || c.getAttribute("data-jk") ||
         c.querySelector("a[href*='jk=']")?.href.match(/[?&]jk=([0-9A-Za-z]+)/)?.[1];
-      if (jk && !jks.includes(jk)) jks.push(jk);
+      if (!jk || vgs.some((v) => v.jk === jk)) continue;
+      vgs.push({ jk, titulo: (c.querySelector("h2.jobTitle, h2")?.innerText || "").trim() });
     }
-    if (!jks.length) { await status("0 vagas na página."); return; }
-    await setQueue(jks.map((jk) => `https://br.indeed.com/viewjob?jk=${jk}`));
-    await status(`${jks.length} vagas na fila. Aplicando…`);
+    if (!vgs.length) { await status("0 vagas na página."); return; }
+    await status(`Consultando a IA sobre ${vgs.length} título(s)…`);
+    const ok = await OA.filtrarTitulos(vgs.map((v) => ({ titulo: v.titulo, ref: v.jk })));
+    if (!ok.length) { await status("Nenhuma vaga da página bate com o seu perfil (filtro por IA). ✅"); return; }
+    await setQueue(ok.map((v) => `https://br.indeed.com/viewjob?jk=${v.ref}`));
+    await status(`${ok.length} vaga(s) na fila (${vgs.length - ok.length} fora do perfil). Aplicando…`);
     proximo();
   }
 

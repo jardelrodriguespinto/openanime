@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "AutoApply — Candidaturas automáticas",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Aplica em vagas (LinkedIn, Indeed, Gupy, GeekHunter, Senior) no seu próprio navegador logado. Dashboard e config (OpenRouter + preferências) dentro da extensão.",
   "permissions": ["storage", "unlimitedStorage", "tabs", "scripting", "activeTab", "notifications"],
   "host_permissions": [

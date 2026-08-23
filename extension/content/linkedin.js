@@ -129,6 +129,15 @@
 
       const submit = modal.querySelector(SEL.submit);
       if (submit && OA.isVisible(submit)) {
+        // DESABILITADO = pergunta obrigatória pendente → NÃO clica às cegas (o clique
+        // não faz nada e virava "incerto"): re-preenche com IA e tenta no próximo loop.
+        if (semAvanco < 5 && (submit.disabled || submit.getAttribute("aria-disabled") === "true")) {
+          semAvanco++;
+          await status(`Pergunta obrigatória pendente — IA respondendo de novo… (${semAvanco})`);
+          await OA.preencherCampos(modal, { vagaTitulo, vagaEmpresa, idioma, onStatus: (s) => status(s) });
+          await OA.sleep(800);
+          continue;
+        }
         // LinkedIn Easy Apply NÃO tem CAPTCHA → envia de verdade. Depois VERIFICA:
         // sumiu o botão de enviar (modal avançou p/ confirmação) OU frase de sucesso =
         // enviado; senão "incerto" (não conta no dedup — evita falso-sucesso).

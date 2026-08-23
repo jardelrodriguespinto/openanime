@@ -3,7 +3,7 @@
 // O loop por-vaga mora no content script.
 
 import { getConfig, setConfig, getState, setState, contador, registrarCandidatura, jaAplicou, getResume } from "../lib/store.js";
-import { avaliarMatch, transcreverAudio, responderPergunta, avaliarHabilidades } from "../lib/openrouter.js";
+import { avaliarMatch, avaliarMatchTitulo, transcreverAudio, responderPergunta, avaliarHabilidades } from "../lib/openrouter.js";
 
 const PLATAFORMAS = {
   linkedin: { search: (q) => `https://www.linkedin.com/jobs/search/?keywords=${encodeURIComponent(q)}&f_AL=true` },
@@ -65,6 +65,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         case "brain.match": {
           const cfg = await getConfig();
           const r = await avaliarMatch(cfg, msg.payload || {});
+          return sendResponse({ ok: true, ...r });
+        }
+        // Pré-gate por TÍTULO (na lista, antes de abrir a vaga): área + senioridade
+        // vs. perfil. É a 1ª consulta de IA da vaga — "analisar tudo antes de aplicar".
+        case "brain.title": {
+          const cfg = await getConfig();
+          const r = await avaliarMatchTitulo(cfg, msg.payload || {});
           return sendResponse({ ok: true, ...r });
         }
         case "brain.answer": {

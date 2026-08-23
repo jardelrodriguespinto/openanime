@@ -132,4 +132,40 @@
     return { aplicar: true, motivo: "", idioma };
   }
   OA.deveAplicar = deveAplicar;
+
+  // ── Pré-gate por TÍTULO (IA) na COLETA da lista ─────────────────────────────
+  // Antes de enfileirar os cards, cada TÍTULO vai pra IA (brain.title): faz sentido
+  // com o perfil (área/senioridade)? É a "consulta antes de aplicar" — sem ela as
+  // plataformas abriam e preenchiam QUALQUER vaga. Cache por sessão + pool de 3
+  // chamadas em paralelo (25 cards × ~2s em série = lento demais).
+  const _tituloCache = new Map();
+  async function tituloOk(titulo, opts = {}) {
+    const key = norm(titulo);
+    if (!key) return true; // sem título → fail-open
+    if (_tituloCache.has(key)) return _tituloCache.get(key);
+    let ok = true;
+    try {
+      const r = await OA.bg({ type: "brain.title", payload: { titulo: key, empresa: opts.empresa || "" } });
+      ok = !r || r.aplicar !== false; // SW falhou → fail-open
+    } catch (_) { /* fail-open */ }
+    _tituloCache.set(key, ok);
+    return ok;
+  }
+  async function filtrarTitulos(itens, onProgresso) {
+    // itens: [{ titulo, empresa?, ref }] → devolve os aprovados (ordem preservada)
+    const aprovados = [];
+    if (!itens.length) return aprovados;
+    let i = 0;
+    const worker = async () => {
+      while (i < itens.length) {
+        const it = itens[i++];
+        if (await tituloOk(it.titulo, it)) aprovados.push(it);
+        if (onProgresso && i % 5 === 0) onProgresso(i, itens.length);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(3, itens.length) }, worker));
+    return aprovados;
+  }
+  OA.tituloOk = tituloOk;
+  OA.filtrarTitulos = filtrarTitulos;
 })();
