@@ -76,41 +76,59 @@
       if (submit && OA.isVisible(submit)) {
         // CAPTCHA primeiro: pode ser a razão do botão estar desabilitado. O desafio abre
         // num iframe cross-origin e é resolvido pelo content/recaptcha.js DENTRO dele.
-        // Enterprise (recaptcha.net) nunca gera token no doc principal → esperamos só o
-        // DESAFIO ABRIR/FECHAR; checkbox parado sem desafio espera pouco e tenta clicar.
-        if (desafioCaptcha() || (OA.captchaPresente() && !OA.captchaResolvido())) {
+        // Enterprise (recaptcha.net) NUNCA popula token no doc principal → "resolvido" por
+        // token não existe aqui. Regra: DESAFIO aberto (bframe) = espera resolver; SÓ
+        // checkbox parado = espera curta (o recaptcha.js clica em paralelo) e SEGUE — era
+        // aqui que travava 18s+ e às vezes desistia sem enviar ("não finaliza no botão").
+        if (desafioCaptcha()) {
           await status("🔓 Resolvendo CAPTCHA (áudio) com AssemblyAI…");
-          for (let w = 0; w < 32 && (desafioCaptcha() || (w < 12 && OA.captchaPresente() && !OA.captchaResolvido())); w++) {
+          for (let w = 0; w < 32 && desafioCaptcha(); w++) {
             if (!(await running())) return;
             await OA.sleep(1500);
           }
           if (desafioCaptcha()) { await status("🔒 CAPTCHA aberto — resolva você mesmo e clique 'Enviar sua candidatura'."); return; }
-          await status("✅ CAPTCHA ok, seguindo para o envio…");
-          await rsleep(900, 1800);
+        } else if (OA.captchaPresente() && !OA.captchaResolvido()) {
+          await status("🔓 CAPTCHA presente — aguardando clique automático…");
+          for (let w = 0; w < 6 && !desafioCaptcha() && !OA.captchaResolvido(); w++) {
+            if (!(await running())) return;
+            await OA.sleep(1500);
+          }
+          if (desafioCaptcha()) continue; // desafio acabou de abrir → volta pro bloco acima
         }
         submit = document.querySelector(selSubmit) || submit;
-        // Botão DESABILITADO: ou captcha pendente (já esperado acima) ou CAMPO OBRIGATÓRIO
-        // vazio/inválido. Antes a gente clicava mesmo assim, nada acontecia, os 14 passos
-        // esgotavam em silêncio e caía pra próxima vaga SEM enviar. Agora: refaz o
-        // preenchimento com IA a cada volta e, se persistir, LISTA os campos pendentes.
-        if (submit.disabled || submit.getAttribute("aria-disabled") === "true") {
-          tentEnvio++;
-          if (tentEnvio > 5) {
-            const pend = [...document.querySelectorAll("[aria-invalid='true'], input:invalid, select:invalid, textarea:invalid")]
-              .filter(OA.isVisible).map((e) => OA.labelFor(e)).filter(Boolean).slice(0, 4);
-            await status(`⚠️ 'Enviar' segue desabilitado${pend.length ? " — pendente: " + pend.join(" | ") : ""}. Finalize à mão.`);
-            return;
+        if (!(submit.disabled || submit.getAttribute("aria-disabled") === "true")) {
+          // Enviar JÁ. Se o Indeed abrir o desafio por causa do clique, tratamos abaixo.
+          await status("Enviando candidatura…");
+          await rsleep(900, 2400); // "revisão humana" antes de enviar
+          const s2 = document.querySelector(selSubmit) || submit;
+          OA.click(s2);
+          await rsleep(2400, 4200);
+          // Desafio pós-clique (Indeed valida server-side): espera o recaptcha.js resolver
+          // (até ~40s) e RECLICA o envio — antes desistia na hora com "resolva à mão".
+          if (desafioCaptcha()) {
+            await status("🔓 CAPTCHA pedido no envio — resolvendo…");
+            for (let w = 0; w < 26 && desafioCaptcha(); w++) {
+              if (!(await running())) return;
+              await OA.sleep(1500);
+            }
+            if (!desafioCaptcha()) { OA.clickForte(document.querySelector(selSubmit) || s2); await rsleep(2200, 3600); }
+            else { await status("🔒 CAPTCHA não resolveu sozinho — resolva você mesmo e clique 'Enviar sua candidatura'."); return; }
+          } else if (OA.isVisible(s2)) {
+            OA.clickForte(s2); await rsleep(2200, 3600);
           }
-          await status(`'Enviar' desabilitado (${tentEnvio}/5) — revisando campos obrigatórios com IA…`);
-          await rsleep(1200, 2400);
           continue;
         }
-        await status("Enviando candidatura…");
-        await rsleep(900, 2400); // "revisão humana" antes de enviar
-        const s2 = document.querySelector(selSubmit) || submit;
-        OA.click(s2); await rsleep(2400, 4200);
-        if (OA.isVisible(s2) && !desafioCaptcha()) { OA.clickForte(s2); await rsleep(2200, 3600); }
-        continue;
+        // Botão DESABILITADO (e sem desafio): campo obrigatório vazio/inválido. Refaz o
+        // preenchimento com IA a cada volta e, se persistir, LISTA os campos pendentes.
+        tentEnvio++;
+        if (tentEnvio > 5) {
+          const pend = [...document.querySelectorAll("[aria-invalid='true'], input:invalid, select:invalid, textarea:invalid")]
+            .filter(OA.isVisible).map((e) => OA.labelFor(e)).filter(Boolean).slice(0, 4);
+          await status(`⚠️ 'Enviar' segue desabilitado${pend.length ? " — pendente: " + pend.join(" | ") : ""}. Finalize à mão.`);
+          return;
+        }
+        await status(`'Enviar' desabilitado (${tentEnvio}/5) — revisando campos obrigatórios com IA…`);
+        await rsleep(1200, 2400);
       }
       const cont = document.querySelector("[data-testid='continue-button']") || OA.findByText(["continuar", "continue", "revisar", "verificar"]);
       if (cont && OA.isVisible(cont)) { await rsleep(700, 2000); OA.click(cont); await rsleep(1300, 2800); continue; }

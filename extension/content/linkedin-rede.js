@@ -31,19 +31,33 @@
     ((el.closest("div")?.innerText || "").split("\n")[0] || "recrutador").slice(0, 40);
 
   // Diálogo de LIMITE de convites ("Você já enviou o número máximo...") → encerra.
-  const limiteAtingido = () =>
-    !!document.querySelector(".artdeco-modal") &&
-    /limite|m[aá]ximo de convites|maximum number of invitations|invitation limit/i.test(document.querySelector(".artdeco-modal")?.innerText || "");
+  // A UI nova do LinkedIn não usa .artdeco-modal em toda tela de convite → procuramos
+  // QUALQUER dialog/modal visível (role=dialog cobre os overlays atuais).
+  const dlgSel = "[role='dialog'], .artdeco-modal";
+  const dialogoAberto = () => [...document.querySelectorAll(dlgSel)].find((d) => OA.isVisible(d));
+
+  const limiteAtingido = () => {
+    const d = dialogoAberto();
+    return !!d && /limite|m[aá]ximo de convites|maximum number of invitations|invitation limit/i.test(d.innerText || "");
+  };
 
   async function fecharModal() {
-    const x = document.querySelector(".artdeco-modal [aria-label='Descartar'], .artdeco-modal [aria-label='Dismiss']");
-    if (x && OA.isVisible(x)) { try { OA.click(x); await OA.sleep(400); } catch (_) {} }
+    const d = dialogoAberto();
+    const x = d && [...d.querySelectorAll("[aria-label='Descartar'], [aria-label='Dismiss'], [aria-label='Fechar'], [aria-label='Dismiss'], button[aria-label*='fechar' i], button[aria-label*='close' i]")]
+      .find(OA.isVisible);
+    if (x) { try { OA.click(x); await OA.sleep(400); } catch (_) {} }
   }
 
-  // Clica "Enviar sem nota"/"Send without a note" no modal do convite (o botão primário
-  // do actionbar). O texto vem com quebras de linha/espacos → testa com includes.
+  // Clica "Enviar sem nota"/"Send without a note" no modal do convite. Procura em QUALQUER
+  // dialog visível (a UI nova do search-custom-invite não é .artdeco-modal) — era o motivo
+  // de "não conectar com ninguém": modal existia, mas o seletor antigo não achava.
   async function enviarSemNota() {
-    const modal = await OA.waitFor(".artdeco-modal", { timeout: 6000 });
+    let modal = null;
+    for (let i = 0; i < 16 && !modal; i++) { // até ~8s: overlay do convite demora a montar
+      if (!(await running())) return false;
+      await OA.sleep(500);
+      modal = dialogoAberto();
+    }
     if (!modal) return false;
     const btn = [...modal.querySelectorAll("button")].find((b) => OA.isVisible(b) &&
       /enviar sem nota|send without a note/i.test(((b.innerText || "") + " " + (b.getAttribute("aria-label") || ""))));

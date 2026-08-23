@@ -55,7 +55,7 @@ export const DEFAULT_CONFIG = {
     gupy: { enabled: false, query: "desenvolvedor", limiarMatch: 0, tetoDia: 50 },
     geekhunter: { enabled: false, query: "desenvolvedor", limiarMatch: 0, tetoDia: 50 },
     senior: { enabled: false, query: "desenvolvedor", limiarMatch: 0, tetoDia: 50 },
-    solides: { enabled: false, query: "desenvolvedor", limiarMatch: 0, tetoDia: 50 },
+    solides: { enabled: true, query: "desenvolvedor", limiarMatch: 0, tetoDia: 50 },
     // Modo REDE: conecta com recrutadores na busca de pessoas do LinkedIn (sem IA,
     // só pra aumentar a rede). "query" = termo da busca (ex.: "tech recruiter").
     // tetoDia 0 = sem limite próprio (convites não contam como candidatura).

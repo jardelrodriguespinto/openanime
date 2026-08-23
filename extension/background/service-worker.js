@@ -12,9 +12,10 @@ const PLATAFORMAS = {
   // searchTerm é o formato oficial da busca do GeekHunter (schema.org SearchAction).
   geekhunter: { search: (q) => `https://www.geekhunter.com/pt/vagas?searchTerm=${encodeURIComponent(q)}` },
   senior: { search: (q) => `https://www.portaldetalentos.senior.com.br/search/vacancies?jobFunction=${encodeURIComponent(q)}` },
-  // /vagas/todos/<termo> NÃO existe mais (voltava "0 vagas") → abre a lista e o
-  // content script digita a query no próprio formulário de busca do portal.
-  solides: { search: () => `https://vagas.solides.com.br/vagas` },
+  // Busca DIRETA pelo termo na URL (pedido do usuário): /vagas/todos/<termo>?page=N —
+  // o content script coleta os cards daqui; se a URL voltar vazia, ele cai no fallback
+  // de digitar a query no form de busca do portal.
+  solides: { search: (q) => `https://vagas.solides.com.br/vagas/todos/${encodeURIComponent(q || "desenvolvedor")}` },
   // Modo REDE: busca de PESSOAS (recrutadores) no LinkedIn — conecta com todos os
   // cards que tiverem "Conectar", página por página, sem IA. Termo vem da dashboard.
   rede: { search: (q) => `https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(q || "tech recruiter")}&origin=CLUSTER_EXPANSION` },
